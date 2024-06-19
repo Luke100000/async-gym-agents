@@ -7,6 +7,7 @@ from torchinfo import summary
 from async_gym_agents.agents.async_dqn import AsyncDQN
 from async_gym_agents.envs.multi_env import IndexableMultiEnv
 from async_gym_agents.envs.slow_cartpole import SlowCartPoleEnv
+from async_gym_agents.envs.sync_multi_env import SyncIndexableMultiEnv
 from async_gym_agents.envs.threaded_env import ThreadedVecEnv
 
 
@@ -16,10 +17,12 @@ class Mode(Enum):
     SEQUENTIAL = (2,)
 
 
-def main(mode: Mode = Mode.ASYNC, threads: int = 8):
-    env = (ThreadedVecEnv if mode == Mode.PARALLEL else IndexableMultiEnv)(
-        [lambda: SlowCartPoleEnv() for _ in range(threads)]
-    )
+def main(mode: Mode = Mode.ASYNC, threads: int = 8, sync: bool = True):
+    env = (
+        ThreadedVecEnv
+        if mode == Mode.PARALLEL
+        else (SyncIndexableMultiEnv if sync else IndexableMultiEnv)
+    )([lambda: SlowCartPoleEnv() for _ in range(threads)])
 
     model = (AsyncDQN if mode == Mode.ASYNC else DQN)(
         "MlpPolicy",

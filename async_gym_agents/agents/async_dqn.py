@@ -19,6 +19,7 @@ from stable_baselines3.common.utils import should_collect_more_steps
 from stable_baselines3.common.vec_env import VecEnv
 
 from async_gym_agents.envs.multi_env import IndexableMultiEnv
+from async_gym_agents.envs.sync_multi_env import SyncIndexableMultiEnv
 
 
 @dataclass
@@ -289,7 +290,11 @@ class AsyncDQN(DQN):
         assert (
             train_freq.unit == TrainFrequencyUnit.STEP
         ), "You must use only one env when doing episodic training."
-        assert isinstance(env, IndexableMultiEnv), "You must pass a ThreadedVecEnv"
+
+        # todo common super
+        assert isinstance(env, IndexableMultiEnv) or isinstance(
+            env, SyncIndexableMultiEnv
+        ), "You must pass a IndexableMultiEnv"
 
         if self.use_sde:
             raise NotImplementedError("Not supported yet.")
