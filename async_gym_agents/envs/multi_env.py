@@ -24,6 +24,8 @@ class IndexableMultiEnv(VecEnv):
     # TODO should threads be used here at all?
     Since its indented
     to be used in a threaded agent anyways the asynchronicity is not used anyways
+
+    # TODO allow for batches when used for classic agents (similar to process env work)
     """
 
     def __init__(self, env_fns: List[Callable[[], Env]]):

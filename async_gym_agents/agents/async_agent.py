@@ -6,16 +6,15 @@ from typing import Optional, Union, Dict, List, Any, Tuple
 
 import numpy as np
 from gymnasium import spaces
-from stable_baselines3 import DQN
 from stable_baselines3.common.buffers import ReplayBuffer
 from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.noise import ActionNoise
+from stable_baselines3.common.off_policy_algorithm import OffPolicyAlgorithm
 from stable_baselines3.common.type_aliases import (
     RolloutReturn,
     TrainFreq,
     TrainFrequencyUnit,
 )
-from stable_baselines3.common.utils import should_collect_more_steps
 from stable_baselines3.common.vec_env import VecEnv
 
 from async_gym_agents.envs.multi_env import IndexableMultiEnv
@@ -24,6 +23,11 @@ from async_gym_agents.envs.sync_multi_env import SyncIndexableMultiEnv
 
 @dataclass
 class SharedState:
+    """
+    State shared between worker, reset per collection step
+
+    """
+
     remaining_steps: int = 0
     sleeping_threads: int = 0
 
@@ -36,28 +40,31 @@ class SharedState:
     learning_starts: int = 0
     log_interval: Optional[int] = None
 
-    def should_collect_more_steps(
-        self, train_freq: Optional[TrainFrequencyUnit]
-    ) -> bool:
-        return should_collect_more_steps(
-            train_freq, self.num_collected_steps, self.num_collected_episodes
-        )
 
-
-class AsyncDQN(DQN):
+class OffPolicyAlgorithmInjector(OffPolicyAlgorithm):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
 
+        # Synchronization points
         self.thread_condition = threading.Condition()
         self.main_condition = threading.Condition()
 
-        self.env: IndexableMultiEnv = self.env
+        # Shared progress between workers
         self.shared_state = SharedState()
-        assert self.n_envs == 1
 
-        # The env itself already uses threads but we can't really reuse them
+        # Initialize lazy to support providing envs later on
+        self.initialized = False
+
+    def get_indexable_env(self) -> IndexableMultiEnv:
+        # TODO super or remove async version
+        assert isinstance(self.env, IndexableMultiEnv) or isinstance(
+            self.env, SyncIndexableMultiEnv
+        ), "You must pass a IndexableMultiEnv"
+        return self.env
+
+    def initialize_threads(self):
         threads = []
-        for index in range(self.env.real_n_envs):
+        for index in range(self.get_indexable_env().real_n_envs):
             thread = Thread(
                 target=self._collector_loop,
                 args=(index,),
@@ -171,7 +178,8 @@ class AsyncDQN(DQN):
         self,
         index: int,
     ):
-        last_obs = self.env.reset(index=index)
+        env = self.get_indexable_env()
+        last_obs = env.reset(index=index)
 
         while True:
             # Select action randomly or according to policy
@@ -182,7 +190,7 @@ class AsyncDQN(DQN):
             )
 
             # Rescale and perform action
-            new_obs, rewards, dones, infos = self.env.step(actions, index=index)
+            new_obs, rewards, dones, infos = env.step(actions, index=index)
 
             with self.thread_condition:
                 # Wait for next loop
@@ -240,9 +248,7 @@ class AsyncDQN(DQN):
                         self._episode_num += 1
 
                         if self.shared_state.action_noise is not None:
-                            kwargs = (
-                                dict(indices=[idx]) if self.env.num_envs > 1 else {}
-                            )
+                            kwargs = dict(indices=[idx]) if env.num_envs > 1 else {}
                             # noinspection PyArgumentList
                             self.shared_state.action_noise.reset(**kwargs)
 
@@ -291,17 +297,16 @@ class AsyncDQN(DQN):
             train_freq.unit == TrainFrequencyUnit.STEP
         ), "You must use only one env when doing episodic training."
 
-        # todo common super
-        assert isinstance(env, IndexableMultiEnv) or isinstance(
-            env, SyncIndexableMultiEnv
-        ), "You must pass a IndexableMultiEnv"
-
         if self.use_sde:
             raise NotImplementedError("Not supported yet.")
 
         callback.on_rollout_start()
 
         ####################
+
+        if not self.initialized:
+            self.initialize_threads()
+            self.initialized = True
 
         assert train_freq.unit == TrainFrequencyUnit.STEP
         self.shared_state.remaining_steps = train_freq.frequency
@@ -332,3 +337,12 @@ class AsyncDQN(DQN):
             self.shared_state.num_collected_episodes,
             True,
         )
+
+
+def get_injected_agent(clazz: OffPolicyAlgorithm):
+    # TODO also support on policy
+
+    class AsyncAgent(OffPolicyAlgorithmInjector, clazz):
+        pass
+
+    return AsyncAgent
