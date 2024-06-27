@@ -10,7 +10,6 @@ from torchinfo import summary
 from async_gym_agents.agents.async_agent import get_injected_agent
 from async_gym_agents.envs.multi_env import IndexableMultiEnv
 from async_gym_agents.envs.slow_cartpole import SlowCartPoleEnv
-from async_gym_agents.envs.sync_multi_env import SyncIndexableMultiEnv
 from async_gym_agents.envs.threaded_env import ThreadedVecEnv
 
 
@@ -27,14 +26,11 @@ def get_env():
 def main(
     mode: Mode = Mode.ASYNC,
     threads: int = 8,
-    sync: bool = True,
     agent: OffPolicyAlgorithm = DQN,
 ):
-    env = (
-        ThreadedVecEnv
-        if mode == Mode.PARALLEL
-        else (SyncIndexableMultiEnv if sync else IndexableMultiEnv)
-    )([lambda: get_env() for _ in range(threads)])
+    env = (ThreadedVecEnv if mode == Mode.PARALLEL else IndexableMultiEnv)(
+        [lambda: get_env() for _ in range(threads)]
+    )
 
     model = (get_injected_agent(agent) if mode == Mode.ASYNC else agent)(
         "MlpPolicy",

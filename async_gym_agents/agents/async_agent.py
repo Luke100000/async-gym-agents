@@ -18,7 +18,6 @@ from stable_baselines3.common.type_aliases import (
 from stable_baselines3.common.vec_env import VecEnv
 
 from async_gym_agents.envs.multi_env import IndexableMultiEnv
-from async_gym_agents.envs.sync_multi_env import SyncIndexableMultiEnv
 
 
 @dataclass
@@ -56,9 +55,8 @@ class OffPolicyAlgorithmInjector(OffPolicyAlgorithm):
         self.initialized = False
 
     def get_indexable_env(self) -> IndexableMultiEnv:
-        # TODO super or remove async version
-        assert isinstance(self.env, IndexableMultiEnv) or isinstance(
-            self.env, SyncIndexableMultiEnv
+        assert isinstance(
+            self.env, IndexableMultiEnv
         ), "You must pass a IndexableMultiEnv"
         return self.env
 
