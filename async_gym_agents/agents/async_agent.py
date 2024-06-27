@@ -55,12 +55,15 @@ class OffPolicyAlgorithmInjector(OffPolicyAlgorithm):
         self.initialized = False
 
     def get_indexable_env(self) -> IndexableMultiEnv:
+        """
+        Asserts whether a correct environment is supplied
+        """
         assert isinstance(
             self.env, IndexableMultiEnv
         ), "You must pass a IndexableMultiEnv"
         return self.env
 
-    def initialize_threads(self):
+    def _initialize_threads(self):
         threads = []
         for index in range(self.get_indexable_env().real_n_envs):
             thread = Thread(
@@ -300,10 +303,12 @@ class OffPolicyAlgorithmInjector(OffPolicyAlgorithm):
 
         callback.on_rollout_start()
 
-        ####################
+        ###########################
+        # Custom code starts here #
+        ###########################
 
         if not self.initialized:
-            self.initialize_threads()
+            self._initialize_threads()
             self.initialized = True
 
         assert train_freq.unit == TrainFrequencyUnit.STEP

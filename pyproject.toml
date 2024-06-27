@@ -1,12 +1,12 @@
 [tool.poetry]
 name = "async-gym-agents"
 version = "0.1.0"
-description = ""
+description = "Async agents for Stable Baselines 3"
 authors = ["Jonas Peche <j_peche@wargaming.net>"]
 readme = "README.md"
 
 [tool.poetry.dependencies]
-python = "^3.8"
+python = ">=3.8"
 stable-baselines3 = {extras = ["extra"], version = "^2.3.2"}
 torchinfo = "^1.8.0"
 
