@@ -1,8 +1,3 @@
-# Async Gym Agents
-
-Wrapper environments and agent injectors to allow for drop-in async training.
-
-```py
 import gymnasium as gym
 from stable_baselines3 import TD3
 
@@ -16,8 +11,8 @@ env = IndexableMultiEnv([lambda: gym.make("Pendulum-v1") for i in range(8)])
 model = get_injected_agent(TD3)("MlpPolicy", env)
 
 # Train the model
-model.learn(total_timesteps=10)
+model.learn(total_timesteps=1000)
 
-# Shut down workers
 model.shutdown()
-```
+
+print("Done")

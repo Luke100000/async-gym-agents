@@ -50,6 +50,7 @@ class IndexableMultiEnv(VecEnv):
     def env_method(
         self, method_name: str, *method_args, index: int = 0, **method_kwargs
     ) -> List[Any]:
+        # todo conflicts with supers indices
         return self.envs[index].env_method(*method_args, *method_kwargs)
 
     def env_is_wrapped(

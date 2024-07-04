@@ -1,6 +1,8 @@
+import queue
 import threading
 from copy import deepcopy
 from dataclasses import dataclass
+from queue import Queue
 from threading import Thread
 from typing import Optional, Union, Dict, List, Any, Tuple
 
@@ -13,46 +15,37 @@ from stable_baselines3.common.off_policy_algorithm import OffPolicyAlgorithm
 from stable_baselines3.common.type_aliases import (
     RolloutReturn,
     TrainFreq,
-    TrainFrequencyUnit,
 )
+from stable_baselines3.common.utils import should_collect_more_steps
 from stable_baselines3.common.vec_env import VecEnv
 
 from async_gym_agents.envs.multi_env import IndexableMultiEnv
 
 
 @dataclass
-class SharedState:
-    """
-    State shared between worker, reset per collection step
-
-    """
-
-    remaining_steps: int = 0
-    sleeping_threads: int = 0
-
-    num_collected_steps: int = 0
-    num_collected_episodes: int = 0
-
-    callback: BaseCallback = None
-    replay_buffer: ReplayBuffer = None
-    action_noise: Optional[ActionNoise] = None
-    learning_starts: int = 0
-    log_interval: Optional[int] = None
+class Transition:
+    buffer_actions: list[any]
+    last_obs: list[any]
+    new_obs: list[any]
+    rewards: list[float]
+    dones: list[bool]
+    infos: list[Any]
 
 
 class OffPolicyAlgorithmInjector(OffPolicyAlgorithm):
-    def __init__(self, *args, **kwargs) -> None:
+    def __init__(self, *args, max_steps_in_buffer: int = 8, **kwargs) -> None:
         super().__init__(*args, **kwargs)
 
-        # Synchronization points
-        self.thread_condition = threading.Condition()
-        self.main_condition = threading.Condition()
+        self._buffer_utilization = 0.0
+        self._buffer_emptiness = 0.0
+        self._buffer_stat_count = 0
 
-        # Shared progress between workers
-        self.shared_state = SharedState()
-
-        # Initialize lazy to support providing envs later on
+        self.running = True
         self.initialized = False
+
+        # The larger the queue, the less wait times, but the more outdated the policies training data is
+        self.queue = Queue(max_steps_in_buffer)
+        self.lock = threading.Lock()
 
     def get_indexable_env(self) -> IndexableMultiEnv:
         """
@@ -64,14 +57,14 @@ class OffPolicyAlgorithmInjector(OffPolicyAlgorithm):
         return self.env
 
     def _initialize_threads(self):
-        threads = []
+        self.threads = []
         for index in range(self.get_indexable_env().real_n_envs):
             thread = Thread(
                 target=self._collector_loop,
                 args=(index,),
             )
-            threads.append(thread)
-            threads[index].start()
+            self.threads.append(thread)
+            self.threads[index].start()
 
     def _excluded_save_params(self) -> List[str]:
         return [
@@ -175,54 +168,29 @@ class OffPolicyAlgorithmInjector(OffPolicyAlgorithm):
             action = buffer_action
         return action, buffer_action
 
-    def _collector_loop(
-        self,
-        index: int,
-    ):
+    def _episode_generator(self, index: int) -> list[Transition]:
+        """
+        Continuously plays the game and returns episodes of Transitions
+        """
         env = self.get_indexable_env()
         last_obs = env.reset(index=index)
 
-        while True:
+        episode = []
+
+        while self.running:
             # Select action randomly or according to policy
             actions, buffer_actions = self._custom_sample_action(
-                self.shared_state.learning_starts,
+                self.learning_starts,
                 last_obs,
-                self.shared_state.action_noise,
+                self.action_noise,
             )
 
             # Rescale and perform action
             new_obs, rewards, dones, infos = env.step(actions, index=index)
 
-            with self.thread_condition:
-                # Wait for next loop
-                while self.shared_state.remaining_steps <= 0:
-                    with self.main_condition:
-                        self.main_condition.notify()
-                    self.shared_state.sleeping_threads += 1
-                    self.thread_condition.wait()
-                self.shared_state.sleeping_threads -= 1
-                self.shared_state.remaining_steps -= 1
-
-                self.num_timesteps += 1
-                self.shared_state.num_collected_steps += 1
-
-                # Give access to local variables
-                self.shared_state.callback.update_locals(locals())
-
-                # Only stop training if return value is False, not when it is None.
-                if not self.shared_state.callback.on_step():
-                    return RolloutReturn(
-                        self.shared_state.num_collected_steps,
-                        self.shared_state.num_collected_episodes,
-                        continue_training=False,
-                    )
-
-                # Retrieve reward and episode length if using Monitor wrapper
-                self._update_info_buffer(infos, dones)
-
-                # Store data in replay buffer (normalized action and unnormalized observation)
-                self._custom_store_transition(
-                    self.shared_state.replay_buffer,
+            # Store transition
+            episode.append(
+                Transition(
                     buffer_actions,
                     last_obs,
                     new_obs,
@@ -230,35 +198,30 @@ class OffPolicyAlgorithmInjector(OffPolicyAlgorithm):
                     dones,
                     infos,
                 )
-                last_obs = new_obs
+            )
+            last_obs = new_obs
 
-                self._update_current_progress_remaining(
-                    self.num_timesteps, self._total_timesteps
-                )
+            # Start new episode
+            if any(dones):
+                yield episode
+                episode = []
 
-                # For DQN, check if the target network should be updated
-                # and update the exploration schedule
-                # For SAC/TD3, the update is dones as the same time as the gradient update
-                # see https://github.com/hill-a/stable-baselines/issues/900
-                self._on_step()
-
-                for idx, done in enumerate(dones):
-                    if done:
-                        # Update stats
-                        self.shared_state.num_collected_episodes += 1
-                        self._episode_num += 1
-
-                        if self.shared_state.action_noise is not None:
-                            kwargs = dict(indices=[idx]) if env.num_envs > 1 else {}
-                            # noinspection PyArgumentList
-                            self.shared_state.action_noise.reset(**kwargs)
-
-                        # Log training infos
-                        if (
-                            self.shared_state.log_interval is not None
-                            and self._episode_num % self.shared_state.log_interval == 0
-                        ):
-                            self._dump_logs()
+    def _collector_loop(
+        self,
+        index: int,
+    ):
+        """
+        Batch-inserts transitions whenever a episode is done.
+        """
+        for episode in self._episode_generator(index):
+            with self.lock:
+                for transition in episode:
+                    while self.running:
+                        try:
+                            self.queue.put(transition, block=True, timeout=1)
+                            break
+                        except queue.Full:
+                            pass
 
     def collect_rollouts(
         self,
@@ -292,54 +255,121 @@ class OffPolicyAlgorithmInjector(OffPolicyAlgorithm):
         # Switch to eval mode (this affects batch norm / dropout)
         self.policy.set_training_mode(False)
 
+        num_collected_steps, num_collected_episodes = 0, 0
+
+        self.learning_starts = learning_starts
+        self.action_noise = action_noise
+
         assert isinstance(env, VecEnv), "You must pass a VecEnv"
         assert train_freq.frequency > 0, "Should at least collect one step or episode."
-        assert (
-            train_freq.unit == TrainFrequencyUnit.STEP
-        ), "You must use only one env when doing episodic training."
 
         if self.use_sde:
-            raise NotImplementedError("Not supported yet.")
-
-        callback.on_rollout_start()
-
-        ###########################
-        # Custom code starts here #
-        ###########################
+            self.actor.reset_noise(1)
 
         if not self.initialized:
             self._initialize_threads()
             self.initialized = True
 
-        assert train_freq.unit == TrainFrequencyUnit.STEP
-        self.shared_state.remaining_steps = train_freq.frequency
+        callback.on_rollout_start()
+        continue_training = True
+        while should_collect_more_steps(
+            train_freq, num_collected_steps, num_collected_episodes
+        ):
+            if (
+                self.use_sde
+                and self.sde_sample_freq > 0
+                and num_collected_steps % self.sde_sample_freq == 0
+            ):
+                # Sample a new noise matrix
+                self.actor.reset_noise(1)
 
-        self.shared_state.num_collected_steps = 0
-        self.shared_state.num_collected_episodes = 0
+            # Fetch transition (Also the only significant change to super)
+            self._buffer_utilization += self.queue.qsize()
+            self._buffer_emptiness += 1 if self.queue.empty() else 0
+            self._buffer_stat_count += 1
+            transition: Transition = self.queue.get()
 
-        self.shared_state.callback = callback
-        self.shared_state.replay_buffer = replay_buffer
-        self.shared_state.action_noise = action_noise
-        self.shared_state.learning_starts = learning_starts
-        self.shared_state.log_interval = log_interval
+            # Update stats
+            self.num_timesteps += 1
+            num_collected_steps += 1
 
-        # Release threads
-        with self.thread_condition:
-            self.thread_condition.notify_all()
+            # Give access to local variables
+            callback.update_locals(locals())
 
-        # Wait until first thread finishes
-        with self.main_condition:
-            self.main_condition.wait()
+            # Only stop training if return value is False, not when it is None.
+            if not callback.on_step():
+                return RolloutReturn(
+                    num_collected_steps,
+                    num_collected_episodes,
+                    continue_training=False,
+                )
 
-        ####################
+            # Retrieve reward and episode length if using Monitor wrapper
+            self._update_info_buffer(transition.infos, transition.dones)
+
+            # Store data in replay buffer (normalized action and unnormalized observation)
+            self._custom_store_transition(
+                replay_buffer,
+                transition.buffer_actions,
+                transition.last_obs,
+                transition.new_obs,
+                transition.rewards,
+                transition.dones,
+                transition.infos,
+            )
+
+            self._update_current_progress_remaining(
+                self.num_timesteps, self._total_timesteps
+            )
+
+            # For DQN, check if the target network should be updated
+            # and update the exploration schedule
+            # For SAC/TD3, the update is dones as the same time as the gradient update
+            # see https://github.com/hill-a/stable-baselines/issues/900
+            self._on_step()
+
+            for idx, done in enumerate(transition.dones):
+                if done:
+                    # Update stats
+                    num_collected_episodes += 1
+                    self._episode_num += 1
+
+                    if action_noise is not None:
+                        action_noise.reset()
+
+                    # Log training infos
+                    if (
+                        log_interval is not None
+                        and self._episode_num % log_interval == 0
+                    ):
+                        self._dump_logs()
 
         callback.on_rollout_end()
 
         return RolloutReturn(
-            self.shared_state.num_collected_steps,
-            self.shared_state.num_collected_episodes,
-            True,
+            num_collected_steps,
+            num_collected_episodes,
+            continue_training,
         )
+
+    def shutdown(self):
+        """
+        Shuts down the workers.
+        Shutting down is required to fully release environments.
+        Subsequent calls to e.g., train will restart the workers.
+        """
+        self.running = False
+        for thread in self.threads:
+            thread.join()
+        self.initialized = False
+
+    @property
+    def buffer_utilization(self) -> float:
+        return self._buffer_utilization / self._buffer_stat_count
+
+    @property
+    def buffer_emptyness(self) -> float:
+        return self._buffer_emptiness / self._buffer_stat_count
 
 
 def get_injected_agent(clazz: OffPolicyAlgorithm):
