@@ -4,7 +4,11 @@ from typing import List, Optional, Sequence, Any, Type, Callable
 import numpy as np
 from gymnasium import Env, Wrapper
 from stable_baselines3.common.vec_env import VecEnv, DummyVecEnv
-from stable_baselines3.common.vec_env.base_vec_env import VecEnvStepReturn, VecEnvObs
+from stable_baselines3.common.vec_env.base_vec_env import (
+    VecEnvStepReturn,
+    VecEnvObs,
+    VecEnvIndices,
+)
 
 
 class IndexableMultiEnv(VecEnv):
@@ -41,19 +45,41 @@ class IndexableMultiEnv(VecEnv):
     def get_images(self) -> Sequence[Optional[np.ndarray]]:
         raise NotImplementedError
 
-    def get_attr(self, attr_name: str, index: int = 0) -> List[Any]:
-        return self.envs[index].get_attr(attr_name)
+    def get_attr(self, attr_name: str, indices: VecEnvIndices = None) -> List[Any]:
+        return self.envs[self._get_index(indices)].get_attr(attr_name)
 
-    def set_attr(self, attr_name: str, value: Any, index: int = 0) -> None:
-        self.envs[index].set_attr(attr_name, value)
+    def set_attr(
+        self, attr_name: str, value: Any, indices: VecEnvIndices = None
+    ) -> None:
+        self.envs[self._get_index(indices)].set_attr(attr_name, value)
 
     def env_method(
-        self, method_name: str, *method_args, index: int = 0, **method_kwargs
+        self,
+        method_name: str,
+        *method_args,
+        indices: VecEnvIndices = None,
+        **method_kwargs,
     ) -> List[Any]:
-        # todo conflicts with supers indices
-        return self.envs[index].env_method(*method_args, *method_kwargs)
+        return self.envs[self._get_index(indices)].env_method(
+            *method_args, *method_kwargs
+        )
 
     def env_is_wrapped(
-        self, wrapper_class: Type[Wrapper], index: int = 0
+        self, wrapper_class: Type[Wrapper], indices: VecEnvIndices = None
     ) -> List[bool]:
-        return self.envs[index].env_is_wrapped(wrapper_class)
+        return self.envs[self._get_index(indices)].env_is_wrapped(wrapper_class)
+
+    def _get_index(self, indices: VecEnvIndices) -> int:
+        """
+        Convert a flexibly-typed reference to environment indices to an implied list of indices.
+
+        :param indices: refers to indices of envs.
+        :return: the implied list of indices.
+        """
+        if indices is None:
+            return 0
+        elif isinstance(indices, int):
+            return indices
+        raise ValueError(
+            f"IndexableMultiEnv only supports a scalar index, not {indices}."
+        )
