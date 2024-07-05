@@ -137,7 +137,8 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
 
         callback.on_rollout_start()
 
-        transition = None
+        new_obs = None
+        dones = None
         while n_steps < n_rollout_steps:
             if (
                 self.use_sde
@@ -152,6 +153,17 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
             transition: Transition = self.fetch_transition()
             self.policy_lock.acquire()
 
+            # Make locals available for callbacks
+            new_obs = transition.new_obs
+            self._last_obs = transition.last_obs
+            actions = transition.actions
+            rewards = transition.rewards
+            self._last_episode_starts = transition.last_dones
+            values = transition.values
+            log_probs = transition.log_probs
+            dones = transition.dones
+            infos = transition.infos
+
             self.num_timesteps += 1
 
             # Give access to local variables
@@ -159,42 +171,38 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
             if not callback.on_step():
                 return False
 
-            self._update_info_buffer(transition.infos, transition.dones)
+            self._update_info_buffer(infos, dones)
             n_steps += 1
 
             # Handle timeout by bootstrapping with value function
             # see GitHub issue #633
-            for idx, done in enumerate(transition.dones):
+            for idx, done in enumerate(dones):
                 if (
                     done
-                    and transition.infos[idx].get("terminal_observation") is not None
-                    and transition.infos[idx].get("TimeLimit.truncated", False)
+                    and infos[idx].get("terminal_observation") is not None
+                    and infos[idx].get("TimeLimit.truncated", False)
                 ):
                     terminal_obs = self.policy.obs_to_tensor(
-                        transition.infos[idx]["terminal_observation"]
+                        infos[idx]["terminal_observation"]
                     )[0]
                     with th.no_grad():
                         terminal_value = self.policy.predict_values(terminal_obs)[0]
-                    transition.rewards[idx] += self.gamma * terminal_value
+                    rewards[idx] += self.gamma * terminal_value
 
             rollout_buffer.add(
-                transition.last_obs,
-                transition.actions,
-                transition.rewards,
-                transition.last_dones,
-                transition.values,
-                transition.log_probs,
+                self._last_obs,
+                actions,
+                rewards,
+                self._last_episode_starts,
+                values,
+                log_probs,
             )
 
         with th.no_grad():
             # Compute value for the last timestep
-            values = self.policy.predict_values(
-                obs_as_tensor(transition.new_obs, self.device)
-            )
+            values = self.policy.predict_values(obs_as_tensor(new_obs, self.device))
 
-        rollout_buffer.compute_returns_and_advantage(
-            last_values=values, dones=transition.dones
-        )
+        rollout_buffer.compute_returns_and_advantage(last_values=values, dones=dones)
 
         callback.update_locals(locals())
 

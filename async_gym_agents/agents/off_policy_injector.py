@@ -225,6 +225,14 @@ class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithm):
             # Fetch transition (Also the only significant change to super)
             transition: Transition = self.fetch_transition()
 
+            # Make locals available for callbacks
+            buffer_actions = transition.buffer_actions
+            self._last_obs = transition.last_obs
+            new_obs = transition.new_obs
+            rewards = transition.rewards
+            dones = transition.dones
+            infos = transition.infos
+
             # Update stats
             self.num_timesteps += 1
             num_collected_steps += 1
@@ -241,17 +249,17 @@ class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithm):
                 )
 
             # Retrieve reward and episode length if using Monitor wrapper
-            self._update_info_buffer(transition.infos, transition.dones)
+            self._update_info_buffer(infos, dones)
 
             # Store data in replay buffer (normalized action and unnormalized observation)
             self._custom_store_transition(
                 replay_buffer,
-                transition.buffer_actions,
-                transition.last_obs,
-                transition.new_obs,
-                transition.rewards,
-                transition.dones,
-                transition.infos,
+                buffer_actions,
+                self._last_obs,
+                new_obs,
+                rewards,
+                dones,
+                infos,
             )
 
             self._update_current_progress_remaining(
@@ -264,7 +272,7 @@ class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithm):
             # see https://github.com/hill-a/stable-baselines/issues/900
             self._on_step()
 
-            for idx, done in enumerate(transition.dones):
+            for idx, done in enumerate(dones):
                 if done:
                     # Update stats
                     num_collected_episodes += 1

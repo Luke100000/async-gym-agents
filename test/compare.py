@@ -35,7 +35,7 @@ def evaluate(
 
     model = agent("MlpPolicy", env, learning_rate=3e-4)
 
-    model.learn(total_timesteps=10_000)
+    model.learn(total_timesteps=5_000)
 
     if mode == Mode.ASYNC:
         model.shutdown()
@@ -50,7 +50,7 @@ def evaluate(
 def benchmark(mode: Mode):
     t = time.time()
     evaluate(mode)
-    print(f"{mode.name.capitalize()}: {time.time() - t:.1f}s")
+    print(f"{mode.name.capitalize()}: {time.time() - t:.1f}s\n")
 
 
 if __name__ == "__main__":
