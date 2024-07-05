@@ -32,7 +32,6 @@ class IndexableMultiEnv(VecEnv):
         self.envs[index].step_async(actions)
 
     def step_wait(self, index: int = 0) -> VecEnvStepReturn:
-        # todo here fetch stuff like mask
         return self.envs[index].step_wait()
 
     def reset(self, index: int = 0) -> VecEnvObs:
