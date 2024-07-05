@@ -1,7 +1,7 @@
 import time
 from enum import Enum
 
-from stable_baselines3 import PPO
+from stable_baselines3 import PPO, DQN
 from stable_baselines3.common.base_class import BaseAlgorithm
 from stable_baselines3.common.evaluation import evaluate_policy
 from stable_baselines3.common.monitor import Monitor
@@ -19,7 +19,7 @@ class Mode(Enum):
 
 
 def get_env(slow: bool):
-    return Monitor(SlowCartPoleEnv(min_sleep=0, max_sleep=0.0 if slow else 0))
+    return Monitor(SlowCartPoleEnv(min_sleep=0, max_sleep=0.001 if slow else 0))
 
 
 def evaluate(

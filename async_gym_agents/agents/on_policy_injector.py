@@ -70,7 +70,7 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
                             actions, self.action_space.low, self.action_space.high
                         )
 
-            new_obs, rewards, dones, infos = env.step(clipped_actions)
+            new_obs, rewards, dones, infos = env.step(clipped_actions, index=index)
 
             if isinstance(self.action_space, spaces.Discrete):
                 # Reshape in case of discrete action
