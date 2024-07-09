@@ -1,7 +1,7 @@
 import threading
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, List
 
 import numpy as np
 import torch as th
@@ -36,6 +36,13 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
 
         self.policy_lock = threading.Lock()
         self.policy_lock.acquire()
+
+    def _excluded_save_params(self) -> List[str]:
+        return [
+            *super()._excluded_save_params(),
+            *super(AsyncAgentInjector, self)._excluded_save_params(),
+            "policy_lock",
+        ]
 
     def _episode_generator(self, index: int) -> list[Transition]:
         """

@@ -34,6 +34,12 @@ class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithm):
         super().__init__(max_steps_in_buffer)
         super(AsyncAgentInjector, self).__init__(*args, **kwargs)
 
+    def _excluded_save_params(self) -> List[str]:
+        return [
+            *super()._excluded_save_params(),
+            *super(AsyncAgentInjector, self)._excluded_save_params(),
+        ]
+
     def _store_transition(*args):
         raise NotImplementedError()
 

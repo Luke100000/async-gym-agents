@@ -1,6 +1,7 @@
 import queue
 import threading
 from queue import Queue
+from typing import List
 
 from async_gym_agents.envs.multi_env import IndexableMultiEnv
 
@@ -14,10 +15,18 @@ class AsyncAgentInjector:
 
         self.running = True
         self.initialized = False
+        self.threads = []
 
         # The larger the queue, the less wait times, but the more outdated the policies training data is
         self.queue = Queue(max_steps_in_buffer)
         self.lock = threading.Lock()
+
+    def _excluded_save_params(self) -> List[str]:
+        return [
+            "threads",
+            "queue",
+            "lock",
+        ]
 
     # noinspection PyUnresolvedReferences
     def get_indexable_env(self) -> IndexableMultiEnv:
