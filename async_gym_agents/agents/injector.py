@@ -7,7 +7,6 @@ from async_gym_agents.envs.multi_env import IndexableMultiEnv
 
 
 class AsyncAgentInjector:
-
     def __init__(self, max_steps_in_buffer: int = 8):
         self._buffer_utilization = 0.0
         self._buffer_emptiness = 0.0

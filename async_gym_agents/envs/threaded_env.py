@@ -1,14 +1,14 @@
 import threading
 from queue import Queue
-from typing import List, Optional, Sequence, Any, Type, Dict, Callable
+from typing import Any, Callable, Dict, List, Optional, Sequence, Type
 
 import numpy as np
 from gymnasium import Env, Wrapper
 from stable_baselines3.common.vec_env import VecEnv
 from stable_baselines3.common.vec_env.base_vec_env import (
-    VecEnvStepReturn,
-    VecEnvObs,
     VecEnvIndices,
+    VecEnvObs,
+    VecEnvStepReturn,
 )
 
 # noinspection PyProtectedMember
@@ -99,7 +99,12 @@ class ThreadedVecEnv(VecEnv):
         results = [queue.get() for queue in self.result_queues]
         self.waiting = False
         obs, rewards, dones, infos, self.reset_infos = zip(*results)  # type: ignore[assignment]
-        return _flatten_obs(obs, self.observation_space), np.stack(rewards), np.stack(dones), infos  # type: ignore[return-value]
+        return (
+            _flatten_obs(obs, self.observation_space),
+            np.stack(rewards),
+            np.stack(dones),
+            infos,
+        )  # type: ignore[return-value]
 
     def reset(
         self, *, seed: int | None = None, options: dict[str, Any] | None = None

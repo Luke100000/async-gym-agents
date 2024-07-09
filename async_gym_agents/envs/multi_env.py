@@ -1,13 +1,13 @@
 from collections import defaultdict
-from typing import List, Optional, Sequence, Any, Type, Callable
+from typing import Any, Callable, List, Optional, Sequence, Type
 
 import numpy as np
 from gymnasium import Env, Wrapper
-from stable_baselines3.common.vec_env import VecEnv, DummyVecEnv
+from stable_baselines3.common.vec_env import DummyVecEnv, VecEnv
 from stable_baselines3.common.vec_env.base_vec_env import (
-    VecEnvStepReturn,
-    VecEnvObs,
     VecEnvIndices,
+    VecEnvObs,
+    VecEnvStepReturn,
 )
 
 

@@ -1,6 +1,6 @@
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Optional, Union, Dict, List, Any, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 from gymnasium import spaces
@@ -8,10 +8,7 @@ from stable_baselines3.common.buffers import ReplayBuffer
 from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.noise import ActionNoise
 from stable_baselines3.common.off_policy_algorithm import OffPolicyAlgorithm
-from stable_baselines3.common.type_aliases import (
-    RolloutReturn,
-    TrainFreq,
-)
+from stable_baselines3.common.type_aliases import RolloutReturn, TrainFreq
 from stable_baselines3.common.utils import should_collect_more_steps
 from stable_baselines3.common.vec_env import VecEnv
 

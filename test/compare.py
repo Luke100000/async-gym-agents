@@ -1,7 +1,7 @@
 import time
 from enum import Enum
 
-from stable_baselines3 import PPO, DQN
+from stable_baselines3 import PPO
 from stable_baselines3.common.base_class import BaseAlgorithm
 from stable_baselines3.common.evaluation import evaluate_policy
 from stable_baselines3.common.monitor import Monitor
