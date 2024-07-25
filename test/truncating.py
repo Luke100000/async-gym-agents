@@ -1,4 +1,3 @@
-import numpy as np
 from stable_baselines3 import PPO
 from stable_baselines3.common.base_class import BaseAlgorithm
 from stable_baselines3.common.callbacks import EvalCallback
@@ -8,16 +7,13 @@ from stable_baselines3.common.monitor import Monitor
 from async_gym_agents.agents.async_agent import get_injected_agent
 from async_gym_agents.envs.buggy_lunar_lander import BuggyLunarLander
 from async_gym_agents.envs.multi_env import IndexableMultiEnv
-from async_gym_agents.envs.truncation_counter_wrapper import TruncationCounterWrapper
 
 
 def get_env(buggy: bool):
     return Monitor(
-        TruncationCounterWrapper(
-            BuggyLunarLander(
-                crash_probability=0.001 if buggy else 0,
-                time_limit=1000,
-            )
+        BuggyLunarLander(
+            crash_probability=0.001 if buggy else 0,
+            time_limit=1000,
         )
     )
 
@@ -47,8 +43,7 @@ def evaluate(
 
     model.shutdown()
 
-    factors = [e.envs[0].get_truncation_factor() for e in env.envs]
-    print(f"Truncated episodes: {np.mean(factors) * 100}%")
+    print(f"Truncated episodes: {model.truncated_episodes_fraction * 100}%")
 
     mean_reward, std_reward = evaluate_policy(model, eval_env, n_eval_episodes=1000)
     print(f"Mean reward: {mean_reward}, Std reward: {std_reward}")
