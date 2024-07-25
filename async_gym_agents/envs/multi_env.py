@@ -34,7 +34,7 @@ class IndexableMultiEnv(VecEnv):
     def step_wait(self, index: int = 0) -> VecEnvStepReturn:
         return self.envs[index].step_wait()
 
-    def reset(self, index: int = 0) -> VecEnvObs:
+    def reset(self, index: int = 0, **kwargs) -> VecEnvObs:
         return self.envs[index].reset()
 
     def close(self) -> None:

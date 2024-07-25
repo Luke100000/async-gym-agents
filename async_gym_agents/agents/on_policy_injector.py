@@ -1,4 +1,3 @@
-import threading
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, List
@@ -34,14 +33,10 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
         super().__init__(max_steps_in_buffer)
         super(AsyncAgentInjector, self).__init__(*args, **kwargs)
 
-        self.policy_lock = threading.Lock()
-        self.policy_lock.acquire()
-
     def _excluded_save_params(self) -> List[str]:
         return [
             *super()._excluded_save_params(),
             *super(AsyncAgentInjector, self)._excluded_save_params(),
-            "policy_lock",
         ]
 
     def _episode_generator(self, index: int) -> list[Transition]:
@@ -216,8 +211,3 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
         callback.on_rollout_end()
 
         return True
-
-    def shutdown(self):
-        self.policy_lock.release()
-        super().shutdown()
-        self.policy_lock.acquire()

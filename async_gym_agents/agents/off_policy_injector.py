@@ -137,12 +137,13 @@ class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithm):
         episode = []
 
         while self.running:
-            # Select action randomly or according to policy
-            actions, buffer_actions = self._custom_sample_action(
-                self.learning_starts,
-                last_obs,
-                self.action_noise,
-            )
+            with self.policy_lock:
+                # Select action randomly or according to policy
+                actions, buffer_actions = self._custom_sample_action(
+                    self.learning_starts,
+                    last_obs,
+                    self.action_noise,
+                )
 
             # Rescale and perform action
             new_obs, rewards, dones, infos = env.step(actions, index=index)
@@ -226,7 +227,9 @@ class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithm):
                 self.actor.reset_noise(1)
 
             # Fetch transition (Also the only significant change to super)
+            self.policy_lock.release()
             transition: Transition = self.fetch_transition()
+            self.policy_lock.acquire()
 
             # Make locals available for callbacks
             buffer_actions = transition.buffer_actions
