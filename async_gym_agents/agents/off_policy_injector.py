@@ -31,6 +31,10 @@ class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithm):
         super().__init__(max_steps_in_buffer)
         super(AsyncAgentInjector, self).__init__(*args, **kwargs)
 
+    def train(self, *args, **kwargs) -> None:
+        with self.policy_lock:
+            super().train(*args, **kwargs)
+
     def _excluded_save_params(self) -> List[str]:
         return [
             *super()._excluded_save_params(),
@@ -227,9 +231,7 @@ class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithm):
                 self.actor.reset_noise(1)
 
             # Fetch transition (Also the only significant change to super)
-            self.policy_lock.release()
             transition: Transition = self.fetch_transition()
-            self.policy_lock.acquire()
 
             # Make locals available for callbacks
             buffer_actions = transition.buffer_actions

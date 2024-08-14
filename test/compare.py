@@ -19,7 +19,7 @@ class Mode(Enum):
 
 
 def get_env(slow: bool):
-    return Monitor(SlowCartPoleEnv(min_sleep=0, max_sleep=0.001 if slow else 0))
+    return Monitor(SlowCartPoleEnv(min_sleep=0, max_sleep=0.1 if slow else 0))
 
 
 def evaluate(
@@ -35,7 +35,7 @@ def evaluate(
 
     model = agent("MlpPolicy", env, learning_rate=3e-4)
 
-    model.learn(total_timesteps=5_000)
+    model.learn(total_timesteps=1_000)
 
     if mode == Mode.ASYNC:
         model.shutdown()

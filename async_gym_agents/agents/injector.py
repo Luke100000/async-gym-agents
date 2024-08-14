@@ -26,7 +26,6 @@ class AsyncAgentInjector:
 
         # The policy itself is rarely thread-safe
         self.policy_lock = threading.Lock()
-        self.policy_lock.acquire()
 
     def _excluded_save_params(self) -> List[str]:
         return [
@@ -120,9 +119,7 @@ class AsyncAgentInjector:
         Shutting down is required to fully release environments.
         Subsequent calls to e.g., train will restart the workers.
         """
-        self.policy_lock.release()
         self.running = False
         for thread in self.threads:
             thread.join()
         self.initialized = False
-        self.policy_lock.acquire()
