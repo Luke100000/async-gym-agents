@@ -1,9 +1,9 @@
 import threading
 from queue import Queue
-from typing import Any, Callable, Dict, List, Optional, Sequence, Type
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Type, Union
 
 import numpy as np
-from gymnasium import Env, Wrapper
+from gymnasium import Env, Wrapper, spaces
 from stable_baselines3.common.vec_env import VecEnv
 from stable_baselines3.common.vec_env.base_vec_env import (
     VecEnvIndices,
@@ -14,8 +14,27 @@ from stable_baselines3.common.vec_env.base_vec_env import (
 # noinspection PyProtectedMember
 from stable_baselines3.common.vec_env.patch_gym import _patch_env
 
-# noinspection PyProtectedMember
-from stable_baselines3.common.vec_env.subproc_vec_env import _flatten_obs
+
+def _stack_observations(
+    obs: Union[List[VecEnvObs], Tuple[VecEnvObs]], space: spaces.Space
+) -> VecEnvObs:
+    """
+    Stack dict or tuple observations.
+    """
+    assert len(obs) > 0, "Observations list is empty!"
+
+    if isinstance(space, spaces.Dict):
+        return {
+            key: np.stack([single_obs[key] for single_obs in obs])
+            for key in space.spaces.keys()
+        }
+    elif isinstance(space, spaces.Tuple):
+        obs_len = len(space.spaces)
+        return tuple(
+            np.stack([single_obs[i] for single_obs in obs]) for i in range(obs_len)
+        )
+    else:
+        return np.stack(obs)
 
 
 def _worker(
@@ -100,7 +119,7 @@ class ThreadedVecEnv(VecEnv):
         self.waiting = False
         obs, rewards, dones, infos, self.reset_infos = zip(*results)  # type: ignore[assignment]
         return (
-            _flatten_obs(obs, self.observation_space),
+            _stack_observations(obs, self.observation_space),
             np.stack(rewards),
             np.stack(dones),
             infos,
@@ -116,7 +135,7 @@ class ThreadedVecEnv(VecEnv):
         # Seeds and options are only used once
         self._reset_seeds()
         self._reset_options()
-        return _flatten_obs(obs, self.observation_space)  # , self.reset_infos
+        return _stack_observations(obs, self.observation_space)  # , self.reset_infos
 
     def close(self) -> None:
         if self.closed:

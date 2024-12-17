@@ -21,7 +21,7 @@ def test_on_policy():
 def test_off_policy():
     # Create env with 8 parallel envs
     env = IndexableMultiEnv(
-        [lambda: gym.make("LunarLanderContinuous-v2") for _ in range(8)]
+        [lambda: gym.make("LunarLanderContinuous-v3") for _ in range(8)]
     )
 
     # Create the model, injected with async capabilities
