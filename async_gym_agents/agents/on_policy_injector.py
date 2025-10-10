@@ -34,8 +34,13 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
         super(AsyncAgentInjector, self).__init__(*args, **kwargs)
 
     def train(self, *args, **kwargs) -> None:
-        with self.policy_lock:
-            super().train()
+        # update self.training_policy
+        super().train()
+
+        # copy self.training_policy to all rollout policies
+        for lock, policy in zip(self.rollout_policy_locks, self.rollout_policies):
+            with lock:
+                policy.load_state_dict(self.training_policy.state_dict())
 
     def _excluded_save_params(self) -> List[str]:
         return [
@@ -54,7 +59,7 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
         episode = []
 
         while self.running:
-            with self.policy_lock:
+            with self.rollout_policy_locks[index]:
                 with th.no_grad():
                     # Convert to pytorch tensor or to TensorDict
                     obs_tensor = obs_as_tensor(last_obs, self.device)

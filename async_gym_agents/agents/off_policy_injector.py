@@ -32,8 +32,12 @@ class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithm):
         super(AsyncAgentInjector, self).__init__(*args, **kwargs)
 
     def train(self, *args, **kwargs) -> None:
-        with self.policy_lock:
-            super().train(*args, **kwargs)
+        super().train(*args, **kwargs)
+
+        # copy self.policy to all rollout policies
+        for policy, lock in zip(self.rollout_policies, self.rollout_policy_locks):
+            with lock:
+                policy.load_state_dict(self.training_policy.state_dict())
 
     def _excluded_save_params(self) -> List[str]:
         return [
@@ -141,7 +145,7 @@ class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithm):
         episode = []
 
         while self.running:
-            with self.policy_lock:
+            with self.rollout_policy_locks[index]:
                 # Select action randomly or according to policy
                 actions, buffer_actions = self._custom_sample_action(
                     self.learning_starts,

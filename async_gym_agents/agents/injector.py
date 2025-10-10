@@ -3,7 +3,9 @@ import threading
 from queue import Queue
 from typing import List
 
+import torch as th
 from async_gym_agents.envs.multi_env import IndexableMultiEnv
+from stable_baselines3.common.base_class import BasePolicy
 
 
 class AsyncAgentInjector:
@@ -15,6 +17,7 @@ class AsyncAgentInjector:
         self.running = True
         self.initialized = False
         self.threads = []
+        self.thread_lookup = {}
 
         self.total_episodes = 0
         self.skipped_episodes = 0
@@ -26,6 +29,29 @@ class AsyncAgentInjector:
 
         # The policy itself is rarely thread-safe
         self.policy_lock = threading.Lock()
+
+        # One lock per agent, co-indexed with self.threads
+        self.rollout_policy_locks: List[Lock] = []
+
+        # One policy per agent, copied from self.policy after each training
+        self.rollout_policies: List[BasePolicy] = []
+
+        self.training_policy = getattr(self, "policy") if hasattr(self, "policy") else None
+
+
+    @property
+    def policy(self):
+        thread_name = threading.current_thread().name
+        index = self.thread_lookup.get(thread_name, None)
+        if index is not None:
+            return self.rollout_policies[index]
+        return self.training_policy
+
+    @policy.setter
+    def policy(self, value):
+        self.training_policy = value
+        if self.rollout_policy_locks and not self.rollout_policies:
+            self._copy_rollout_policies_from_training_policy()
 
     def _excluded_save_params(self) -> List[str]:
         return [
@@ -48,12 +74,22 @@ class AsyncAgentInjector:
     def _initialize_threads(self):
         self.threads = []
         for index in range(self.get_indexable_env().real_n_envs):
+            self.rollout_policy_locks.append(threading.Lock())
+            if self.training_policy:
+                self._copy_rollout_policies_from_training_policy()
             thread = threading.Thread(
                 target=self._collector_loop,
                 args=(index,),
             )
+            self.thread_lookup[thread.name] = index
             self.threads.append(thread)
             self.threads[index].start()
+
+    def _copy_rollout_policies_from_training_policy(self):
+        th.save(self.training_policy, "temp_policy.pth")
+        self.rollout_policies = [
+            th.load("temp_policy.pth", weights_only=False) for _ in self.rollout_policy_locks
+        ]
 
     def fetch_transition(self):
         self._buffer_utilization += self.queue.qsize()
