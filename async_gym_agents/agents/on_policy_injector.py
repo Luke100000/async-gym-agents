@@ -63,7 +63,6 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
             self.rollout_policies[index] = th.load(f"initial_training_policy.pt", weights_only=False)
 
         while self.running:
-            print(f"{index} - ROLLOUT")
             with th.no_grad():
                 # Convert to pytorch tensor or to TensorDict
                 obs_tensor = obs_as_tensor(last_obs, self.device)
