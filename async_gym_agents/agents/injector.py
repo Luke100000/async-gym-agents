@@ -32,7 +32,6 @@ class AsyncAgentInjector:
         # The larger the queue, the less wait times, but the more outdated the policies training data is
         self.queue = Queue(max_steps_in_buffer)
         self.transition_queue = Queue()
-        self.episode_lock = threading.Lock()
 
         # The policy itself is rarely thread-safe
         self.policy_lock = threading.Lock()
@@ -114,14 +113,13 @@ class AsyncAgentInjector:
                 continue
 
             # Feeds the episodes into the queue
-            with self.episode_lock:
-                try:
-                    self.queue.put(episode, block=True, timeout=self.timeout)
-                except queue.Full:
-                    self.queue.get(block=False)
-                    self.queue.put(episode, block=False)
-                    self.discarded_episodes += 1
-                    logger.info("Dropped episode due to buffer full")
+            try:
+                self.queue.put(episode, block=True, timeout=self.timeout)
+            except queue.Full:
+                self.queue.get(block=False)
+                self.queue.put(episode, block=False)
+                self.discarded_episodes += 1
+                logger.info("Dropped episode due to buffer full")
 
     def shutdown(self):
         """
