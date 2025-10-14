@@ -1,8 +1,9 @@
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Any, List
+from typing import Dict, Generator, List
 
 import numpy as np
+import torch
 import torch as th
 from gymnasium import spaces
 from stable_baselines3.common.buffers import RolloutBuffer
@@ -10,21 +11,22 @@ from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.on_policy_algorithm import OnPolicyAlgorithm
 from stable_baselines3.common.utils import obs_as_tensor
 from stable_baselines3.common.vec_env import VecEnv
+from stable_baselines3.common.vec_env.base_vec_env import VecEnvObs
 
 from async_gym_agents.agents.injector import AsyncAgentInjector
 
 
 @dataclass
 class Transition:
-    actions: list[any]
-    values: list[any]
-    log_probs: list[any]
-    last_obs: list[any]
-    new_obs: list[any]
-    rewards: list[float]
-    dones: list[bool]
-    last_dones: list[bool]
-    infos: list[Any]
+    actions: np.ndarray
+    values: torch.Tensor
+    log_probs: torch.Tensor
+    last_obs: VecEnvObs
+    new_obs: VecEnvObs
+    rewards: np.ndarray
+    dones: np.ndarray
+    last_dones: np.ndarray
+    infos: list[Dict]
     index: int
 
 
@@ -43,7 +45,7 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
             *super(AsyncAgentInjector, self)._excluded_save_params(),
         ]
 
-    def _episode_generator(self, index: int) -> list[Transition]:
+    def _episode_generator(self, index: int) -> Generator[list, None, None]:
         """
         Continuously plays the game and returns episodes of Transitions
         """
@@ -70,7 +72,7 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
                         # if they were previously squashed (scaled in [-1, 1])
                         clipped_actions = self.policy.unscale_action(clipped_actions)
                     else:
-                        # Otherwise, clip the actions to avoid out of bound error
+                        # Otherwise, clip the actions to avoid out-of-bound error
                         # as we are sampling from an unbounded Gaussian distribution
                         clipped_actions = np.clip(
                             actions, self.action_space.low, self.action_space.high
@@ -100,7 +102,7 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
             last_obs = new_obs
             last_dones = dones
 
-            # Start new episode
+            # Start a new episode
             if any(dones):
                 yield episode
                 episode = []
@@ -117,13 +119,13 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
         The term rollout here refers to the model-free notion and should not
         be used with the concept of rollout used in model-based RL or planning.
 
-        :param env: The training environment
-        :param callback: Callback that will be called at each step
+        :param env: The training environment.
+        :param callback: Callback that will be called at each step.
             (and at the beginning and end of the rollout)
-        :param rollout_buffer: Buffer to fill with rollouts
-        :param n_rollout_steps: Number of experiences to collect per environment
-        :return: True if function returned with at least `n_rollout_steps`
-            collected, False if callback terminated rollout prematurely.
+        :param rollout_buffer: Buffer to fill with rollouts.
+        :param n_rollout_steps: Number of experiences to collect per environment.
+        :return: True if the function returned with at least `n_rollout_steps`.
+            Collected, False if callback terminated rollout prematurely.
         """
         assert self._last_obs is not None, "No previous observation was provided"
 
@@ -133,7 +135,7 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
         n_steps = 0
         rollout_buffer.reset()
 
-        # Sample new weights for the state dependent exploration
+        # Sample new weights for the state-dependent exploration
         if self.use_sde:
             self.policy.reset_noise(1)
 

@@ -45,7 +45,7 @@ def evaluate(
         print(f"Discarded episodes: {model.discarded_episodes_fraction}")
 
     eval_env = get_env(False)
-    mean_reward, std_reward = evaluate_policy(model, eval_env, n_eval_episodes=1000)
+    mean_reward, std_reward = evaluate_policy(model, eval_env, n_eval_episodes=100)
     print(f"Mean reward: {mean_reward}, Std reward: {std_reward}")
 
 
