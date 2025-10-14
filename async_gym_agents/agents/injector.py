@@ -1,7 +1,7 @@
 import queue
 import threading
 from queue import Queue
-from typing import List
+from typing import Dict, List
 
 import torch as th
 from async_gym_agents.envs.multi_env import IndexableMultiEnv
@@ -28,16 +28,10 @@ class AsyncAgentInjector:
         self.episode_lock = threading.Lock()
 
         # The policy itself is rarely thread-safe
-        self.policy_lock = threading.Lock()
-
-        # One lock per agent, co-indexed with self.threads
-        self.rollout_policy_locks: List[Lock] = []
-
-        # One policy per agent, copied from self.policy after each training
-        self.rollout_policies: List[BasePolicy] = []
-
+        self.training_policy_lock = threading.Lock()
         self.training_policy = getattr(self, "policy") if hasattr(self, "policy") else None
 
+        self.rollout_policies: Dict[int, BasePolicy] = {}
 
     @property
     def policy(self):
@@ -50,8 +44,6 @@ class AsyncAgentInjector:
     @policy.setter
     def policy(self, value):
         self.training_policy = value
-        if self.rollout_policy_locks and not self.rollout_policies:
-            self._copy_rollout_policies_from_training_policy()
 
     def _excluded_save_params(self) -> List[str]:
         return [
@@ -74,22 +66,14 @@ class AsyncAgentInjector:
     def _initialize_threads(self):
         self.threads = []
         for index in range(self.get_indexable_env().real_n_envs):
-            self.rollout_policy_locks.append(threading.Lock())
-            if self.training_policy:
-                self._copy_rollout_policies_from_training_policy()
             thread = threading.Thread(
                 target=self._collector_loop,
                 args=(index,),
             )
+            self.rollout_policies[index] = None
             self.thread_lookup[thread.name] = index
             self.threads.append(thread)
             self.threads[index].start()
-
-    def _copy_rollout_policies_from_training_policy(self):
-        th.save(self.training_policy, "temp_policy.pth")
-        self.rollout_policies = [
-            th.load("temp_policy.pth", weights_only=False) for _ in self.rollout_policy_locks
-        ]
 
     def fetch_transition(self):
         self._buffer_utilization += self.queue.qsize()

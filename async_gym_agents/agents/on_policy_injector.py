@@ -1,3 +1,4 @@
+import os.path
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, List
@@ -35,12 +36,9 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
 
     def train(self, *args, **kwargs) -> None:
         # update self.training_policy
-        super().train()
+        with self.training_policy_lock:
+            super().train()
 
-        # copy self.training_policy to all rollout policies
-        for lock, policy in zip(self.rollout_policy_locks, self.rollout_policies):
-            with lock:
-                policy.load_state_dict(self.training_policy.state_dict())
 
     def _excluded_save_params(self) -> List[str]:
         return [
@@ -58,28 +56,34 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
 
         episode = []
 
+        with self.training_policy_lock:
+            # check if training_policy.pt file exists
+            if not os.path.exists("initial_training_policy.pt"):
+                th.save(self.training_policy, f"initial_training_policy.pt")
+            self.rollout_policies[index] = th.load(f"initial_training_policy.pt", weights_only=False)
+
         while self.running:
-            with self.rollout_policy_locks[index]:
-                with th.no_grad():
-                    # Convert to pytorch tensor or to TensorDict
-                    obs_tensor = obs_as_tensor(last_obs, self.device)
-                    actions, values, log_probs = self.policy(obs_tensor)
-                actions = actions.cpu().numpy()
+            print(f"{index} - ROLLOUT")
+            with th.no_grad():
+                # Convert to pytorch tensor or to TensorDict
+                obs_tensor = obs_as_tensor(last_obs, self.device)
+                actions, values, log_probs = self.policy(obs_tensor)
+            actions = actions.cpu().numpy()
 
-                # Rescale and perform action
-                clipped_actions = actions
+            # Rescale and perform action
+            clipped_actions = actions
 
-                if isinstance(self.action_space, spaces.Box):
-                    if self.policy.squash_output:
-                        # Unscale the actions to match env bounds
-                        # if they were previously squashed (scaled in [-1, 1])
-                        clipped_actions = self.policy.unscale_action(clipped_actions)
-                    else:
-                        # Otherwise, clip the actions to avoid out of bound error
-                        # as we are sampling from an unbounded Gaussian distribution
-                        clipped_actions = np.clip(
-                            actions, self.action_space.low, self.action_space.high
-                        )
+            if isinstance(self.action_space, spaces.Box):
+                if self.policy.squash_output:
+                    # Unscale the actions to match env bounds
+                    # if they were previously squashed (scaled in [-1, 1])
+                    clipped_actions = self.policy.unscale_action(clipped_actions)
+                else:
+                    # Otherwise, clip the actions to avoid out of bound error
+                    # as we are sampling from an unbounded Gaussian distribution
+                    clipped_actions = np.clip(
+                        actions, self.action_space.low, self.action_space.high
+                    )
 
             new_obs, rewards, dones, infos = env.step(clipped_actions, index=index)
 
@@ -107,6 +111,8 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
 
             # Start new episode
             if any(dones):
+                with self.training_policy_lock:
+                    self.rollout_policies[index].load_state_dict(self.training_policy.state_dict())
                 yield episode
                 episode = []
 

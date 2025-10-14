@@ -1,8 +1,9 @@
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Union
-
+import os.path
 import numpy as np
+import torch as th
 from gymnasium import spaces
 from stable_baselines3.common.buffers import ReplayBuffer
 from stable_baselines3.common.callbacks import BaseCallback
@@ -32,12 +33,8 @@ class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithm):
         super(AsyncAgentInjector, self).__init__(*args, **kwargs)
 
     def train(self, *args, **kwargs) -> None:
-        super().train(*args, **kwargs)
-
-        # copy self.policy to all rollout policies
-        for policy, lock in zip(self.rollout_policies, self.rollout_policy_locks):
-            with lock:
-                policy.load_state_dict(self.training_policy.state_dict())
+        with self.training_policy_lock:
+            super().train(*args, **kwargs)
 
     def _excluded_save_params(self) -> List[str]:
         return [
@@ -144,14 +141,19 @@ class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithm):
 
         episode = []
 
+        with self.training_policy_lock:
+            # check if training_policy.pt file exists
+            if not os.path.exists("initial_training_policy.pt"):
+                th.save(self.training_policy, f"initial_training_policy.pt")
+            self.rollout_policies[index] = th.load(f"initial_training_policy.pt", weights_only=False)
+
         while self.running:
-            with self.rollout_policy_locks[index]:
-                # Select action randomly or according to policy
-                actions, buffer_actions = self._custom_sample_action(
-                    self.learning_starts,
-                    last_obs,
-                    self.action_noise,
-                )
+            # Select action randomly or according to policy
+            actions, buffer_actions = self._custom_sample_action(
+                self.learning_starts,
+                last_obs,
+                self.action_noise,
+            )
 
             # Rescale and perform action
             new_obs, rewards, dones, infos = env.step(actions, index=index)
@@ -171,6 +173,8 @@ class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithm):
 
             # Start new episode
             if any(dones):
+                with self.training_policy_lock:
+                    self.rollout_policies[index].load_state_dict(self.training_policy.state_dict())
                 yield episode
                 episode = []
 
