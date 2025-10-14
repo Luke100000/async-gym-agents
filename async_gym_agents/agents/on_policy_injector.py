@@ -56,9 +56,6 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
 
         episode = []
 
-        with self.training_policy_lock:
-            self.copy_training_policy_to_rollout_policy_completely(index)
-
         while self.running:
             with th.no_grad():
                 # Convert to pytorch tensor or to TensorDict

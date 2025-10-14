@@ -80,7 +80,8 @@ class AsyncAgentInjector:
                 target=self._collector_loop,
                 args=(index,),
             )
-            self.rollout_policies[index] = None
+            with self.training_policy_lock:
+                self.copy_training_policy_to_rollout_policy_completely(index)
             self.thread_lookup[thread.name] = index
             self.threads.append(thread)
             self.threads[index].start()

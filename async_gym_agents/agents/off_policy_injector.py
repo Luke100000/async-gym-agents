@@ -141,9 +141,6 @@ class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithm):
 
         episode = []
 
-        with self.training_policy_lock:
-            self.copy_training_policy_to_rollout_policy_completely(index)
-
         while self.running:
             # Select action randomly or according to policy
             actions, buffer_actions = self._custom_sample_action(
