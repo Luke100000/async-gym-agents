@@ -58,7 +58,6 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
         episode = []
 
         while self.running:
-            print(f"ROLLOUT - {index}")
             with th.no_grad():
                 # Convert to pytorch tensor or to TensorDict
                 obs_tensor = obs_as_tensor(last_obs, self.device)
