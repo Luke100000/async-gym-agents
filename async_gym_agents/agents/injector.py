@@ -30,9 +30,11 @@ class AsyncAgentInjector:
 
         # The policy itself is rarely thread-safe
         self.training_policy_lock = threading.Lock()
-        self.training_policy = getattr(self, "policy") if hasattr(self, "policy") else None
+        self.training_policy: BasePolicy = getattr(self, "policy") if hasattr(self, "policy") else None
+        self.training_policy_version: int = 0
 
         self.rollout_policies: Dict[int, BasePolicy] = {}
+        self.rollout_policy_versions: Dict[int, int] = {}
 
     @property
     def policy(self):
@@ -51,9 +53,11 @@ class AsyncAgentInjector:
         th.save(self.training_policy, buffer)
         buffer.seek(0)
         self.rollout_policies[index] = th.load(buffer, weights_only=False)
+        self.rollout_policy_versions[index] = self.training_policy_version
 
     def copy_training_policy_to_rollout_policy_only_weights(self, index: int):
         self.rollout_policies[index].load_state_dict(self.training_policy.state_dict())
+        self.rollout_policy_versions[index] = self.training_policy_version
 
     def _excluded_save_params(self) -> List[str]:
         return [

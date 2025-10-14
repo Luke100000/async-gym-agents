@@ -35,6 +35,7 @@ class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithm):
     def train(self, *args, **kwargs) -> None:
         with self.training_policy_lock:
             super().train(*args, **kwargs)
+        self.training_policy_version += 1
 
     def _excluded_save_params(self) -> List[str]:
         return [
@@ -167,10 +168,11 @@ class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithm):
 
             # Start new episode
             if any(dones):
-                with self.training_policy_lock:
-                    self.copy_training_policy_to_rollout_policy_only_weights(index)
                 yield episode
                 episode = []
+                if self.rollout_policy_versions[index] < self.training_policy_version:
+                    with self.training_policy_lock:
+                        self.copy_training_policy_to_rollout_policy_only_weights(index)
 
     def collect_rollouts(
         self,

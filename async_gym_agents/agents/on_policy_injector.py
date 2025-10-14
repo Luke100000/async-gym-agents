@@ -38,6 +38,7 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
         # update self.training_policy
         with self.training_policy_lock:
             super().train()
+        self.training_policy_version += 1
 
 
     def _excluded_save_params(self) -> List[str]:
@@ -57,6 +58,7 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
         episode = []
 
         while self.running:
+            print(f"ROLLOUT - {index}")
             with th.no_grad():
                 # Convert to pytorch tensor or to TensorDict
                 obs_tensor = obs_as_tensor(last_obs, self.device)
@@ -104,10 +106,11 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
 
             # Start new episode
             if any(dones):
-                with self.training_policy_lock:
-                    self.copy_training_policy_to_rollout_policy_only_weights(index)
                 yield episode
                 episode = []
+                if self.rollout_policy_versions[index] < self.training_policy_version:
+                    with self.training_policy_lock:
+                        self.copy_training_policy_to_rollout_policy_only_weights(index)
 
     def collect_rollouts(
         self,
