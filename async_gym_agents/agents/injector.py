@@ -3,6 +3,7 @@ import threading
 from queue import Queue
 from typing import Dict, List
 
+import io
 import torch as th
 from async_gym_agents.envs.multi_env import IndexableMultiEnv
 from stable_baselines3.common.base_class import BasePolicy
@@ -44,6 +45,15 @@ class AsyncAgentInjector:
     @policy.setter
     def policy(self, value):
         self.training_policy = value
+
+    def copy_training_policy_to_rollout_policy_completely(self, index: int):
+        buffer = io.BytesIO()
+        th.save(self.training_policy, buffer)
+        buffer.seek(0)
+        self.rollout_policies[index] = th.load(buffer, weights_only=False)
+
+    def copy_training_policy_to_rollout_policy_only_weights(self, index: int):
+        self.rollout_policies[index].load_state_dict(self.training_policy.state_dict())
 
     def _excluded_save_params(self) -> List[str]:
         return [

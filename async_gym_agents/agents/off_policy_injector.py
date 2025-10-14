@@ -142,10 +142,7 @@ class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithm):
         episode = []
 
         with self.training_policy_lock:
-            # check if training_policy.pt file exists
-            if not os.path.exists("initial_training_policy.pt"):
-                th.save(self.training_policy, f"initial_training_policy.pt")
-            self.rollout_policies[index] = th.load(f"initial_training_policy.pt", weights_only=False)
+            self.copy_training_policy_to_rollout_policy_completely(index)
 
         while self.running:
             # Select action randomly or according to policy
@@ -174,7 +171,7 @@ class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithm):
             # Start new episode
             if any(dones):
                 with self.training_policy_lock:
-                    self.rollout_policies[index].load_state_dict(self.training_policy.state_dict())
+                    self.copy_training_policy_to_rollout_policy_only_weights(index)
                 yield episode
                 episode = []
 
