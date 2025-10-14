@@ -107,9 +107,7 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
             if any(dones):
                 yield episode
                 episode = []
-                if self.rollout_policy_versions[index] < self.training_policy_version:
-                    with self.training_policy_lock:
-                        self.copy_training_policy_to_rollout_policy_only_weights(index)
+                self.sync_training_policy_to_rollout_policy_weights_only(index)
 
     def collect_rollouts(
         self,

@@ -48,16 +48,22 @@ class AsyncAgentInjector:
     def policy(self, value):
         self.training_policy = value
 
-    def copy_training_policy_to_rollout_policy_completely(self, index: int):
-        buffer = io.BytesIO()
-        th.save(self.training_policy, buffer)
-        buffer.seek(0)
-        self.rollout_policies[index] = th.load(buffer, weights_only=False)
-        self.rollout_policy_versions[index] = self.training_policy_version
+    def sync_training_policy_to_rollout_policy_complete(self, index: int):
+        if (index not in self.rollout_policy_versions
+                or self.rollout_policy_versions[index] < self.training_policy_version):
+            with self.training_policy_lock:
+                buffer = io.BytesIO()
+                th.save(self.training_policy, buffer)
+                buffer.seek(0)
+                self.rollout_policies[index] = th.load(buffer, weights_only=False)
+                self.rollout_policy_versions[index] = self.training_policy_version
 
-    def copy_training_policy_to_rollout_policy_only_weights(self, index: int):
-        self.rollout_policies[index].load_state_dict(self.training_policy.state_dict())
-        self.rollout_policy_versions[index] = self.training_policy_version
+    def sync_training_policy_to_rollout_policy_weights_only(self, index: int):
+        if (index not in self.rollout_policy_versions
+                or self.rollout_policy_versions[index] < self.training_policy_version):
+            with self.training_policy_lock:
+                self.rollout_policies[index].load_state_dict(self.training_policy.state_dict())
+                self.rollout_policy_versions[index] = self.training_policy_version
 
     def _excluded_save_params(self) -> List[str]:
         return [
@@ -84,8 +90,7 @@ class AsyncAgentInjector:
                 target=self._collector_loop,
                 args=(index,),
             )
-            with self.training_policy_lock:
-                self.copy_training_policy_to_rollout_policy_completely(index)
+            self.sync_training_policy_to_rollout_policy_complete(index)
             self.thread_lookup[thread.name] = index
             self.threads.append(thread)
             self.threads[index].start()
