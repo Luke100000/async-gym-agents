@@ -1,3 +1,5 @@
+from typing import Type
+
 from stable_baselines3 import PPO
 from stable_baselines3.common.base_class import BaseAlgorithm
 from stable_baselines3.common.callbacks import EvalCallback
@@ -20,13 +22,13 @@ def get_env(buggy: bool):
 
 def evaluate(
     threads: int = 8,
-    agent: BaseAlgorithm = PPO,
+    agent: Type[BaseAlgorithm] = PPO,
 ):
     env = IndexableMultiEnv([lambda: get_env(True) for _ in range(threads)])
 
-    agent = get_injected_agent(agent)
+    injected_agent = get_injected_agent(agent)
 
-    model = agent("MlpPolicy", env)
+    model = injected_agent("MlpPolicy", env, learning_rate=3e-4)
 
     eval_env = get_env(False)
     eval_callback = EvalCallback(
@@ -43,7 +45,7 @@ def evaluate(
 
     model.shutdown()
 
-    print(f"Truncated episodes: {model.truncated_episodes_fraction * 100}%")
+    print(f"Truncated episodes: {model.discarded_episodes_fraction * 100}%")
 
     mean_reward, std_reward = evaluate_policy(model, eval_env, n_eval_episodes=1000)
     print(f"Mean reward: {mean_reward}, Std reward: {std_reward}")

@@ -1,5 +1,6 @@
 import time
 from enum import Enum
+from typing import Type
 
 from stable_baselines3 import PPO
 from stable_baselines3.common.base_class import BaseAlgorithm
@@ -25,15 +26,15 @@ def get_env(slow: bool):
 def evaluate(
     mode: Mode = Mode.ASYNC,
     threads: int = 8,
-    agent: BaseAlgorithm = PPO,
+    agent: Type[BaseAlgorithm] = PPO,
 ):
     env = (ThreadedVecEnv if mode == Mode.PARALLEL else IndexableMultiEnv)(
         [lambda: get_env(True) for _ in range(threads)]
     )
 
-    agent = get_injected_agent(agent) if mode == Mode.ASYNC else agent
+    injected_agent = get_injected_agent(agent) if mode == Mode.ASYNC else agent
 
-    model = agent("MlpPolicy", env, learning_rate=3e-4)
+    model = injected_agent("MlpPolicy", env, learning_rate=3e-4)
 
     model.learn(total_timesteps=1_000)
 
@@ -41,9 +42,10 @@ def evaluate(
         model.shutdown()
         print(f"Buffer utilization: {model.buffer_utilization}")
         print(f"Buffer emptiness: {model.buffer_emptyness}")
+        print(f"Discarded episodes: {model.discarded_episodes_fraction}")
 
     eval_env = get_env(False)
-    mean_reward, std_reward = evaluate_policy(model, eval_env, n_eval_episodes=1000)
+    mean_reward, std_reward = evaluate_policy(model, eval_env, n_eval_episodes=100)
     print(f"Mean reward: {mean_reward}, Std reward: {std_reward}")
 
 

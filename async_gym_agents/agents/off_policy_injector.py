@@ -1,9 +1,8 @@
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple, Union
-import os.path
+from typing import Any, Dict, Generator, List, Optional, Tuple, Union
+
 import numpy as np
-import torch as th
 from gymnasium import spaces
 from stable_baselines3.common.buffers import ReplayBuffer
 from stable_baselines3.common.callbacks import BaseCallback
@@ -12,6 +11,7 @@ from stable_baselines3.common.off_policy_algorithm import OffPolicyAlgorithm
 from stable_baselines3.common.type_aliases import RolloutReturn, TrainFreq
 from stable_baselines3.common.utils import should_collect_more_steps
 from stable_baselines3.common.vec_env import VecEnv
+from stable_baselines3.common.vec_env.base_vec_env import VecEnvObs
 
 from async_gym_agents.agents.injector import AsyncAgentInjector
 from async_gym_agents.envs.multi_env import IndexableMultiEnv
@@ -19,12 +19,12 @@ from async_gym_agents.envs.multi_env import IndexableMultiEnv
 
 @dataclass
 class Transition:
-    buffer_actions: list[any]
-    last_obs: list[any]
-    new_obs: list[any]
-    rewards: list[float]
-    dones: list[bool]
-    infos: list[Any]
+    buffer_actions: np.ndarray
+    last_obs: VecEnvObs
+    new_obs: VecEnvObs
+    rewards: np.ndarray
+    dones: np.ndarray
+    infos: list[Dict]
 
 
 class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithm):
@@ -133,7 +133,7 @@ class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithm):
             action = buffer_action
         return action, buffer_action
 
-    def _episode_generator(self, index: int) -> list[Transition]:
+    def _episode_generator(self, index: int) -> Generator[list, None, None]:
         """
         Continuously plays the game and returns episodes of Transitions
         """
@@ -166,7 +166,7 @@ class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithm):
             )
             last_obs = new_obs
 
-            # Start new episode
+            # Start a new episode
             if any(dones):
                 yield episode
                 episode = []
@@ -194,11 +194,11 @@ class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithm):
             or ``TrainFreq(<n>, TrainFrequencyUnit.EPISODE)``
             with ``<n>`` being an integer greater than 0.
         :param action_noise: Action noise that will be used for exploration
-            Required for deterministic policy (e.g. TD3). This can also be used
+            Required for deterministic policy (e.g., TD3). This can also be used
             in addition to the stochastic policy for SAC.
         :param learning_starts: Number of steps before learning for the warm-up phase.
         :param replay_buffer:
-        :param log_interval: Log data every ``log_interval`` episodes
+        :param log_interval: Log data every `log_interval` episode
         :return:
         """
         # Switch to eval mode (this affects batch norm / dropout)
@@ -250,7 +250,7 @@ class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithm):
             # Give access to local variables
             callback.update_locals(locals())
 
-            # Only stop training if return value is False, not when it is None.
+            # Only stop training if the return value is False, not when it is None.
             if not callback.on_step():
                 return RolloutReturn(
                     num_collected_steps,
