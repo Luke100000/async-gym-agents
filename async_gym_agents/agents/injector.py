@@ -1,8 +1,12 @@
+import io
 import logging
 import queue
 import threading
 from queue import Queue
-from typing import List
+from typing import Dict, List
+
+import torch as th
+from stable_baselines3.common.base_class import BasePolicy
 
 from async_gym_agents.envs.multi_env import IndexableMultiEnv
 
@@ -23,6 +27,7 @@ class AsyncAgentInjector:
         self.running = True
         self.initialized = False
         self.threads = []
+        self.thread_lookup = {}
 
         self.total_episodes = 0
         self.discarded_episodes = 0
@@ -34,7 +39,49 @@ class AsyncAgentInjector:
         self.transition_queue = Queue()
 
         # The policy itself is rarely thread-safe
-        self.policy_lock = threading.Lock()
+        self.training_policy_lock = threading.Lock()
+        self.training_policy: BasePolicy = (
+            getattr(self, "policy") if hasattr(self, "policy") else None
+        )
+        self.training_policy_version: int = 0
+
+        self.rollout_policies: Dict[int, BasePolicy] = {}
+        self.rollout_policy_versions: Dict[int, int] = {}
+
+    @property
+    def policy(self):
+        thread_name = threading.current_thread().name
+        index = self.thread_lookup.get(thread_name, None)
+        if index is not None:
+            return self.rollout_policies[index]
+        return self.training_policy
+
+    @policy.setter
+    def policy(self, value):
+        self.training_policy = value
+
+    def sync_training_policy_to_rollout_policy_complete(self, index: int):
+        if (
+            index not in self.rollout_policy_versions
+            or self.rollout_policy_versions[index] < self.training_policy_version
+        ):
+            with self.training_policy_lock:
+                buffer = io.BytesIO()
+                th.save(self.training_policy, buffer)
+                buffer.seek(0)
+                self.rollout_policies[index] = th.load(buffer, weights_only=False)
+                self.rollout_policy_versions[index] = self.training_policy_version
+
+    def sync_training_policy_to_rollout_policy_weights_only(self, index: int):
+        if (
+            index not in self.rollout_policy_versions
+            or self.rollout_policy_versions[index] < self.training_policy_version
+        ):
+            with self.training_policy_lock:
+                self.rollout_policies[index].load_state_dict(
+                    self.training_policy.state_dict()
+                )
+                self.rollout_policy_versions[index] = self.training_policy_version
 
     def _excluded_save_params(self) -> List[str]:
         return [
@@ -61,6 +108,8 @@ class AsyncAgentInjector:
                 target=self._collector_loop,
                 args=(index,),
             )
+            self.sync_training_policy_to_rollout_policy_complete(index)
+            self.thread_lookup[thread.name] = index
             self.threads.append(thread)
             self.threads[index].start()
 
