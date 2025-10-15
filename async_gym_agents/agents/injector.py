@@ -27,14 +27,14 @@ class AsyncAgentInjector:
         self.running = True
         self.initialized = False
         self.threads = []
-        self.thread_lookup = {}
+        self.thread_lookup: Dict[str, int] = {}
 
         self.total_episodes = 0
         self.discarded_episodes = 0
         self.skip_truncated = skip_truncated
         self.timeout = timeout
 
-        # The larger the queue, the less wait times, but the more outdated the policies training data is
+        # The larger the queue, the less wait times, but the more outdated the policies training data are
         self.queue = Queue(max_steps_in_buffer)
         self.transition_queue = Queue()
 
@@ -87,8 +87,7 @@ class AsyncAgentInjector:
         return [
             "threads",
             "queue",
-            "episode_lock",
-            "policy_lock",
+            "training_policy_lock",
         ]
 
     # noinspection PyUnresolvedReferences
@@ -165,8 +164,11 @@ class AsyncAgentInjector:
             try:
                 self.queue.put(episode, block=True, timeout=self.timeout)
             except queue.Full:
-                self.queue.get(block=False)
-                self.queue.put(episode, block=False)
+                try:
+                    self.queue.get(block=False)
+                    self.queue.put(episode, block=False)
+                except queue.Full:
+                    pass
                 self.discarded_episodes += 1
                 logger.info("Dropped episode due to buffer full")
 
