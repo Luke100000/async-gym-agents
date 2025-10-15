@@ -1,3 +1,4 @@
+import os.path
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, List
@@ -34,8 +35,11 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
         super(AsyncAgentInjector, self).__init__(*args, **kwargs)
 
     def train(self, *args, **kwargs) -> None:
-        with self.policy_lock:
+        # update self.training_policy
+        with self.training_policy_lock:
             super().train()
+        self.training_policy_version += 1
+
 
     def _excluded_save_params(self) -> List[str]:
         return [
@@ -54,27 +58,26 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
         episode = []
 
         while self.running:
-            with self.policy_lock:
-                with th.no_grad():
-                    # Convert to pytorch tensor or to TensorDict
-                    obs_tensor = obs_as_tensor(last_obs, self.device)
-                    actions, values, log_probs = self.policy(obs_tensor)
-                actions = actions.cpu().numpy()
+            with th.no_grad():
+                # Convert to pytorch tensor or to TensorDict
+                obs_tensor = obs_as_tensor(last_obs, self.device)
+                actions, values, log_probs = self.policy(obs_tensor)
+            actions = actions.cpu().numpy()
 
-                # Rescale and perform action
-                clipped_actions = actions
+            # Rescale and perform action
+            clipped_actions = actions
 
-                if isinstance(self.action_space, spaces.Box):
-                    if self.policy.squash_output:
-                        # Unscale the actions to match env bounds
-                        # if they were previously squashed (scaled in [-1, 1])
-                        clipped_actions = self.policy.unscale_action(clipped_actions)
-                    else:
-                        # Otherwise, clip the actions to avoid out of bound error
-                        # as we are sampling from an unbounded Gaussian distribution
-                        clipped_actions = np.clip(
-                            actions, self.action_space.low, self.action_space.high
-                        )
+            if isinstance(self.action_space, spaces.Box):
+                if self.policy.squash_output:
+                    # Unscale the actions to match env bounds
+                    # if they were previously squashed (scaled in [-1, 1])
+                    clipped_actions = self.policy.unscale_action(clipped_actions)
+                else:
+                    # Otherwise, clip the actions to avoid out of bound error
+                    # as we are sampling from an unbounded Gaussian distribution
+                    clipped_actions = np.clip(
+                        actions, self.action_space.low, self.action_space.high
+                    )
 
             new_obs, rewards, dones, infos = env.step(clipped_actions, index=index)
 
@@ -104,6 +107,7 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
             if any(dones):
                 yield episode
                 episode = []
+                self.sync_training_policy_to_rollout_policy_weights_only(index)
 
     def collect_rollouts(
         self,
