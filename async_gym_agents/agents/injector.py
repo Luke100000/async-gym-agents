@@ -87,7 +87,10 @@ class AsyncAgentInjector:
         return [
             "threads",
             "queue",
+            "transition_queue",
             "training_policy_lock",
+            "training_policy",
+            "rollout_policies",
         ]
 
     # noinspection PyUnresolvedReferences
