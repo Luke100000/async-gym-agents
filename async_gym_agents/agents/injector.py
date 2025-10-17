@@ -16,7 +16,7 @@ logger = logging.getLogger("async_gym_agents")
 class AsyncAgentInjector:
     def __init__(
         self,
-        max_steps_in_buffer: int,
+        max_episodes_in_buffer: int,
         skip_truncated: bool = False,
         timeout: float = 1.0,
     ):
@@ -35,7 +35,7 @@ class AsyncAgentInjector:
         self.timeout = timeout
 
         # The larger the queue, the less wait times, but the more outdated the policies training data are
-        self.queue = Queue(max_steps_in_buffer)
+        self.queue = Queue(max_episodes_in_buffer)
         self.transition_queue = Queue()
 
         # The policy itself is rarely thread-safe

@@ -28,8 +28,8 @@ class Transition:
 
 
 class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithm):
-    def __init__(self, *args, max_steps_in_buffer: int = 8, **kwargs) -> None:
-        super().__init__(max_steps_in_buffer)
+    def __init__(self, *args, max_episodes_in_buffer: int = 8, **kwargs) -> None:
+        super().__init__(max_episodes_in_buffer)
         super(AsyncAgentInjector, self).__init__(*args, **kwargs)
 
     def train(self, *args, **kwargs) -> None:
