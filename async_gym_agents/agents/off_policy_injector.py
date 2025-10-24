@@ -217,7 +217,6 @@ class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithm):
 
         if not self.initialized:
             self._initialize_threads()
-            self.initialized = True
 
         callback.on_rollout_start()
         continue_training = True

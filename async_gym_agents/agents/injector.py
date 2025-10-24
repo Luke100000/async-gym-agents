@@ -91,6 +91,7 @@ class AsyncAgentInjector:
             "training_policy_lock",
             "training_policy",
             "rollout_policies",
+            "initialized",
         ]
 
     # noinspection PyUnresolvedReferences
@@ -107,6 +108,7 @@ class AsyncAgentInjector:
         self.threads = []
         for index in range(self.get_indexable_env().real_n_envs):
             thread = threading.Thread(
+                name=f"CollectorThread{index}",
                 target=self._collector_loop,
                 args=(index,),
             )
@@ -114,6 +116,7 @@ class AsyncAgentInjector:
             self.thread_lookup[thread.name] = index
             self.threads.append(thread)
             self.threads[index].start()
+        self.initialized = True
 
     def fetch_transition(self):
         while self.transition_queue.empty():

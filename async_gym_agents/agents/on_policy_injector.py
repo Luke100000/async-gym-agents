@@ -143,7 +143,6 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
 
         if not self.initialized:
             self._initialize_threads()
-            self.initialized = True
 
         callback.on_rollout_start()
 
