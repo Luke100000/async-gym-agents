@@ -14,13 +14,14 @@ def test_on_policy():
     # Create the model, injected with async capabilities
     model = get_injected_agent(TD3)("MlpPolicy", env)
 
+    # Train the model
+    model.learn(total_timesteps=100)
+
     # Test saving and loading
     model.save("test.zip")
     model.load("test.zip")
     os.remove("test.zip")
-
-    # Train the model
-    model.learn(total_timesteps=1000)
+    model.learn(total_timesteps=10)
 
     model.shutdown()
 

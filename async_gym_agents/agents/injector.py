@@ -91,6 +91,7 @@ class AsyncAgentInjector:
             "training_policy_lock",
             "training_policy",
             "rollout_policies",
+            "running",
             "initialized",
         ]
 
@@ -105,6 +106,8 @@ class AsyncAgentInjector:
         return self.env
 
     def _initialize_threads(self):
+        self.running = True
+
         self.threads = []
         for index in range(self.get_indexable_env().real_n_envs):
             thread = threading.Thread(
@@ -116,6 +119,7 @@ class AsyncAgentInjector:
             self.thread_lookup[thread.name] = index
             self.threads.append(thread)
             self.threads[index].start()
+
         self.initialized = True
 
     def fetch_transition(self):
