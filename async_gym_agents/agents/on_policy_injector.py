@@ -325,12 +325,12 @@ class InjectorWorker(InjectorWorkerBase):
                 try:
                     self._trajectory.put_nowait(episode)
                 except queue.Full:
-                    self._logger.info("Dropped episode due to buffer full")
+                    self._logger.warning("dropped episode due to buffer full")
 
                 end_time = time.time()
                 episode_time = end_time - start_time
-                self._logger.info(f"step time: {round(episode_time / len(episode), 2)}")
-                start_time = end_time
+                avg = round(episode_time / len(episode), 2)
+                self._logger.info(f"step time: {avg};")
 
                 episode = []
 
@@ -338,6 +338,9 @@ class InjectorWorker(InjectorWorkerBase):
                 last_obs, info = env.reset()
                 last_dones = np.ones((1,), dtype=bool)
                 policy = self._copy_policy_from_state()
+
+                # exclude reset time from episode duration
+                start_time = end_time
 
     def _copy_policy_from_state(self):
         state = self._state
