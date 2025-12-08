@@ -216,7 +216,7 @@ class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithm):
             self.actor.reset_noise(1)
 
         if not self.initialized:
-            self._initialize_threads()
+            self.init_collect_process()
 
         callback.on_rollout_start()
         continue_training = True

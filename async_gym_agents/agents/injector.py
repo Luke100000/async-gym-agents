@@ -3,7 +3,7 @@ import logging
 import queue
 import threading
 from queue import Queue
-from typing import Dict, List
+from typing import Dict, List, TypeVar
 
 import torch as th
 from stable_baselines3.common.base_class import BasePolicy
@@ -13,13 +13,62 @@ from async_gym_agents.envs.multi_env import IndexableMultiEnv
 logger = logging.getLogger("async_gym_agents")
 
 
-class AsyncAgentInjector:
+Transition = TypeVar("Transition")
+
+
+class IAsyncAgentInjector:
+    initialized: bool
+
+    def init_collect_process(self):
+        raise NotImplementedError
+
+    def fetch_transition(self) -> Transition:
+        raise NotImplementedError
+
+    def fetch_transitions(self) -> List[Transition]:
+        raise NotImplementedError
+
+    def shutdown(self):
+        raise NotImplementedError
+
+    def _excluded_save_params(self):
+        raise NotImplementedError
+
+
+class AsyncAgentInjectorBase(IAsyncAgentInjector):
+    def __init__(self, *args, **kwargs):
+        self.initialized = False
+
+    def pre_collect_preparation(self, policy: BasePolicy):
+        raise NotImplementedError
+
+    def init_collect_process(self):
+        raise NotImplementedError
+
+    def fetch_transition(self) -> Transition:
+        raise NotImplementedError
+
+    def fetch_transitions(self) -> List[Transition]:
+        raise NotImplementedError
+
+    def shutdown(self):
+        raise NotImplementedError
+
+    def _excluded_save_params(self) -> List[str]:
+        return [
+            "initialized",
+        ]
+
+
+class AsyncAgentInjector(AsyncAgentInjectorBase):
     def __init__(
         self,
         max_episodes_in_buffer: int,
         skip_truncated: bool = False,
         timeout: float = 1.0,
     ):
+        AsyncAgentInjectorBase.__init__(self)
+
         self._buffer_utilization = 0.0
         self._buffer_emptiness = 0.0
         self._buffer_stat_count = 0
@@ -105,7 +154,10 @@ class AsyncAgentInjector:
         ), "You must pass a IndexableMultiEnv"
         return self.env
 
-    def _initialize_threads(self):
+    def pre_collect_preparation(self, policy: BasePolicy):
+        pass
+
+    def init_collect_process(self):
         self.running = True
 
         self.threads = []
@@ -130,6 +182,9 @@ class AsyncAgentInjector:
             for t in self.queue.get():
                 self.transition_queue.put(t)
         return self.transition_queue.get()
+
+    def fetch_transitions(self) -> List[Transition]:
+        raise NotImplementedError
 
     @property
     def buffer_utilization(self) -> float:
