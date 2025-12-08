@@ -7,13 +7,13 @@ import time
 from copy import deepcopy
 from dataclasses import dataclass
 from multiprocessing.managers import Namespace
-from typing import Dict, Generator, List
+from typing import Dict, Generator, List, Optional
 
-import gymnasium
+import gymnasium as gym
 import numpy as np
 import torch
 import torch as th
-from gymnasium import spaces, Space
+from gymnasium import spaces
 from stable_baselines3.common.buffers import RolloutBuffer
 from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.monitor import Monitor
@@ -23,7 +23,8 @@ from stable_baselines3.common.utils import obs_as_tensor, get_device
 from stable_baselines3.common.vec_env import VecEnv
 from stable_baselines3.common.vec_env.base_vec_env import VecEnvObs
 
-from async_gym_agents.agents.injector import AsyncAgentInjector, AsyncAgentInjectorBase
+from async_gym_agents.agents.injector import AsyncAgentInjector, AsyncAgentInjectorBase, AsyncAgentInjectorMP, \
+    InjectorWorkerBase
 
 
 @dataclass
@@ -168,121 +169,6 @@ class OnPolicyAlgorithmInjectorBase(AsyncAgentInjectorBase, OnPolicyAlgorithm):
         return True
 
 
-class OnPolicyAlgorithmInjectorTrans(OnPolicyAlgorithmInjectorBase):
-    # must be updated from SB3 (!)
-    def collect_rollouts(
-        self,
-        env: VecEnv,
-        callback: BaseCallback,
-        rollout_buffer: RolloutBuffer,
-        n_rollout_steps: int,
-    ) -> bool:
-        """
-        Collect experiences using the current policy and fill a ``RolloutBuffer``.
-        The term rollout here refers to the model-free notion and should not
-        be used with the concept of rollout used in model-based RL or planning.
-
-        :param env: The training environment.
-        :param callback: Callback that will be called at each step.
-            (and at the beginning and end of the rollout)
-        :param rollout_buffer: Buffer to fill with rollouts.
-        :param n_rollout_steps: Number of experiences to collect per environment.
-        :return: True if the function returned with at least `n_rollout_steps`.
-            Collected, False if callback terminated rollout prematurely.
-        """
-        # Switch to eval mode (this affects batch norm / dropout)
-        self.policy.set_training_mode(False)
-        self.pre_collect_preparation(self.policy)
-
-        n_steps = 0
-        rollout_buffer.reset()
-
-        # Sample new weights for the state-dependent exploration
-        if self.use_sde:
-            self.policy.reset_noise(1)
-
-        if not self.initialized:
-            self.init_collect_process()
-
-        callback.on_rollout_start()
-
-        new_obs = None
-        dones = None
-        while n_steps < n_rollout_steps:
-            if (
-                    self.use_sde
-                    and self.sde_sample_freq > 0
-                    and n_steps % self.sde_sample_freq == 0
-            ):
-                # Sample a new noise matrix
-                self.policy.reset_noise(1)
-
-            # Fetch transitions from workers
-            transitions: list[Transition] = self.fetch_transitions()
-            for transition in transitions:
-                # Make locals available for callbacks
-                new_obs = transition.new_obs
-                self._last_obs = transition.last_obs
-                actions = transition.actions
-                rewards = transition.rewards
-                self._last_episode_starts = transition.last_dones
-                values = transition.values
-                log_probs = transition.log_probs
-                dones = transition.dones
-                infos = transition.infos
-
-                self.num_timesteps += 1
-
-                # Give access to local variables
-                callback.update_locals(locals())
-                if not callback.on_step():
-                    return False
-
-                self._update_info_buffer(infos, dones)
-                n_steps += 1
-
-                # Handle timeout by bootstrapping with value function
-                # see GitHub issue #633
-                for idx, done in enumerate(dones):
-                    if (
-                            done
-                            and infos[idx].get("terminal_observation") is not None
-                            and infos[idx].get("TimeLimit.truncated", False)
-                    ):
-                        terminal_obs = self.policy.obs_to_tensor(
-                            infos[idx]["terminal_observation"]
-                        )[0]
-                        with th.no_grad():
-                            terminal_value = self.policy.predict_values(terminal_obs)[0]
-                        rewards[idx] += self.gamma * terminal_value
-
-                rollout_buffer.add(
-                    self._last_obs,
-                    actions,
-                    rewards,
-                    self._last_episode_starts,
-                    values,
-                    log_probs,
-                )
-                if rollout_buffer.full:
-                    break
-
-        with th.no_grad():
-            obs_tensor = obs_as_tensor(new_obs, self.device)
-            # Compute value for the last timestep
-            if obs_tensor.dim() == 1:
-                obs_tensor = obs_tensor.unsqueeze(0)
-            values = self.policy.predict_values(obs_tensor)
-
-        rollout_buffer.compute_returns_and_advantage(last_values=values, dones=dones)
-
-        callback.update_locals(locals())
-
-        callback.on_rollout_end()
-
-        return True
-
-
 class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithmInjectorBase):
     def __init__(self, *args, max_episodes_in_buffer: int = 8, **kwargs) -> None:
         super().__init__(max_episodes_in_buffer)
@@ -357,19 +243,18 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithmInjectorBas
                 self.sync_training_policy_to_rollout_policy_weights_only(index)
 
 
-class Worker:
+class InjectorWorker(InjectorWorkerBase):
     def __init__(
         self,
         env_func,
         trajectory: multiprocessing.Queue,
         state: Namespace,
-        action_space: Space,
+        action_space: gym.Space,
         use_sde: bool = False,
-        sde_sample_freq: int = 0,
+        sde_sample_freq: int = 0
     ):
-        self._env_func = env_func
-        self._trajectory = trajectory
-        self._state = state
+        super().__init__(env_func, trajectory, state)
+
         self._action_space = action_space
         self._use_sde = use_sde
         self._sde_sample_freq = sde_sample_freq
@@ -381,7 +266,7 @@ class Worker:
         self._logger = logging.getLogger("Worker")
         self._device = get_device("cpu")
 
-    def _episode_generator(self, env: gymnasium.Env, index: int):
+    def _episode_generator(self, env: gym.Env, index: int):
         last_obs, info = env.reset()
         last_dones = np.ones((1,), dtype=bool)
         policy = self._copy_policy_from_state()
@@ -417,16 +302,18 @@ class Worker:
             done = terminated or truncated
 
             # Store transition
+            # Single values -> Multi-values
+            # gym.Env -> VecEnv format
             episode.append(
                 Transition(
                     actions,
                     values,
                     log_probs,
-                    deepcopy(last_obs),
-                    deepcopy(new_ob),
-                    np.array([reward], dtype=np.float32),
-                    np.array([1 if done else 0]),
-                    np.array([1 if last_dones else 0]),
+                    np.array([last_obs]),
+                    np.array([new_ob]),
+                    np.array([reward]),
+                    np.array([done], dtype=bool),
+                    np.array([last_dones], dtype=bool),
                     [info],
                     index,
                 )
@@ -445,12 +332,12 @@ class Worker:
                 self._logger.info(f"step time: {round(episode_time / len(episode), 2)}")
                 start_time = end_time
 
-                policy = self._copy_policy_from_state()
                 episode = []
 
                 # reset
                 last_obs, info = env.reset()
                 last_dones = np.ones((1,), dtype=bool)
+                policy = self._copy_policy_from_state()
 
     def _copy_policy_from_state(self):
         state = self._state
@@ -486,100 +373,17 @@ class Worker:
             thread.join()
 
 
-class OnPolicyAlgorithmInjectorMP(OnPolicyAlgorithmInjectorTrans):
-    def __init__(self, *args, max_steps_in_buffer: int = 10000, envs=None, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
+class OnPolicyAlgorithmInjectorMP(AsyncAgentInjectorMP, OnPolicyAlgorithmInjectorBase):
+    def __init__(self, *args, max_steps_in_buffer: int = 10000, _envs: Optional[List] = None, **kwargs) -> None:
+        super().__init__(envs=_envs, worker_class=InjectorWorker, max_steps_in_buffer=max_steps_in_buffer)
+        super(AsyncAgentInjectorMP, self).__init__(*args, **kwargs)
 
         # hardcoded override (!)
         self.device = get_device("cpu")
 
-        # envs functions
-        self._envs = envs
-
-        # shared memory
-        self._trajectory = multiprocessing.Queue(maxsize=max_steps_in_buffer)
-        # shared object (!)
-        self._manager = multiprocessing.Manager()
-        self._state = self._manager.Namespace()
-        self._version = 0
-
-        self._workers_inited = False
-        self._proc = []
-
-    @staticmethod
-    def _run_worker(
-        env_func,
-        trajectory: multiprocessing.Queue,
-        state: Namespace,
-        action_space: Space,
-        use_sde: bool,
-        sde_sample_freq: int
-    ):
-        worker = Worker(
-            env_func=env_func,
-            trajectory=trajectory,
-            state=state,
-            action_space=action_space,
-            use_sde=use_sde,
-            sde_sample_freq=sde_sample_freq
+    def get_worker_kwargs(self):
+        return dict(
+            action_space=self.action_space,
+            use_sde=self.use_sde,
+            sde_sample_freq=self.sde_sample_freq,
         )
-        worker.run()
-
-    def init_collect_process(self):
-        if self._workers_inited:
-            return
-
-        action_space = self.action_space
-        use_sde = self.use_sde
-        sde_sample_freq = self.sde_sample_freq
-
-        for env_func in self._envs:
-            proc = multiprocessing.Process(
-                target=OnPolicyAlgorithmInjectorMP._run_worker,
-                args=(
-                    env_func,
-                    self._trajectory,
-                    self._state,
-                    action_space,
-                    use_sde,
-                    sde_sample_freq
-                )
-            )
-            proc.start()
-
-            self._proc.append(proc)
-
-        self._workers_inited = True
-
-    def _excluded_save_params(self) -> List[str]:
-        return [
-            *super()._excluded_save_params(),
-            *super(AsyncAgentInjectorBase, self)._excluded_save_params(),
-            "_trajectory",
-            "_manager",
-            "_state",
-            "_proc",
-            "_envs",
-        ]
-
-    def fetch_transitions(self) -> List[Transition]:
-        return self._trajectory.get()
-
-    def fetch_transition(self) -> Transition:
-        raise NotImplementedError
-
-    def _sync_policy(self, policy):
-        weights_buf = io.BytesIO()
-        th.save(policy.state_dict(), weights_buf)
-        weights_bytes = weights_buf.getvalue()
-        policy_buf = io.BytesIO()
-        th.save(policy, policy_buf)
-        policy_bytes = policy_buf.getvalue()
-
-        self._state.version = self._version
-        self._state.weights = weights_bytes
-        self._state.policy = policy_bytes
-        self._version += 1
-
-    def pre_collect_preparation(self, policy: BasePolicy):
-        self._sync_policy(policy)

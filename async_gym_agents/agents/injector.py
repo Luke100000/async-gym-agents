@@ -1,10 +1,13 @@
 import io
 import logging
+import multiprocessing
 import queue
 import threading
+from multiprocessing.managers import Namespace
 from queue import Queue
-from typing import Dict, List, TypeVar
+from typing import Dict, List, TypeVar, Callable, Type, Any, Optional
 
+import gymnasium as gym
 import torch as th
 from stable_baselines3.common.base_class import BasePolicy
 
@@ -247,3 +250,127 @@ class AsyncAgentInjector(AsyncAgentInjectorBase):
         for thread in self.threads:
             thread.join()
         self.initialized = False
+
+
+class InjectorWorkerBase:
+    def __init__(
+        self,
+        env_func: Callable[[], List[gym.Env]],
+        trajectory: multiprocessing.Queue,
+        state: Namespace,
+        **kwargs,
+    ):
+        self._env_func = env_func
+        self._trajectory = trajectory
+        self._state = state
+
+    def run(self):
+        raise NotImplementedError()
+
+
+class AsyncAgentInjectorMP(AsyncAgentInjectorBase):
+    def __init__(
+        self,
+        envs: List[Callable[[], List[gym.Env]]],
+        worker_class: InjectorWorkerBase,
+        max_steps_in_buffer: int = 10000
+    ):
+        AsyncAgentInjectorBase.__init__(self)
+
+        self._worker_class = worker_class
+
+        self._envs = envs
+        # shared memory
+        self._trajectory = multiprocessing.Queue(maxsize=max_steps_in_buffer)
+        # shared object (!)
+        self._manager = multiprocessing.Manager()
+        self._state = self._manager.Namespace()
+        self._version = 0
+
+        self._workers_inited = False
+        self._proc: List[multiprocessing.Process] = []
+
+        self._transitions: Optional[List[Transition]] = None
+
+    def _episode_generator(self, index: int):
+        raise NotImplementedError()
+
+    @staticmethod
+    def _run_worker(
+        worker_class: Type[InjectorWorkerBase],
+        env_func,
+        trajectory: multiprocessing.Queue,
+        state: Namespace,
+        worker_kwargs: Dict[str, Any],
+    ):
+        worker = worker_class(
+            env_func=env_func,
+            trajectory=trajectory,
+            state=state,
+            **worker_kwargs
+        )
+        worker.run()
+
+    def get_worker_kwargs(self) -> Dict[str, Any]:
+        raise NotImplementedError()
+
+    def init_collect_process(self):
+        if self._workers_inited:
+            return
+
+        for env_func in self._envs:
+            proc = multiprocessing.Process(
+                target=AsyncAgentInjectorMP._run_worker,
+                kwargs=dict(
+                    worker_class=self._worker_class,
+                    env_func=env_func,
+                    trajectory=self._trajectory,
+                    state=self._state,
+                    worker_kwargs=self.get_worker_kwargs(),
+                )
+            )
+            proc.start()
+
+            self._proc.append(proc)
+
+        self._workers_inited = True
+
+    def _excluded_save_params(self) -> List[str]:
+        return [
+            *super()._excluded_save_params(),
+            *super(AsyncAgentInjectorBase, self)._excluded_save_params(),
+            "_trajectory",
+            "_manager",
+            "_state",
+            "_proc",
+            "_envs",
+        ]
+
+    def fetch_transitions(self) -> List[Transition]:
+        return self._trajectory.get()
+
+    def fetch_transition(self) -> Transition:
+        if self._transitions is None or len(self._transitions) == 0:
+            self._transitions = self.fetch_transitions()
+
+        return self._transitions.pop(0)
+
+    def _sync_policy(self, policy):
+        weights_buf = io.BytesIO()
+        th.save(policy.state_dict(), weights_buf)
+        weights_bytes = weights_buf.getvalue()
+        policy_buf = io.BytesIO()
+        th.save(policy, policy_buf)
+        policy_bytes = policy_buf.getvalue()
+
+        self._state.version = self._version
+        self._state.weights = weights_bytes
+        self._state.policy = policy_bytes
+        self._version += 1
+
+    def pre_collect_preparation(self, policy: BasePolicy):
+        self._sync_policy(policy)
+
+    def shutdown(self):
+        for proc in self._proc:
+            proc.kill()
