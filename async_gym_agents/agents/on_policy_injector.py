@@ -249,11 +249,12 @@ class InjectorWorker(InjectorWorkerBase):
         env_func,
         trajectory: multiprocessing.Queue,
         state: Namespace,
+        stop: multiprocessing.Event,
         action_space: gym.Space,
         use_sde: bool = False,
         sde_sample_freq: int = 0
     ):
-        super().__init__(env_func, trajectory, state)
+        super().__init__(env_func, trajectory, state, stop)
 
         self._action_space = action_space
         self._use_sde = use_sde
@@ -342,6 +343,8 @@ class InjectorWorker(InjectorWorkerBase):
                 # exclude reset time from episode duration
                 start_time = end_time
 
+        self._logger.info(f"generator cycle is completed")
+
     def _copy_policy_from_state(self):
         state = self._state
         policy_bytes = state.policy
@@ -372,8 +375,16 @@ class InjectorWorker(InjectorWorkerBase):
             thread.start()
             threads.append(thread)
 
+        # wait stop outside the worker
+        self._stop.wait()
+        # stop threads
+        self._running = False
         for thread in threads:
             thread.join()
+
+        # stop env
+        for env in envs:
+            env.close()
 
 
 class OnPolicyAlgorithmInjectorMP(AsyncAgentInjectorMP, OnPolicyAlgorithmInjectorBase):

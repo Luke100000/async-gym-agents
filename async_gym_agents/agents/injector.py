@@ -258,11 +258,13 @@ class InjectorWorkerBase:
         env_func: Callable[[], List[gym.Env]],
         trajectory: multiprocessing.Queue,
         state: Namespace,
+        stop: multiprocessing.Event,
         **kwargs,
     ):
         self._env_func = env_func
         self._trajectory = trajectory
         self._state = state
+        self._stop = stop
 
     def run(self):
         raise NotImplementedError()
@@ -287,10 +289,17 @@ class AsyncAgentInjectorMP(AsyncAgentInjectorBase):
         self._state = self._manager.Namespace()
         self._version = 0
 
+        self._stop = multiprocessing.Event()
+
         self._workers_inited = False
         self._proc: List[multiprocessing.Process] = []
 
         self._transitions: Optional[List[Transition]] = None
+
+        # 1 minute wait the new message in queue
+        self._queue_get_timeout = 60.0
+        # 2 minute wait before try to kill the process
+        self._proc_join_timeout = 120.0
 
     def _episode_generator(self, index: int):
         raise NotImplementedError()
@@ -301,12 +310,14 @@ class AsyncAgentInjectorMP(AsyncAgentInjectorBase):
         env_func,
         trajectory: multiprocessing.Queue,
         state: Namespace,
+        stop: multiprocessing.Event,
         worker_kwargs: Dict[str, Any],
     ):
         worker = worker_class(
             env_func=env_func,
             trajectory=trajectory,
             state=state,
+            stop=stop,
             **worker_kwargs
         )
         worker.run()
@@ -326,6 +337,7 @@ class AsyncAgentInjectorMP(AsyncAgentInjectorBase):
                     env_func=env_func,
                     trajectory=self._trajectory,
                     state=self._state,
+                    stop=self._stop,
                     worker_kwargs=self.get_worker_kwargs(),
                 )
             )
@@ -347,10 +359,14 @@ class AsyncAgentInjectorMP(AsyncAgentInjectorBase):
         ]
 
     def fetch_transitions(self) -> List[Transition]:
-        return self._trajectory.get()
+        try:
+            return self._trajectory.get(timeout=self._queue_get_timeout)
+        except queue.Empty:
+            return []
 
     def fetch_transition(self) -> Transition:
-        if self._transitions is None or len(self._transitions) == 0:
+        # fetch_transitions returns [] in case of timeout is reached
+        while self._transitions is None or len(self._transitions) == 0:
             self._transitions = self.fetch_transitions()
 
         return self._transitions.pop(0)
@@ -372,5 +388,20 @@ class AsyncAgentInjectorMP(AsyncAgentInjectorBase):
         self._sync_policy(policy)
 
     def shutdown(self):
+        logger.info("send stop event to all processes")
+        self._stop.set()
+
         for proc in self._proc:
-            proc.kill()
+            if not proc.is_alive():
+                return
+
+            proc.join(timeout=self._proc_join_timeout)  # wait end
+
+            try:
+                proc.kill()
+            except PermissionError:
+                logger.warning("cannot kill process due to permission error")
+
+        logger.info("stop manager")
+        # release a shared object: manager
+        self._manager.shutdown()
