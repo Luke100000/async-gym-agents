@@ -186,9 +186,6 @@ class AsyncAgentInjector(AsyncAgentInjectorBase):
                 self.transition_queue.put(t)
         return self.transition_queue.get()
 
-    def fetch_transitions(self) -> List[Transition]:
-        raise NotImplementedError
-
     @property
     def buffer_utilization(self) -> float:
         return (
