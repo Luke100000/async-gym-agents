@@ -412,7 +412,7 @@ class AsyncAgentInjectorMP(AsyncAgentInjectorBase):
 
         for proc in self._proc:
             if not proc.is_alive():
-                return
+                continue
 
             proc.join(timeout=self._proc_join_timeout)
 
