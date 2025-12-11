@@ -85,6 +85,9 @@ class OnPolicyAlgorithmInjectorBase(AsyncAgentInjectorBase, OnPolicyAlgorithm):
         """
         assert self._last_obs is not None, "No previous observation was provided"
 
+        if not self.initialized:
+            self.init_collect_process()
+
         # Switch to eval mode (this affects batch norm / dropout)
         self.policy.set_training_mode(False)
         self.pre_collect_preparation(self.policy)
@@ -95,9 +98,6 @@ class OnPolicyAlgorithmInjectorBase(AsyncAgentInjectorBase, OnPolicyAlgorithm):
         # Sample new weights for the state-dependent exploration
         if self.use_sde:
             self.policy.reset_noise(1)
-
-        if not self.initialized:
-            self.init_collect_process()
 
         callback.on_rollout_start()
 
@@ -335,7 +335,7 @@ class InjectorWorker(InjectorWorkerBase):
                 end_time = time.time()
                 episode_time = end_time - start_time
                 avg = round(episode_time / len(episode), 2)
-                self._logger.info(f"step time: {avg};")
+                self._logger.debug(f"step time: {avg};")
 
                 episode = []
 

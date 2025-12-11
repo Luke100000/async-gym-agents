@@ -34,8 +34,10 @@ class IAsyncAgentInjector:
     def shutdown(self):
         raise NotImplementedError
 
-    def _excluded_save_params(self):
-        raise NotImplementedError
+    def _excluded_save_params(self) -> List[str]:
+        # Implicitly inherited from BaseAlgorithm
+        # noinspection PyProtectedMember,PyUnresolvedReferences
+        return super()._excluded_save_params()
 
 
 class AsyncAgentInjectorBase(IAsyncAgentInjector):
@@ -58,7 +60,7 @@ class AsyncAgentInjectorBase(IAsyncAgentInjector):
         raise NotImplementedError
 
     def _excluded_save_params(self) -> List[str]:
-        return [
+        return super()._excluded_save_params() + [
             "initialized",
         ]
 
@@ -136,7 +138,7 @@ class AsyncAgentInjector(AsyncAgentInjectorBase):
                 self.rollout_policy_versions[index] = self.training_policy_version
 
     def _excluded_save_params(self) -> List[str]:
-        return [
+        return super()._excluded_save_params() + [
             "threads",
             "queue",
             "transition_queue",
@@ -279,11 +281,14 @@ class AsyncAgentInjectorMP(AsyncAgentInjectorBase):
         self._worker_class = worker_class
 
         self._envs = envs
+
         # shared memory
-        self._trajectory = multiprocessing.Queue(maxsize=max_steps_in_buffer)
+        self.max_steps_in_buffer = max_steps_in_buffer
+        self._trajectory: multiprocessing.Queue | None = None
+
         # shared object (!)
-        self._manager = multiprocessing.Manager()
-        self._state = self._manager.Namespace()
+        self._manager: multiprocessing.Manager = None
+        self._state: Namespace | None = None
         self._version = 0
 
         self._stop = multiprocessing.Event()
@@ -330,6 +335,18 @@ class AsyncAgentInjectorMP(AsyncAgentInjectorBase):
         if self._workers_inited:
             return
 
+        # shared memory
+        if self._trajectory is None:
+            self._trajectory = multiprocessing.Queue(maxsize=self.max_steps_in_buffer)
+
+        # shared object (!)
+        if self._manager is None:
+            self._manager = multiprocessing.Manager()
+            self._state = self._manager.Namespace()
+
+        if self._stop is None:
+            self._stop = multiprocessing.Event()
+
         for env_func in self._envs:
             proc = multiprocessing.Process(
                 target=AsyncAgentInjectorMP._run_worker,
@@ -349,12 +366,12 @@ class AsyncAgentInjectorMP(AsyncAgentInjectorBase):
         self._workers_inited = True
 
     def _excluded_save_params(self) -> List[str]:
-        return [
-            *super()._excluded_save_params(),
-            *super(AsyncAgentInjectorBase, self)._excluded_save_params(),
+        return super()._excluded_save_params() + [
             "_trajectory",
             "_manager",
             "_state",
+            "_stop",
+            "_workers_inited",
             "_proc",
             "_envs",
         ]
@@ -391,6 +408,7 @@ class AsyncAgentInjectorMP(AsyncAgentInjectorBase):
     def shutdown(self):
         logger.info("send stop event to all processes")
         self._stop.set()
+        self._stop = None
 
         for proc in self._proc:
             if not proc.is_alive():
@@ -403,7 +421,19 @@ class AsyncAgentInjectorMP(AsyncAgentInjectorBase):
             except PermissionError:
                 logger.warning("cannot kill process due to permission error")
 
-        logger.info("stop manager")
+        # close the queue
+        if self._trajectory is not None:
+            self._trajectory.close()
+            self._trajectory.cancel_join_thread()
+            self._trajectory = None
 
         # release a shared object: manager
-        self._manager.shutdown()
+        if self._manager is not None:
+            self._manager.shutdown()
+            self._manager = None
+            self._state = None
+
+        self.initialized = False
+        self._workers_inited = False
+
+        logger.info("stop manager")
