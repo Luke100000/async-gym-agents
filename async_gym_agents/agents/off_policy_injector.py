@@ -304,3 +304,7 @@ class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithm):
             num_collected_episodes,
             continue_training,
         )
+
+
+class OffPolicyAlgorithmInjectorMP(OffPolicyAlgorithmInjector):
+    pass
