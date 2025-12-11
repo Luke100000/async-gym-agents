@@ -19,12 +19,16 @@ from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.on_policy_algorithm import OnPolicyAlgorithm
 from stable_baselines3.common.policies import BasePolicy
-from stable_baselines3.common.utils import obs_as_tensor, get_device
+from stable_baselines3.common.utils import get_device, obs_as_tensor
 from stable_baselines3.common.vec_env import VecEnv
 from stable_baselines3.common.vec_env.base_vec_env import VecEnvObs
 
-from async_gym_agents.agents.injector import AsyncAgentInjector, AsyncAgentInjectorBase, AsyncAgentInjectorMP, \
-    InjectorWorkerBase
+from async_gym_agents.agents.injector import (
+    AsyncAgentInjector,
+    AsyncAgentInjectorBase,
+    AsyncAgentInjectorMP,
+    InjectorWorkerBase,
+)
 
 
 @dataclass
@@ -252,7 +256,7 @@ class InjectorWorker(InjectorWorkerBase):
         stop: multiprocessing.Event,
         action_space: gym.Space,
         use_sde: bool = False,
-        sde_sample_freq: int = 0
+        sde_sample_freq: int = 0,
     ):
         super().__init__(env_func, trajectory, state, stop)
 
@@ -343,7 +347,7 @@ class InjectorWorker(InjectorWorkerBase):
                 # exclude reset time from episode duration
                 start_time = end_time
 
-        self._logger.info(f"generator cycle is completed")
+        self._logger.info("generator cycle is completed")
 
     def _copy_policy_from_state(self):
         state = self._state
@@ -370,13 +374,17 @@ class InjectorWorker(InjectorWorkerBase):
             thread = threading.Thread(
                 name=thread_name,
                 target=self._episode_generator,
-                args=(Monitor(env), index,),
+                args=(
+                    Monitor(env),
+                    index,
+                ),
             )
             thread.start()
             threads.append(thread)
 
         # wait stop outside the worker
         self._stop.wait()
+
         # stop threads
         self._running = False
         for thread in threads:
@@ -388,8 +396,18 @@ class InjectorWorker(InjectorWorkerBase):
 
 
 class OnPolicyAlgorithmInjectorMP(AsyncAgentInjectorMP, OnPolicyAlgorithmInjectorBase):
-    def __init__(self, *args, max_steps_in_buffer: int = 10000, _envs: Optional[List] = None, **kwargs) -> None:
-        super().__init__(envs=_envs, worker_class=InjectorWorker, max_steps_in_buffer=max_steps_in_buffer)
+    def __init__(
+        self,
+        *args,
+        max_steps_in_buffer: int = 10000,
+        _envs: Optional[List] = None,
+        **kwargs,
+    ) -> None:
+        super().__init__(
+            envs=_envs,
+            worker_class=InjectorWorker,
+            max_steps_in_buffer=max_steps_in_buffer,
+        )
         super(AsyncAgentInjectorMP, self).__init__(*args, **kwargs)
 
         # hardcoded override (!)

@@ -5,7 +5,7 @@ import queue
 import threading
 from multiprocessing.managers import Namespace
 from queue import Queue
-from typing import Dict, List, TypeVar, Callable, Type, Any, Optional
+from typing import Any, Callable, Dict, List, Optional, Type, TypeVar
 
 import gymnasium as gym
 import torch as th
@@ -272,7 +272,7 @@ class AsyncAgentInjectorMP(AsyncAgentInjectorBase):
         self,
         envs: List[Callable[[], List[gym.Env]]],
         worker_class: InjectorWorkerBase,
-        max_steps_in_buffer: int = 10000
+        max_steps_in_buffer: int = 10000,
     ):
         AsyncAgentInjectorBase.__init__(self)
 
@@ -293,9 +293,9 @@ class AsyncAgentInjectorMP(AsyncAgentInjectorBase):
 
         self._transitions: Optional[List[Transition]] = None
 
-        # 1 minute wait the new message in queue
+        # 1 minute wait for a new message in the queue
         self._queue_get_timeout = 60.0
-        # 2 minute wait before try to kill the process
+        # 2-minute wait before try to kill the process
         self._proc_join_timeout = 120.0
 
     def _episode_generator(self, index: int):
@@ -315,9 +315,13 @@ class AsyncAgentInjectorMP(AsyncAgentInjectorBase):
             trajectory=trajectory,
             state=state,
             stop=stop,
-            **worker_kwargs
+            **worker_kwargs,
         )
         worker.run()
+
+        # Close the queue
+        trajectory.close()
+        trajectory.cancel_join_thread()
 
     def get_worker_kwargs(self) -> Dict[str, Any]:
         raise NotImplementedError()
@@ -336,7 +340,7 @@ class AsyncAgentInjectorMP(AsyncAgentInjectorBase):
                     state=self._state,
                     stop=self._stop,
                     worker_kwargs=self.get_worker_kwargs(),
-                )
+                ),
             )
             proc.start()
 
@@ -392,7 +396,7 @@ class AsyncAgentInjectorMP(AsyncAgentInjectorBase):
             if not proc.is_alive():
                 return
 
-            proc.join(timeout=self._proc_join_timeout)  # wait end
+            proc.join(timeout=self._proc_join_timeout)
 
             try:
                 proc.kill()
@@ -400,5 +404,6 @@ class AsyncAgentInjectorMP(AsyncAgentInjectorBase):
                 logger.warning("cannot kill process due to permission error")
 
         logger.info("stop manager")
+
         # release a shared object: manager
         self._manager.shutdown()
