@@ -13,7 +13,7 @@ from stable_baselines3.common.utils import should_collect_more_steps
 from stable_baselines3.common.vec_env import VecEnv
 from stable_baselines3.common.vec_env.base_vec_env import VecEnvObs
 
-from async_gym_agents.agents.injector import AsyncAgentInjector
+from async_gym_agents.agents.injector import AsyncAgentInjector, AsyncAgentInjectorBase
 from async_gym_agents.envs.multi_env import IndexableMultiEnv
 
 
@@ -27,22 +27,7 @@ class Transition:
     infos: list[Dict]
 
 
-class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithm):
-    def __init__(self, *args, max_episodes_in_buffer: int = 8, **kwargs) -> None:
-        super().__init__(max_episodes_in_buffer)
-        super(AsyncAgentInjector, self).__init__(*args, **kwargs)
-
-    def train(self, *args, **kwargs) -> None:
-        with self.training_policy_lock:
-            super().train(*args, **kwargs)
-        self.training_policy_version += 1
-
-    def _excluded_save_params(self) -> List[str]:
-        return [
-            *super()._excluded_save_params(),
-            *super(AsyncAgentInjector, self)._excluded_save_params(),
-        ]
-
+class OffPolicyAlgorithmInjectorBase(AsyncAgentInjectorBase, OffPolicyAlgorithm):
     def _store_transition(*args):
         raise NotImplementedError()
 
@@ -91,86 +76,6 @@ class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithm):
             dones,
             infos,
         )
-
-    def _sample_action(*args):
-        raise NotImplementedError()
-
-    def _custom_sample_action(
-        self,
-        learning_starts: int,
-        obs,
-        action_noise: Optional[ActionNoise] = None,
-    ) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Very similar but uses passed observation as input
-        """
-        # Select action randomly or according to policy
-        if self.num_timesteps < learning_starts and not (
-            self.use_sde and self.use_sde_at_warmup
-        ):
-            # Warmup phase
-            unscaled_action = np.array([self.action_space.sample()])
-        else:
-            # Note: when using continuous actions,
-            # we assume that the policy uses tanh to scale the action
-            # We use non-deterministic action in the case of SAC, for TD3, it does not matter
-            unscaled_action, _ = self.predict(obs, deterministic=False)
-
-        # Rescale the action from [low, high] to [-1, 1]
-        if isinstance(self.action_space, spaces.Box):
-            scaled_action = self.policy.scale_action(unscaled_action)
-
-            # Add noise to the action (improve exploration)
-            if action_noise is not None:
-                scaled_action = np.clip(scaled_action + action_noise(), -1, 1)
-
-            # We store the scaled action in the buffer
-            buffer_action = scaled_action
-            action = self.policy.unscale_action(scaled_action)
-        else:
-            # Discrete case, no need to normalize or clip
-            buffer_action = unscaled_action
-            action = buffer_action
-        return action, buffer_action
-
-    def _episode_generator(self, index: int) -> Generator[list, None, None]:
-        """
-        Continuously plays the game and returns episodes of Transitions
-        """
-        env = self.get_indexable_env()
-        last_obs = env.reset(index=index)
-
-        episode = []
-
-        while self.running:
-            # Select action randomly or according to policy
-            actions, buffer_actions = self._custom_sample_action(
-                self.learning_starts,
-                last_obs,
-                self.action_noise,
-            )
-
-            # Rescale and perform action
-            new_obs, rewards, dones, infos = env.step(actions, index=index)
-
-            # Store transition
-            episode.append(
-                Transition(
-                    buffer_actions,
-                    deepcopy(last_obs),
-                    deepcopy(new_obs),
-                    rewards,
-                    dones,
-                    infos,
-                )
-            )
-            last_obs = new_obs
-
-            # Start a new episode
-            if any(dones):
-                yield episode
-                episode = []
-                self.sync_training_policy_to_rollout_policy_weights_only(index)
 
     def collect_rollouts(
         self,
@@ -306,5 +211,102 @@ class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithm):
         )
 
 
-class OffPolicyAlgorithmInjectorMP(OffPolicyAlgorithmInjector):
+class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithmInjectorBase):
+    def __init__(self, *args, max_episodes_in_buffer: int = 8, **kwargs) -> None:
+        super().__init__(max_episodes_in_buffer)
+        super(AsyncAgentInjectorBase, self).__init__(*args, **kwargs)
+
+    def train(self, *args, **kwargs) -> None:
+        with self.training_policy_lock:
+            super().train(*args, **kwargs)
+        self.training_policy_version += 1
+
+    def _excluded_save_params(self) -> List[str]:
+        return [
+            *super()._excluded_save_params(),
+            *super(AsyncAgentInjector, self)._excluded_save_params(),
+        ]
+
+    def _sample_action(*args):
+        raise NotImplementedError()
+
+    def _custom_sample_action(
+        self,
+        learning_starts: int,
+        obs,
+        action_noise: Optional[ActionNoise] = None,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Very similar but uses passed observation as input
+        """
+        # Select action randomly or according to policy
+        if self.num_timesteps < learning_starts and not (
+            self.use_sde and self.use_sde_at_warmup
+        ):
+            # Warmup phase
+            unscaled_action = np.array([self.action_space.sample()])
+        else:
+            # Note: when using continuous actions,
+            # we assume that the policy uses tanh to scale the action
+            # We use non-deterministic action in the case of SAC, for TD3, it does not matter
+            unscaled_action, _ = self.predict(obs, deterministic=False)
+
+        # Rescale the action from [low, high] to [-1, 1]
+        if isinstance(self.action_space, spaces.Box):
+            scaled_action = self.policy.scale_action(unscaled_action)
+
+            # Add noise to the action (improve exploration)
+            if action_noise is not None:
+                scaled_action = np.clip(scaled_action + action_noise(), -1, 1)
+
+            # We store the scaled action in the buffer
+            buffer_action = scaled_action
+            action = self.policy.unscale_action(scaled_action)
+        else:
+            # Discrete case, no need to normalize or clip
+            buffer_action = unscaled_action
+            action = buffer_action
+        return action, buffer_action
+
+    def _episode_generator(self, index: int) -> Generator[list, None, None]:
+        """
+        Continuously plays the game and returns episodes of Transitions
+        """
+        env = self.get_indexable_env()
+        last_obs = env.reset(index=index)
+
+        episode = []
+
+        while self.running:
+            # Select action randomly or according to policy
+            actions, buffer_actions = self._custom_sample_action(
+                self.learning_starts,
+                last_obs,
+                self.action_noise,
+            )
+
+            # Rescale and perform action
+            new_obs, rewards, dones, infos = env.step(actions, index=index)
+
+            # Store transition
+            episode.append(
+                Transition(
+                    buffer_actions,
+                    deepcopy(last_obs),
+                    deepcopy(new_obs),
+                    rewards,
+                    dones,
+                    infos,
+                )
+            )
+            last_obs = new_obs
+
+            # Start a new episode
+            if any(dones):
+                yield episode
+                episode = []
+                self.sync_training_policy_to_rollout_policy_weights_only(index)
+
+
+class OffPolicyAlgorithmInjectorMP(OffPolicyAlgorithmInjectorBase):
     pass
