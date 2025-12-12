@@ -10,6 +10,7 @@ from typing import Any, Callable, Dict, List, Optional, Type, TypeVar
 import gymnasium as gym
 import torch as th
 from stable_baselines3.common.base_class import BasePolicy
+from stable_baselines3.common.monitor import Monitor
 
 from async_gym_agents.envs.multi_env import IndexableMultiEnv
 
@@ -265,8 +266,39 @@ class InjectorWorkerBase:
         self._state = state
         self._stop = stop
 
-    def run(self):
+        self.running = True
+
+    def episode_generator(self, env: gym.Env, index: int):
         raise NotImplementedError()
+
+    def run(self):
+        threads = []
+        envs = self._env_func()
+
+        for index, env in enumerate(envs):
+            thread_name = f"collector-thread-{index}"
+            thread = threading.Thread(
+                name=thread_name,
+                target=self.episode_generator,
+                args=(
+                    Monitor(env),
+                    index,
+                ),
+            )
+            thread.start()
+            threads.append(thread)
+
+        # wait stop outside the worker
+        self._stop.wait()
+
+        # stop threads
+        self.running = False
+        for thread in threads:
+            thread.join()
+
+        # stop env
+        for env in envs:
+            env.close()
 
 
 class AsyncAgentInjectorMP(AsyncAgentInjectorBase):

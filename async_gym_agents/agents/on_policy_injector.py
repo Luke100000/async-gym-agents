@@ -2,7 +2,6 @@ import io
 import logging
 import multiprocessing
 import queue
-import threading
 import time
 from copy import deepcopy
 from dataclasses import dataclass
@@ -12,11 +11,9 @@ from typing import Dict, Generator, List, Optional
 import gymnasium as gym
 import numpy as np
 import torch
-import torch as th
 from gymnasium import spaces
 from stable_baselines3.common.buffers import RolloutBuffer
 from stable_baselines3.common.callbacks import BaseCallback
-from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.on_policy_algorithm import OnPolicyAlgorithm
 from stable_baselines3.common.policies import BasePolicy
 from stable_baselines3.common.utils import get_device, obs_as_tensor
@@ -147,7 +144,7 @@ class OnPolicyAlgorithmInjectorBase(AsyncAgentInjectorBase, OnPolicyAlgorithm):
                     terminal_obs = self.policy.obs_to_tensor(
                         infos[idx]["terminal_observation"]
                     )[0]
-                    with th.no_grad():
+                    with torch.no_grad():
                         terminal_value = self.policy.predict_values(terminal_obs)[0]
                     rewards[idx] += self.gamma * terminal_value
 
@@ -160,7 +157,7 @@ class OnPolicyAlgorithmInjectorBase(AsyncAgentInjectorBase, OnPolicyAlgorithm):
                 log_probs,
             )
 
-        with th.no_grad():
+        with torch.no_grad():
             # Compute value for the last timestep
             values = self.policy.predict_values(obs_as_tensor(new_obs, self.device))
 
@@ -195,7 +192,7 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithmInjectorBas
         episode = []
 
         while self.running:
-            with th.no_grad():
+            with torch.no_grad():
                 # Convert to pytorch tensor or to TensorDict
                 obs_tensor = obs_as_tensor(last_obs, self.device)
                 actions, values, log_probs = self.policy(obs_tensor)
@@ -264,14 +261,13 @@ class InjectorWorker(InjectorWorkerBase):
         self._use_sde = use_sde
         self._sde_sample_freq = sde_sample_freq
 
-        self._running = True
         self._version = None
         self._policy = None
 
         self._logger = logging.getLogger("Worker")
         self._device = get_device("cpu")
 
-    def _episode_generator(self, env: gym.Env, index: int):
+    def episode_generator(self, env: gym.Env, index: int):
         last_obs, info = env.reset()
         last_dones = np.ones((1,), dtype=bool)
         policy = self._copy_policy_from_state()
@@ -279,12 +275,12 @@ class InjectorWorker(InjectorWorkerBase):
         episode = []
         start_time = time.time()
 
-        while self._running:
+        while self.running:
             obs_tensor = obs_as_tensor(last_obs, self._device)
             if obs_tensor.dim() == 1:
                 obs_tensor = obs_tensor.unsqueeze(0)
 
-            with th.no_grad():
+            with torch.no_grad():
                 actions, values, log_probs = policy(obs_tensor)
 
             actions = actions.cpu().numpy()
@@ -356,7 +352,7 @@ class InjectorWorker(InjectorWorkerBase):
         if self._version != state.version:
             data = io.BytesIO(policy_bytes)
             # load state
-            policy = th.load(data, weights_only=False, map_location="cpu")
+            policy = torch.load(data, weights_only=False, map_location="cpu")
             # turn off the train mode
             policy.set_training_mode(False)
 
@@ -364,35 +360,6 @@ class InjectorWorker(InjectorWorkerBase):
             self._version = state.version
 
         return self._policy
-
-    def run(self):
-        threads = []
-        envs = self._env_func()
-
-        for index, env in enumerate(envs):
-            thread_name = f"collector-thread-{index}"
-            thread = threading.Thread(
-                name=thread_name,
-                target=self._episode_generator,
-                args=(
-                    Monitor(env),
-                    index,
-                ),
-            )
-            thread.start()
-            threads.append(thread)
-
-        # wait stop outside the worker
-        self._stop.wait()
-
-        # stop threads
-        self._running = False
-        for thread in threads:
-            thread.join()
-
-        # stop env
-        for env in envs:
-            env.close()
 
 
 class OnPolicyAlgorithmInjectorMP(AsyncAgentInjectorMP, OnPolicyAlgorithmInjectorBase):
