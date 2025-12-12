@@ -19,6 +19,8 @@ logger = logging.getLogger("async_gym_agents")
 
 Transition = TypeVar("Transition")
 
+EnvFactoryList = List[Callable[[], List[gym.Env]]]
+
 
 class IAsyncAgentInjector:
     initialized: bool
@@ -42,8 +44,9 @@ class IAsyncAgentInjector:
 
 
 class AsyncAgentInjectorBase(IAsyncAgentInjector):
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, envs: Optional[EnvFactoryList] = None, **kwargs):
         self.initialized = False
+        self._envs = envs
 
     def pre_collect_preparation(self, policy: BasePolicy):
         raise NotImplementedError
@@ -304,15 +307,13 @@ class InjectorWorkerBase:
 class AsyncAgentInjectorMP(AsyncAgentInjectorBase):
     def __init__(
         self,
-        envs: List[Callable[[], List[gym.Env]]],
+        envs: Optional[EnvFactoryList],
         worker_class: InjectorWorkerBase,
         max_steps_in_buffer: int = 10000,
     ):
-        AsyncAgentInjectorBase.__init__(self)
+        AsyncAgentInjectorBase.__init__(self, envs=envs)
 
         self._worker_class = worker_class
-
-        self._envs = envs
 
         # shared memory
         self.max_steps_in_buffer = max_steps_in_buffer
@@ -378,6 +379,11 @@ class AsyncAgentInjectorMP(AsyncAgentInjectorBase):
 
         if self._stop is None:
             self._stop = multiprocessing.Event()
+
+        if self._envs is None:
+            raise ValueError(
+                "Multi-processed injectors must have the envs constructor set."
+            )
 
         for env_func in self._envs:
             proc = multiprocessing.Process(

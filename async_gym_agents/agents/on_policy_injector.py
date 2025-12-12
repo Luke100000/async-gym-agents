@@ -24,6 +24,8 @@ from async_gym_agents.agents.injector import (
     AsyncAgentInjector,
     AsyncAgentInjectorBase,
     AsyncAgentInjectorMP,
+    EnvFactoryList,
+    IAsyncAgentInjector,
     InjectorWorkerBase,
 )
 
@@ -367,15 +369,15 @@ class OnPolicyAlgorithmInjectorMP(AsyncAgentInjectorMP, OnPolicyAlgorithmInjecto
         self,
         *args,
         max_steps_in_buffer: int = 10000,
-        _envs: Optional[List] = None,
+        envs: Optional[EnvFactoryList] = None,
         **kwargs,
     ) -> None:
         super().__init__(
-            envs=_envs,
+            envs=envs,
             worker_class=InjectorWorker,
             max_steps_in_buffer=max_steps_in_buffer,
         )
-        super(AsyncAgentInjectorMP, self).__init__(*args, **kwargs)
+        super(IAsyncAgentInjector, self).__init__(*args, **kwargs)
 
         # hardcoded override (!)
         self.device = get_device("cpu")

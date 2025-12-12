@@ -25,6 +25,8 @@ from async_gym_agents.agents.injector import (
     AsyncAgentInjector,
     AsyncAgentInjectorBase,
     AsyncAgentInjectorMP,
+    EnvFactoryList,
+    IAsyncAgentInjector,
     InjectorWorkerBase,
 )
 from async_gym_agents.envs.multi_env import IndexableMultiEnv
@@ -344,9 +346,7 @@ class EpisodeGenerator:
 
                 policy = self.update_policy(policy)
 
-                if isinstance(env, IndexableMultiEnv):
-                    last_obs = env.reset(index=index)
-                else:
+                if not isinstance(env, IndexableMultiEnv):
                     last_obs, _ = env.reset()
                     last_obs = np.array([last_obs])
 
@@ -355,15 +355,6 @@ class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithmInjectorB
     def __init__(self, *args, max_episodes_in_buffer: int = 8, **kwargs) -> None:
         super().__init__(max_episodes_in_buffer)
         super(AsyncAgentInjectorBase, self).__init__(*args, **kwargs)
-
-        self.episode_generator = EpisodeGenerator(
-            self.learning_starts,
-            self.num_timesteps,
-            self.use_sde,
-            self.use_sde_at_warmup,
-            self.action_space,
-            self.action_noise,
-        )
 
     def train(self, *args, **kwargs) -> None:
         with self.training_policy_lock:
@@ -383,7 +374,15 @@ class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithmInjectorB
         """
         Continuously plays the game and returns episodes of Transitions
         """
-        generator = self.episode_generator.generate(
+        episode_generator = EpisodeGenerator(
+            self.learning_starts,
+            self.num_timesteps,
+            self.use_sde,
+            self.use_sde_at_warmup,
+            self.action_space,
+            self.action_noise,
+        )
+        generator = episode_generator.generate(
             self.policy, self.get_indexable_env(), index
         )
         while self.running:
@@ -448,15 +447,15 @@ class OffPolicyAlgorithmInjectorMP(
         self,
         *args,
         max_steps_in_buffer: int = 10000,
-        _envs: Optional[List] = None,
+        envs: Optional[EnvFactoryList] = None,
         **kwargs,
     ) -> None:
         super().__init__(
-            envs=_envs,
+            envs=envs,
             worker_class=InjectorWorker,
             max_steps_in_buffer=max_steps_in_buffer,
         )
-        super(AsyncAgentInjectorMP, self).__init__(*args, **kwargs)
+        super(IAsyncAgentInjector, self).__init__(*args, **kwargs)
 
         # hardcoded override (!)
         self.device = get_device("cpu")
