@@ -2,7 +2,6 @@ import io
 import logging
 import multiprocessing
 import queue
-import time
 from copy import deepcopy
 from dataclasses import dataclass
 from multiprocessing.managers import Namespace
@@ -24,10 +23,12 @@ from async_gym_agents.agents.injector import (
     AsyncAgentInjector,
     AsyncAgentInjectorBase,
     AsyncAgentInjectorMP,
+    EnvFactory,
     EnvFactoryList,
     IAsyncAgentInjector,
     InjectorWorkerBase,
 )
+from async_gym_agents.envs.multi_env import IndexableMultiEnv
 
 
 @dataclass
@@ -172,42 +173,40 @@ class OnPolicyAlgorithmInjectorBase(AsyncAgentInjectorBase, OnPolicyAlgorithm):
         return True
 
 
-class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithmInjectorBase):
-    def __init__(self, *args, max_episodes_in_buffer: int = 8, **kwargs) -> None:
-        super().__init__(max_episodes_in_buffer)
-        super(AsyncAgentInjector, self).__init__(*args, **kwargs)
+class EpisodeGenerator:
+    def __init__(self, action_space: gym.Space, device: torch.device) -> None:
+        self.action_space = action_space
+        self.device = device
 
-    def train(self, *args, **kwargs) -> None:
-        # update self.training_policy
-        with self.training_policy_lock:
-            super().train()
-        self.training_policy_version += 1
+    def update_policy(self, policy: BasePolicy) -> BasePolicy:
+        return policy
 
-    def _episode_generator(self, index: int) -> Generator[list, None, None]:
+    def generate(
+        self, policy: BasePolicy, env: IndexableMultiEnv, index: int
+    ) -> Generator[list, None, None]:
         """
         Continuously plays the game and returns episodes of Transitions
         """
-        env = self.get_indexable_env()
         last_obs = env.reset(index=index)
         last_dones = np.ones((1,), dtype=bool)
 
         episode = []
 
-        while self.running:
+        while True:
             with torch.no_grad():
                 # Convert to pytorch tensor or to TensorDict
                 obs_tensor = obs_as_tensor(last_obs, self.device)
-                actions, values, log_probs = self.policy(obs_tensor)
+                actions, values, log_probs = policy(obs_tensor)
             actions = actions.cpu().numpy()
 
             # Rescale and perform action
             clipped_actions = actions
 
             if isinstance(self.action_space, spaces.Box):
-                if self.policy.squash_output:
+                if policy.squash_output:
                     # Unscale the actions to match env bounds
                     # if they were previously squashed (scaled in [-1, 1])
-                    clipped_actions = self.policy.unscale_action(clipped_actions)
+                    clipped_actions = policy.unscale_action(clipped_actions)
                 else:
                     # Otherwise, clip the actions to avoid out-of-bound error
                     # as we are sampling from an unbounded Gaussian distribution
@@ -243,107 +242,65 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithmInjectorBas
             if any(dones):
                 yield episode
                 episode = []
-                self.sync_training_policy_to_rollout_policy_weights_only(index)
+
+                policy = self.update_policy(policy)
 
 
-class InjectorWorker(InjectorWorkerBase):
+class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithmInjectorBase):
+    def __init__(self, *args, max_episodes_in_buffer: int = 8, **kwargs) -> None:
+        super().__init__(max_episodes_in_buffer)
+        super(AsyncAgentInjector, self).__init__(*args, **kwargs)
+
+    def train(self, *args, **kwargs) -> None:
+        # update self.training_policy
+        with self.training_policy_lock:
+            super().train()
+        self.training_policy_version += 1
+
+    def _episode_generator(self, index: int) -> Generator[list, None, None]:
+        """
+        Continuously plays the game and returns episodes of Transitions
+        """
+        episode_generator = EpisodeGenerator(self.action_space, self.device)
+        generator = episode_generator.generate(
+            self.policy, self.get_indexable_env(), index
+        )
+        while self.running:
+            yield next(generator)
+            self.sync_training_policy_to_rollout_policy_weights_only(index)
+
+
+def identity(x):
+    return x
+
+
+class InjectorWorker(InjectorWorkerBase, EpisodeGenerator):
     def __init__(
         self,
-        env_func,
+        env_func: EnvFactory,
         trajectory: multiprocessing.Queue,
         state: Namespace,
         stop: multiprocessing.Event,
-        action_space: gym.Space,
-        use_sde: bool = False,
-        sde_sample_freq: int = 0,
+        **kwargs,
     ):
         super().__init__(env_func, trajectory, state, stop)
-
-        self._action_space = action_space
-        self._use_sde = use_sde
-        self._sde_sample_freq = sde_sample_freq
+        EpisodeGenerator.__init__(self, **kwargs)
 
         self._version = None
         self._policy = None
 
         self._logger = logging.getLogger("Worker")
-        self._device = get_device("cpu")
 
-    def episode_generator(self, env: gym.Env, index: int):
-        last_obs, info = env.reset()
-        last_dones = np.ones((1,), dtype=bool)
-        policy = self._copy_policy_from_state()
-
-        episode = []
-        start_time = time.time()
+    def episode_generator(self, env: IndexableMultiEnv, index: int):
+        generator = self.generate(self._copy_policy_from_state(), env, index)
 
         while self.running:
-            obs_tensor = obs_as_tensor(last_obs, self._device)
-            if obs_tensor.dim() == 1:
-                obs_tensor = obs_tensor.unsqueeze(0)
+            episode = next(generator)
 
-            with torch.no_grad():
-                actions, values, log_probs = policy(obs_tensor)
-
-            actions = actions.cpu().numpy()
-
-            clipped_actions = actions
-
-            if isinstance(self._action_space, spaces.Box):
-                if policy.squash_output:
-                    clipped_actions = policy.unscale_action(clipped_actions)
-                else:
-                    clipped_actions = np.clip(
-                        actions, self._action_space.low, self._action_space.high
-                    )
-
-            # ObsType, SupportsFloat, bool, bool, dict[str, Any]
-            new_ob, reward, terminated, truncated, info = env.step(clipped_actions[0])
-            if isinstance(self._action_space, spaces.Discrete):
-                actions = actions.reshape(-1, 1)
-
-            done = terminated or truncated
-
-            # Store transition
-            # Single values -> Multi-values
-            # gym.Env -> VecEnv format
-            episode.append(
-                Transition(
-                    actions,
-                    values,
-                    log_probs,
-                    np.array([last_obs]),
-                    np.array([new_ob]),
-                    np.array([reward]),
-                    np.array([done], dtype=bool),
-                    np.array([last_dones], dtype=bool),
-                    [info],
-                    index,
-                )
-            )
-            last_obs = new_ob
-            last_dones = done
-
-            if done:
-                try:
-                    self._trajectory.put_nowait(episode)
-                except queue.Full:
-                    self._logger.warning("dropped episode due to buffer full")
-
-                end_time = time.time()
-                episode_time = end_time - start_time
-                avg = round(episode_time / len(episode), 2)
-                self._logger.debug(f"step time: {avg};")
-
-                episode = []
-
-                # reset
-                last_obs, info = env.reset()
-                last_dones = np.ones((1,), dtype=bool)
-                policy = self._copy_policy_from_state()
-
-                # exclude reset time from episode duration
-                start_time = end_time
+            try:
+                self._trajectory.put_nowait(episode)
+            except queue.Full:
+                self._logger.warning("dropped episode due to buffer full")
 
         self._logger.info("generator cycle is completed")
 
@@ -362,6 +319,9 @@ class InjectorWorker(InjectorWorkerBase):
             self._version = state.version
 
         return self._policy
+
+    def update_policy(self, policy: BasePolicy) -> BasePolicy:
+        return self._copy_policy_from_state()
 
 
 class OnPolicyAlgorithmInjectorMP(AsyncAgentInjectorMP, OnPolicyAlgorithmInjectorBase):
@@ -383,8 +343,4 @@ class OnPolicyAlgorithmInjectorMP(AsyncAgentInjectorMP, OnPolicyAlgorithmInjecto
         self.device = get_device("cpu")
 
     def get_worker_kwargs(self):
-        return dict(
-            action_space=self.action_space,
-            use_sde=self.use_sde,
-            sde_sample_freq=self.sde_sample_freq,
-        )
+        return dict(action_space=self.action_space, device=self.device)

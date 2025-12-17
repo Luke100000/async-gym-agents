@@ -292,16 +292,12 @@ class EpisodeGenerator:
         return policy
 
     def generate(
-        self, policy: BasePolicy, env: gym.Env | IndexableMultiEnv, index: int
+        self, policy: BasePolicy, env: IndexableMultiEnv, index: int
     ) -> Generator[list, None, None]:
         """
         Continuously plays the game and returns episodes of Transitions
         """
-        if isinstance(env, IndexableMultiEnv):
-            last_obs = env.reset(index=index)
-        else:
-            last_obs, _ = env.reset()
-            last_obs = np.array([last_obs])
+        last_obs = env.reset(index=index)
 
         episode = []
 
@@ -315,16 +311,7 @@ class EpisodeGenerator:
             )
 
             # Rescale and perform action
-            if isinstance(env, IndexableMultiEnv):
-                new_obs, rewards, dones, infos = env.step(actions, index=index)
-            else:
-                new_obs, reward, terminated, truncated, info = env.step(actions[0])
-                dones = [terminated or truncated]
-
-                new_obs = np.array([new_obs])
-                rewards = np.array([reward])
-                dones = np.array([dones])
-                infos = [info]
+            new_obs, rewards, dones, infos = env.step(actions, index=index)
 
             # Store transition
             episode.append(
@@ -345,10 +332,6 @@ class EpisodeGenerator:
                 episode = []
 
                 policy = self.update_policy(policy)
-
-                if not isinstance(env, IndexableMultiEnv):
-                    last_obs, _ = env.reset()
-                    last_obs = np.array([last_obs])
 
 
 class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithmInjectorBase):
@@ -407,7 +390,7 @@ class InjectorWorker(InjectorWorkerBase, EpisodeGenerator):
 
         self._logger = logging.getLogger("Worker")
 
-    def episode_generator(self, env: gym.Env, index: int):
+    def episode_generator(self, env: IndexableMultiEnv, index: int):
         generator = self.generate(self._copy_policy_from_state(), env, index)
 
         while self.running:

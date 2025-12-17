@@ -3,6 +3,7 @@ import logging
 import multiprocessing
 import queue
 import threading
+from functools import partial
 from multiprocessing.managers import Namespace
 from queue import Queue
 from typing import Any, Callable, Dict, List, Optional, Type, TypeVar, Union
@@ -10,7 +11,6 @@ from typing import Any, Callable, Dict, List, Optional, Type, TypeVar, Union
 import gymnasium as gym
 import torch as th
 from stable_baselines3.common.base_class import BasePolicy
-from stable_baselines3.common.monitor import Monitor
 
 from async_gym_agents.envs.multi_env import IndexableMultiEnv
 
@@ -256,6 +256,10 @@ class AsyncAgentInjector(AsyncAgentInjectorBase):
         self.initialized = False
 
 
+def identity(x):
+    return x
+
+
 class InjectorWorkerBase:
     def __init__(
         self,
@@ -272,25 +276,26 @@ class InjectorWorkerBase:
 
         self.running = True
 
-    def episode_generator(self, env: gym.Env, index: int):
+    def episode_generator(self, env: IndexableMultiEnv, index: int):
         raise NotImplementedError()
 
     def run(self):
         threads = []
         envs = self._env_func()
 
+        # Support single envs
         if not isinstance(envs, list):
             envs = [envs]
 
-        for index, env in enumerate(envs):
+        # Wrap into IndexableMultiEnv
+        env = IndexableMultiEnv([partial(identity, env) for env in envs])
+
+        for index in range(len(envs)):
             thread_name = f"collector-thread-{index}"
             thread = threading.Thread(
                 name=thread_name,
                 target=self.episode_generator,
-                args=(
-                    Monitor(env),
-                    index,
-                ),
+                args=(env, index),
             )
             thread.start()
             threads.append(thread)
@@ -304,8 +309,7 @@ class InjectorWorkerBase:
             thread.join()
 
         # stop env
-        for env in envs:
-            env.close()
+        env.close()
 
 
 class AsyncAgentInjectorMP(AsyncAgentInjectorBase):

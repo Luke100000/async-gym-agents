@@ -46,12 +46,12 @@ def test_on_policy():
 
 
 def env_func_on() -> gym.Env:
-    return gym.make("Pendulum-v1")
+    return gym.make("Taxi-v3")
 
 
 def test_on_policy_mp():
     # Create env
-    env = gym.make("Pendulum-v1")
+    env = gym.make("Taxi-v3")
 
     # Create the model, injected with async capabilities
     model = get_injected_agent(PPO, use_mp=True)(
