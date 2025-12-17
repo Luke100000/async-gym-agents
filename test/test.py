@@ -45,8 +45,8 @@ def test_on_policy():
     run_test(model)
 
 
-def env_func_on() -> List[gym.Env]:
-    return [gym.make("Pendulum-v1") for _ in range(processes)]
+def env_func_on() -> gym.Env:
+    return gym.make("Pendulum-v1")
 
 
 def test_on_policy_mp():
@@ -54,7 +54,9 @@ def test_on_policy_mp():
     env = gym.make("Pendulum-v1")
 
     # Create the model, injected with async capabilities
-    model = get_injected_agent(PPO, use_mp=True)("MlpPolicy", env, envs=[env_func_on])
+    model = get_injected_agent(PPO, use_mp=True)(
+        "MlpPolicy", env, envs=[env_func_on for _ in range(processes)]
+    )
 
     run_test(model)
 

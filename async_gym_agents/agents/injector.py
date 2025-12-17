@@ -5,7 +5,7 @@ import queue
 import threading
 from multiprocessing.managers import Namespace
 from queue import Queue
-from typing import Any, Callable, Dict, List, Optional, Type, TypeVar
+from typing import Any, Callable, Dict, List, Optional, Type, TypeVar, Union
 
 import gymnasium as gym
 import torch as th
@@ -19,7 +19,8 @@ logger = logging.getLogger("async_gym_agents")
 
 Transition = TypeVar("Transition")
 
-EnvFactoryList = List[Callable[[], List[gym.Env]]]
+EnvFactory = Callable[[], Union[gym.Env, List[gym.Env]]]
+EnvFactoryList = List[EnvFactory]
 
 
 class IAsyncAgentInjector:
@@ -258,7 +259,7 @@ class AsyncAgentInjector(AsyncAgentInjectorBase):
 class InjectorWorkerBase:
     def __init__(
         self,
-        env_func: Callable[[], List[gym.Env]],
+        env_func: EnvFactory,
         trajectory: multiprocessing.Queue,
         state: Namespace,
         stop: multiprocessing.Event,
@@ -277,6 +278,9 @@ class InjectorWorkerBase:
     def run(self):
         threads = []
         envs = self._env_func()
+
+        if not isinstance(envs, list):
+            envs = [envs]
 
         for index, env in enumerate(envs):
             thread_name = f"collector-thread-{index}"
@@ -342,7 +346,7 @@ class AsyncAgentInjectorMP(AsyncAgentInjectorBase):
     @staticmethod
     def _run_worker(
         worker_class: Type[InjectorWorkerBase],
-        env_func,
+        env_func: EnvFactory,
         trajectory: multiprocessing.Queue,
         state: Namespace,
         stop: multiprocessing.Event,

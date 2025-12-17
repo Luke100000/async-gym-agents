@@ -21,3 +21,30 @@ model.learn(total_timesteps=10)
 # Shut down workers
 model.shutdown()
 ```
+
+## Multiprocessing
+
+AsyncGymAgents is primarily designed for IO/Networking heavy situations and uses threads.
+For CPU-constrained applications, multiprocessing can be enabled using `use_mp=True`:
+
+```py
+import gymnasium as gym
+from async_gym_agents.agents.async_agent import get_injected_agent
+from stable_baselines3 import PPO
+
+
+def env_func():
+    # return [gym.make("Pendulum-v1") for _ in range(4)]
+    return gym.make("Pendulum-v1")
+
+
+# Create env to define spaces
+env = gym.make("Pendulum-v1")
+
+# Create the model, injected with async capabilities
+model = get_injected_agent(PPO, use_mp=True)("MlpPolicy", env, envs=[env_func for _ in range(8)])
+```
+
+Since not all envs can be transferred to processes, a constructor is required.
+This constructor allows returning a list of processes, run in threads within a single process.
+This allows, e.g., balancing the tradeoff between GIL and memory usage.
