@@ -1,19 +1,34 @@
+import io
+import logging
+import multiprocessing
+import queue
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Dict, Generator, List
+from multiprocessing.managers import Namespace
+from typing import Dict, Generator, List, Optional
 
+import gymnasium as gym
 import numpy as np
 import torch
-import torch as th
 from gymnasium import spaces
 from stable_baselines3.common.buffers import RolloutBuffer
 from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.on_policy_algorithm import OnPolicyAlgorithm
-from stable_baselines3.common.utils import obs_as_tensor
+from stable_baselines3.common.policies import BasePolicy
+from stable_baselines3.common.utils import get_device, obs_as_tensor
 from stable_baselines3.common.vec_env import VecEnv
 from stable_baselines3.common.vec_env.base_vec_env import VecEnvObs
 
-from async_gym_agents.agents.injector import AsyncAgentInjector
+from async_gym_agents.agents.injector import (
+    AsyncAgentInjector,
+    AsyncAgentInjectorBase,
+    AsyncAgentInjectorMP,
+    EnvFactory,
+    EnvFactoryList,
+    IAsyncAgentInjector,
+    InjectorWorkerBase,
+)
+from async_gym_agents.envs.multi_env import IndexableMultiEnv
 
 
 @dataclass
@@ -30,85 +45,24 @@ class Transition:
     index: int
 
 
-class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
-    def __init__(self, *args, max_episodes_in_buffer: int = 8, **kwargs) -> None:
-        super().__init__(max_episodes_in_buffer)
-        super(AsyncAgentInjector, self).__init__(*args, **kwargs)
+class OnPolicyAlgorithmInjectorBase(AsyncAgentInjectorBase, OnPolicyAlgorithm):
+    def __init__(self, *args, **kwargs):
+        super().__init__(self)
+        super(AsyncAgentInjectorBase, self).__init__(*args, **kwargs)
 
-    def train(self, *args, **kwargs) -> None:
-        # update self.training_policy
-        with self.training_policy_lock:
-            super().train()
-        self.training_policy_version += 1
+    def init_collect_process(self):
+        raise NotImplementedError
 
-    def _excluded_save_params(self) -> List[str]:
-        return [
-            *super()._excluded_save_params(),
-            *super(AsyncAgentInjector, self)._excluded_save_params(),
-        ]
+    def fetch_transition(self) -> Transition:
+        raise NotImplementedError
 
-    def _episode_generator(self, index: int) -> Generator[list, None, None]:
-        """
-        Continuously plays the game and returns episodes of Transitions
-        """
-        env = self.get_indexable_env()
-        last_obs = env.reset(index=index)
-        last_dones = np.ones((1,), dtype=bool)
+    def fetch_transitions(self) -> List[Transition]:
+        raise NotImplementedError
 
-        episode = []
+    def pre_collect_preparation(self, policy: BasePolicy):
+        raise NotImplementedError
 
-        while self.running:
-            with th.no_grad():
-                # Convert to pytorch tensor or to TensorDict
-                obs_tensor = obs_as_tensor(last_obs, self.device)
-                actions, values, log_probs = self.policy(obs_tensor)
-            actions = actions.cpu().numpy()
-
-            # Rescale and perform action
-            clipped_actions = actions
-
-            if isinstance(self.action_space, spaces.Box):
-                if self.policy.squash_output:
-                    # Unscale the actions to match env bounds
-                    # if they were previously squashed (scaled in [-1, 1])
-                    clipped_actions = self.policy.unscale_action(clipped_actions)
-                else:
-                    # Otherwise, clip the actions to avoid out-of-bound error
-                    # as we are sampling from an unbounded Gaussian distribution
-                    clipped_actions = np.clip(
-                        actions, self.action_space.low, self.action_space.high
-                    )
-
-            new_obs, rewards, dones, infos = env.step(clipped_actions, index=index)
-
-            if isinstance(self.action_space, spaces.Discrete):
-                # Reshape in case of discrete action
-                actions = actions.reshape(-1, 1)
-
-            # Store transition
-            episode.append(
-                Transition(
-                    actions,
-                    values,
-                    log_probs,
-                    deepcopy(last_obs),
-                    deepcopy(new_obs),
-                    rewards,
-                    dones,
-                    last_dones,
-                    infos,
-                    index,
-                )
-            )
-            last_obs = new_obs
-            last_dones = dones
-
-            # Start a new episode
-            if any(dones):
-                yield episode
-                episode = []
-                self.sync_training_policy_to_rollout_policy_weights_only(index)
-
+    # must be updated from SB3 (!)
     def collect_rollouts(
         self,
         env: VecEnv,
@@ -131,8 +85,12 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
         """
         assert self._last_obs is not None, "No previous observation was provided"
 
+        if not self.initialized:
+            self.init_collect_process()
+
         # Switch to eval mode (this affects batch norm / dropout)
         self.policy.set_training_mode(False)
+        self.pre_collect_preparation(self.policy)
 
         n_steps = 0
         rollout_buffer.reset()
@@ -140,9 +98,6 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
         # Sample new weights for the state-dependent exploration
         if self.use_sde:
             self.policy.reset_noise(1)
-
-        if not self.initialized:
-            self._initialize_threads()
 
         callback.on_rollout_start()
 
@@ -192,7 +147,7 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
                     terminal_obs = self.policy.obs_to_tensor(
                         infos[idx]["terminal_observation"]
                     )[0]
-                    with th.no_grad():
+                    with torch.no_grad():
                         terminal_value = self.policy.predict_values(terminal_obs)[0]
                     rewards[idx] += self.gamma * terminal_value
 
@@ -205,7 +160,7 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
                 log_probs,
             )
 
-        with th.no_grad():
+        with torch.no_grad():
             # Compute value for the last timestep
             values = self.policy.predict_values(obs_as_tensor(new_obs, self.device))
 
@@ -216,3 +171,176 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
         callback.on_rollout_end()
 
         return True
+
+
+class EpisodeGenerator:
+    def __init__(self, action_space: gym.Space, device: torch.device) -> None:
+        self.action_space = action_space
+        self.device = device
+
+    def update_policy(self, policy: BasePolicy) -> BasePolicy:
+        return policy
+
+    def generate(
+        self, policy: BasePolicy, env: IndexableMultiEnv, index: int
+    ) -> Generator[list, None, None]:
+        """
+        Continuously plays the game and returns episodes of Transitions
+        """
+        last_obs = env.reset(index=index)
+        last_dones = np.ones((1,), dtype=bool)
+
+        episode = []
+
+        while True:
+            with torch.no_grad():
+                # Convert to pytorch tensor or to TensorDict
+                obs_tensor = obs_as_tensor(last_obs, self.device)
+                actions, values, log_probs = policy(obs_tensor)
+            actions = actions.cpu().numpy()
+
+            # Rescale and perform action
+            clipped_actions = actions
+
+            if isinstance(self.action_space, spaces.Box):
+                if policy.squash_output:
+                    # Unscale the actions to match env bounds
+                    # if they were previously squashed (scaled in [-1, 1])
+                    clipped_actions = policy.unscale_action(clipped_actions)
+                else:
+                    # Otherwise, clip the actions to avoid out-of-bound error
+                    # as we are sampling from an unbounded Gaussian distribution
+                    clipped_actions = np.clip(
+                        actions, self.action_space.low, self.action_space.high
+                    )
+
+            new_obs, rewards, dones, infos = env.step(clipped_actions, index=index)
+
+            if isinstance(self.action_space, spaces.Discrete):
+                # Reshape in case of discrete action
+                actions = actions.reshape(-1, 1)
+
+            # Store transition
+            episode.append(
+                Transition(
+                    actions,
+                    values,
+                    log_probs,
+                    deepcopy(last_obs),
+                    deepcopy(new_obs),
+                    rewards,
+                    dones,
+                    last_dones,
+                    infos,
+                    index,
+                )
+            )
+            last_obs = new_obs
+            last_dones = dones
+
+            # Start a new episode
+            if any(dones):
+                yield episode
+                episode = []
+
+                policy = self.update_policy(policy)
+
+
+class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithmInjectorBase):
+    def __init__(self, *args, max_episodes_in_buffer: int = 8, **kwargs) -> None:
+        super().__init__(max_episodes_in_buffer)
+        super(AsyncAgentInjector, self).__init__(*args, **kwargs)
+
+    def train(self, *args, **kwargs) -> None:
+        # update self.training_policy
+        with self.training_policy_lock:
+            super().train()
+        self.training_policy_version += 1
+
+    def _episode_generator(self, index: int) -> Generator[list, None, None]:
+        """
+        Continuously plays the game and returns episodes of Transitions
+        """
+        episode_generator = EpisodeGenerator(self.action_space, self.device)
+        generator = episode_generator.generate(
+            self.policy, self.get_indexable_env(), index
+        )
+        while self.running:
+            yield next(generator)
+            self.sync_training_policy_to_rollout_policy_weights_only(index)
+
+
+def identity(x):
+    return x
+
+
+class InjectorWorker(InjectorWorkerBase, EpisodeGenerator):
+    def __init__(
+        self,
+        env_func: EnvFactory,
+        trajectory: multiprocessing.Queue,
+        state: Namespace,
+        stop: multiprocessing.Event,
+        **kwargs,
+    ):
+        super().__init__(env_func, trajectory, state, stop)
+        EpisodeGenerator.__init__(self, **kwargs)
+
+        self._version = None
+        self._policy = None
+
+        self._logger = logging.getLogger("Worker")
+
+    def episode_generator(self, env: IndexableMultiEnv, index: int):
+        generator = self.generate(self._copy_policy_from_state(), env, index)
+
+        while self.running:
+            episode = next(generator)
+
+            try:
+                self._trajectory.put_nowait(episode)
+            except queue.Full:
+                self._logger.warning("dropped episode due to buffer full")
+
+        self._logger.info("generator cycle is completed")
+
+    def _copy_policy_from_state(self):
+        state = self._state
+        policy_bytes = state.policy
+
+        if self._version != state.version:
+            data = io.BytesIO(policy_bytes)
+            # load state
+            policy = torch.load(data, weights_only=False, map_location="cpu")
+            # turn off the train mode
+            policy.set_training_mode(False)
+
+            self._policy = policy
+            self._version = state.version
+
+        return self._policy
+
+    def update_policy(self, policy: BasePolicy) -> BasePolicy:
+        return self._copy_policy_from_state()
+
+
+class OnPolicyAlgorithmInjectorMP(AsyncAgentInjectorMP, OnPolicyAlgorithmInjectorBase):
+    def __init__(
+        self,
+        *args,
+        max_episodes_in_buffer: int = 8,
+        envs: Optional[EnvFactoryList] = None,
+        **kwargs,
+    ) -> None:
+        super().__init__(
+            envs=envs,
+            worker_class=InjectorWorker,
+            max_episodes_in_buffer=max_episodes_in_buffer,
+        )
+        super(IAsyncAgentInjector, self).__init__(*args, **kwargs)
+
+        # hardcoded override (!)
+        self.device = get_device("cpu")
+
+    def get_worker_kwargs(self):
+        return dict(action_space=self.action_space, device=self.device)
