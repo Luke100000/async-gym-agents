@@ -328,14 +328,14 @@ class OnPolicyAlgorithmInjectorMP(AsyncAgentInjectorMP, OnPolicyAlgorithmInjecto
     def __init__(
         self,
         *args,
-        max_steps_in_buffer: int = 10000,
+        max_episodes_in_buffer: int = 8,
         envs: Optional[EnvFactoryList] = None,
         **kwargs,
     ) -> None:
         super().__init__(
             envs=envs,
             worker_class=InjectorWorker,
-            max_steps_in_buffer=max_steps_in_buffer,
+            max_episodes_in_buffer=max_episodes_in_buffer,
         )
         super(IAsyncAgentInjector, self).__init__(*args, **kwargs)
 

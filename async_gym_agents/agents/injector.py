@@ -317,14 +317,14 @@ class AsyncAgentInjectorMP(AsyncAgentInjectorBase):
         self,
         envs: Optional[EnvFactoryList],
         worker_class: InjectorWorkerBase,
-        max_steps_in_buffer: int = 10000,
+        max_episodes_in_buffer: int = 8,
     ):
         AsyncAgentInjectorBase.__init__(self, envs=envs)
 
         self._worker_class = worker_class
 
         # shared memory
-        self.max_steps_in_buffer = max_steps_in_buffer
+        self.max_episodes_in_buffer = max_episodes_in_buffer
         self._trajectory: multiprocessing.Queue | None = None
 
         # shared object (!)
@@ -378,7 +378,9 @@ class AsyncAgentInjectorMP(AsyncAgentInjectorBase):
 
         # shared memory
         if self._trajectory is None:
-            self._trajectory = multiprocessing.Queue(maxsize=self.max_steps_in_buffer)
+            self._trajectory = multiprocessing.Queue(
+                maxsize=self.max_episodes_in_buffer
+            )
 
         # shared object (!)
         if self._manager is None:
