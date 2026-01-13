@@ -69,6 +69,18 @@ class AsyncAgentInjectorBase(IAsyncAgentInjector):
             "initialized",
         ]
 
+    @property
+    def buffer_utilization(self) -> float:
+        return -1
+
+    @property
+    def buffer_emptyness(self) -> float:
+        return -1
+
+    @property
+    def discarded_episodes_fraction(self) -> float:
+        return -1
+
 
 class AsyncAgentInjector(AsyncAgentInjectorBase):
     def __init__(
