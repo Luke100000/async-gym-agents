@@ -1,5 +1,3 @@
-from typing import List
-
 import gymnasium as gym
 import pytest
 from stable_baselines3.common.monitor import Monitor
@@ -11,16 +9,14 @@ PROCESSES = 8
 
 
 @pytest.fixture
-def pendulum_multi_env():
-    """Fixture for creating a multi-environment with Pendulum-v1."""
-    return IndexableMultiEnv(
-        [lambda: gym.make("Pendulum-v1") for _ in range(PROCESSES)]
-    )
+def taxi_multi_env():
+    """Fixture for creating a multi-environment with discrete action space environment."""
+    return IndexableMultiEnv([lambda: gym.make("Taxi-v3") for _ in range(PROCESSES)])
 
 
 @pytest.fixture
 def lunar_lander_multi_env():
-    """Fixture for creating a multi-environment with LunarLanderContinuous-v3."""
+    """Fixture for creating a multi-environment with continuous action space environment."""
     return IndexableMultiEnv(
         [lambda: gym.make("LunarLanderContinuous-v3") for _ in range(PROCESSES)]
     )
@@ -36,16 +32,6 @@ def taxi_env():
 def lunar_lander_env():
     """Fixture for creating a continuous action space environment."""
     return gym.make("LunarLanderContinuous-v3")
-
-
-def env_func_on() -> gym.Env:
-    """Environment factory function for on-policy tests."""
-    return gym.make("Taxi-v3")
-
-
-def env_func_off() -> List[gym.Env]:
-    """Environment factory function for off-policy tests."""
-    return [gym.make("LunarLanderContinuous-v3") for _ in range(PROCESSES)]
 
 
 def get_buggy_env(buggy: bool) -> gym.Env:

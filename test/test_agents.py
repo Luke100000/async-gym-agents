@@ -3,7 +3,7 @@ import os
 import time
 from typing import Union
 
-from conftest import PROCESSES, env_func_off, env_func_on
+from conftest import PROCESSES
 from stable_baselines3 import PPO, SAC
 from stable_baselines3.common.base_class import BaseAlgorithm
 
@@ -29,7 +29,7 @@ def run_model_test(model: Union[BaseAlgorithm, AsyncAgentInjectorBase]):
     assert training_time > 0, "Training should take some time"
 
     # Test continual learning
-    model.learn(total_timesteps=10)
+    model.learn(total_timesteps=100)
 
     # Test saving and loading
     model_path = "test_model.zip"
@@ -47,31 +47,29 @@ def run_model_test(model: Union[BaseAlgorithm, AsyncAgentInjectorBase]):
         model.shutdown()
 
 
-def test_on_policy(pendulum_multi_env):
+def test_on_policy(taxi_multi_env):
     """Test on-policy agent."""
-    model = get_injected_agent(PPO)("MlpPolicy", pendulum_multi_env)
+    model = get_injected_agent(PPO)("MlpPolicy", taxi_multi_env)
     run_model_test(model)
 
 
 def test_on_policy_mp(taxi_env):
     """Test on-policy agent with multiprocessing."""
     model = get_injected_agent(PPO, use_mp=True)(
-        "MlpPolicy", taxi_env, envs=[env_func_on for _ in range(PROCESSES)]
+        "MlpPolicy", taxi_env, envs=[taxi_env for _ in range(PROCESSES)]
     )
     run_model_test(model)
 
 
 def test_off_policy(lunar_lander_multi_env):
     """Test off-policy agent."""
-    model = get_injected_agent(SAC)(
-        "MlpPolicy", lunar_lander_multi_env, batch_size=1024
-    )
+    model = get_injected_agent(SAC)("MlpPolicy", lunar_lander_multi_env)
     run_model_test(model)
 
 
 def test_off_policy_mp(lunar_lander_env):
     """Test off-policy agent with multiprocessing."""
     model = get_injected_agent(SAC, use_mp=True)(
-        "MlpPolicy", lunar_lander_env, envs=[env_func_off]
+        "MlpPolicy", lunar_lander_env, envs=[lunar_lander_env]
     )
     run_model_test(model)

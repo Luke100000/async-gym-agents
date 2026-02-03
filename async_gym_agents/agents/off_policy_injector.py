@@ -399,7 +399,7 @@ class InjectorWorker(InjectorWorkerBase, EpisodeGenerator):
             try:
                 self._trajectory.put_nowait(episode)
             except queue.Full:
-                self._logger.warning("dropped episode due to buffer full")
+                self._logger.info("Dropped episode due to buffer full")
 
         self._logger.info("generator cycle is completed")
 
