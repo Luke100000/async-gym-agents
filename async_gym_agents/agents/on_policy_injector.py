@@ -5,7 +5,7 @@ import queue
 from copy import deepcopy
 from dataclasses import dataclass
 from multiprocessing.managers import Namespace
-from typing import Dict, Generator, List, Optional
+from typing import Dict, Generator, Optional
 
 import gymnasium as gym
 import numpy as np
@@ -23,12 +23,12 @@ from async_gym_agents.agents.injector import (
     AsyncAgentInjector,
     AsyncAgentInjectorBase,
     AsyncAgentInjectorMP,
-    EnvFactory,
-    EnvFactoryList,
     IAsyncAgentInjector,
     InjectorWorkerBase,
 )
 from async_gym_agents.envs.multi_env import IndexableMultiEnv
+from async_gym_agents.types import EnvFactory, EnvFactoryList
+from async_gym_agents.utils import single_slice
 
 
 @dataclass
@@ -42,25 +42,12 @@ class Transition:
     dones: np.ndarray
     last_dones: np.ndarray
     infos: list[Dict]
-    index: int
 
 
 class OnPolicyAlgorithmInjectorBase(AsyncAgentInjectorBase, OnPolicyAlgorithm):
     def __init__(self, *args, **kwargs):
         super().__init__(self)
         super(AsyncAgentInjectorBase, self).__init__(*args, **kwargs)
-
-    def init_collect_process(self):
-        raise NotImplementedError
-
-    def fetch_transition(self) -> Transition:
-        raise NotImplementedError
-
-    def fetch_transitions(self) -> List[Transition]:
-        raise NotImplementedError
-
-    def pre_collect_preparation(self, policy: BasePolicy):
-        raise NotImplementedError
 
     # must be updated from SB3 (!)
     def collect_rollouts(
@@ -84,6 +71,9 @@ class OnPolicyAlgorithmInjectorBase(AsyncAgentInjectorBase, OnPolicyAlgorithm):
             Collected, False if callback terminated rollout prematurely.
         """
         assert self._last_obs is not None, "No previous observation was provided"
+        assert (
+            self.n_envs == 1
+        ), "Do not pass a VecEnv > 1, use IndexableMultiEnv or thr gym.Env interface instead!"
 
         if not self.initialized:
             self.init_collect_process()
@@ -183,14 +173,14 @@ class EpisodeGenerator:
 
     def generate(
         self, policy: BasePolicy, env: IndexableMultiEnv, index: int
-    ) -> Generator[list, None, None]:
+    ) -> Generator[list[Transition], None, None]:
         """
         Continuously plays the game and returns episodes of Transitions
         """
         last_obs = env.reset(index=index)
-        last_dones = np.ones((1,), dtype=bool)
+        last_dones = None
 
-        episode = []
+        episodes = {}
 
         while True:
             with torch.no_grad():
@@ -221,29 +211,34 @@ class EpisodeGenerator:
                 actions = actions.reshape(-1, 1)
 
             # Store transition
-            episode.append(
-                Transition(
-                    actions,
-                    values,
-                    log_probs,
-                    deepcopy(last_obs),
-                    deepcopy(new_obs),
-                    rewards,
-                    dones,
-                    last_dones,
-                    infos,
-                    index,
+            for idx in range(len(dones)):
+                if idx not in episodes:
+                    episodes[idx] = []
+                episodes[idx].append(
+                    Transition(
+                        single_slice(actions, idx),
+                        single_slice(values, idx),
+                        single_slice(log_probs, idx),
+                        deepcopy(single_slice(last_obs, idx)),
+                        deepcopy(single_slice(new_obs, idx)),
+                        single_slice(rewards, idx),
+                        single_slice(dones, idx),
+                        single_slice(last_dones, idx)
+                        if last_dones is not None
+                        else [False],
+                        single_slice(infos, idx),
+                    )
                 )
-            )
             last_obs = new_obs
             last_dones = dones
 
             # Start a new episode
-            if any(dones):
-                yield episode
-                episode = []
+            for idx, done in enumerate(dones):
+                if done:
+                    yield episodes[idx]
+                    del episodes[idx]
 
-                policy = self.update_policy(policy)
+                    policy = self.update_policy(policy)
 
 
 class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithmInjectorBase):
@@ -268,10 +263,6 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithmInjectorBas
         while self.running:
             yield next(generator)
             self.sync_training_policy_to_rollout_policy_weights_only(index)
-
-
-def identity(x):
-    return x
 
 
 class InjectorWorker(InjectorWorkerBase, EpisodeGenerator):

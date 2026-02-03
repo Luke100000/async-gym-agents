@@ -25,11 +25,12 @@ from async_gym_agents.agents.injector import (
     AsyncAgentInjector,
     AsyncAgentInjectorBase,
     AsyncAgentInjectorMP,
-    EnvFactoryList,
     IAsyncAgentInjector,
     InjectorWorkerBase,
 )
 from async_gym_agents.envs.multi_env import IndexableMultiEnv
+from async_gym_agents.types import EnvFactoryList
+from async_gym_agents.utils import single_slice
 
 
 @dataclass
@@ -128,6 +129,10 @@ class OffPolicyAlgorithmInjectorBase(AsyncAgentInjectorBase, OffPolicyAlgorithm)
 
         if not self.initialized:
             self.init_collect_process()
+
+        assert (
+            self.n_envs == 1
+        ), "Do not pass a VecEnv > 1, use IndexableMultiEnv or thr gym.Env interface instead!"
 
         # Switch to eval mode (this affects batch norm / dropout)
         self.policy.set_training_mode(False)
@@ -264,7 +269,7 @@ class EpisodeGenerator:
             self.use_sde and self.use_sde_at_warmup
         ):
             # Warmup phase
-            unscaled_action = np.array([self.action_space.sample()])
+            unscaled_action = np.array([self.action_space.sample() for _ in obs])
         else:
             # Note: when using continuous actions,
             # we assume that the policy uses tanh to scale the action
@@ -293,13 +298,13 @@ class EpisodeGenerator:
 
     def generate(
         self, policy: BasePolicy, env: IndexableMultiEnv, index: int
-    ) -> Generator[list, None, None]:
+    ) -> Generator[list[Transition], None, None]:
         """
         Continuously plays the game and returns episodes of Transitions
         """
         last_obs = env.reset(index=index)
 
-        episode = []
+        episodes = {}
 
         while True:
             # Select action randomly or according to policy
@@ -314,24 +319,28 @@ class EpisodeGenerator:
             new_obs, rewards, dones, infos = env.step(actions, index=index)
 
             # Store transition
-            episode.append(
-                Transition(
-                    buffer_actions,
-                    deepcopy(last_obs),
-                    deepcopy(new_obs),
-                    rewards,
-                    dones,
-                    infos,
+            for idx in range(len(dones)):
+                if idx not in episodes:
+                    episodes[idx] = []
+                episodes[idx].append(
+                    Transition(
+                        single_slice(buffer_actions, idx),
+                        deepcopy(single_slice(last_obs, idx)),
+                        deepcopy(single_slice(new_obs, idx)),
+                        single_slice(rewards, idx),
+                        single_slice(dones, idx),
+                        single_slice(infos, idx),
+                    )
                 )
-            )
             last_obs = new_obs
 
             # Start a new episode
-            if any(dones):
-                yield episode
-                episode = []
+            for idx, done in enumerate(dones):
+                if done:
+                    yield episodes[idx]
+                    del episodes[idx]
 
-                policy = self.update_policy(policy)
+                    policy = self.update_policy(policy)
 
 
 class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithmInjectorBase):

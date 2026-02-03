@@ -1,9 +1,9 @@
 import logging
 import os
 import time
+from test.conftest import PROCESSES
 from typing import Union
 
-from conftest import PROCESSES
 from stable_baselines3 import PPO, SAC
 from stable_baselines3.common.base_class import BaseAlgorithm
 
@@ -70,6 +70,6 @@ def test_off_policy(lunar_lander_multi_env):
 def test_off_policy_mp(lunar_lander_env):
     """Test off-policy agent with multiprocessing."""
     model = get_injected_agent(SAC, use_mp=True)(
-        "MlpPolicy", lunar_lander_env, envs=[lunar_lander_env]
+        "MlpPolicy", lunar_lander_env, envs=[lunar_lander_env for _ in range(PROCESSES)]
     )
     run_model_test(model)

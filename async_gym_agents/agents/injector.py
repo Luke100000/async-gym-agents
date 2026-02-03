@@ -6,21 +6,16 @@ import threading
 from functools import partial
 from multiprocessing.managers import Namespace
 from queue import Queue
-from typing import Any, Callable, Dict, List, Optional, Type, TypeVar, Union
+from typing import Any, Dict, List, Optional, Type
 
-import gymnasium as gym
 import torch as th
 from stable_baselines3.common.base_class import BasePolicy
 
 from async_gym_agents.envs.multi_env import IndexableMultiEnv
+from async_gym_agents.types import EnvFactory, EnvFactoryList, Transition
+from async_gym_agents.utils import identity
 
 logger = logging.getLogger("async_gym_agents")
-
-
-Transition = TypeVar("Transition")
-
-EnvFactory = Callable[[], Union[gym.Env, List[gym.Env]]]
-EnvFactoryList = List[EnvFactory]
 
 
 class IAsyncAgentInjector:
@@ -56,6 +51,7 @@ class AsyncAgentInjectorBase(IAsyncAgentInjector):
         raise NotImplementedError
 
     def fetch_transition(self) -> Transition:
+        """Fetch one single batched transition which is guaranteed to be in order and not interleaved with other episodes."""
         raise NotImplementedError
 
     def fetch_transitions(self) -> List[Transition]:
@@ -188,6 +184,7 @@ class AsyncAgentInjector(AsyncAgentInjectorBase):
                 name=f"CollectorThread{index}",
                 target=self._collector_loop,
                 args=(index,),
+                daemon=True,
             )
             self.sync_training_policy_to_rollout_policy_complete(index)
             self.thread_lookup[thread.name] = index
@@ -268,10 +265,6 @@ class AsyncAgentInjector(AsyncAgentInjectorBase):
         self.initialized = False
 
 
-def identity(x):
-    return x
-
-
 class InjectorWorkerBase:
     def __init__(
         self,
@@ -308,6 +301,7 @@ class InjectorWorkerBase:
                 name=thread_name,
                 target=self.episode_generator,
                 args=(env, index),
+                daemon=True,
             )
             thread.start()
             threads.append(thread)

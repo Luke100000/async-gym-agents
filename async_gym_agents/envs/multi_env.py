@@ -1,8 +1,9 @@
 from collections import defaultdict
+from functools import partial
 from typing import Any, Callable, List, Optional, Sequence, Type
 
+import gymnasium as gym
 import numpy as np
-from gymnasium import Env, Wrapper
 from stable_baselines3.common.vec_env import DummyVecEnv, VecEnv
 from stable_baselines3.common.vec_env.base_vec_env import (
     VecEnvIndices,
@@ -10,16 +11,20 @@ from stable_baselines3.common.vec_env.base_vec_env import (
     VecEnvStepReturn,
 )
 
+from async_gym_agents.types import Env
+from async_gym_agents.utils import identity
+
 
 class IndexableMultiEnv(VecEnv):
     """
-    Same as multi env but sync
+    Same as multi env but sync.
+    Should not be used outside async-agents since it only uses index 0 of the envs otherwise.
     """
 
     def __init__(self, env_fns: List[Callable[[], Env]]):
         self.real_n_envs = len(env_fns)
 
-        self.envs = [DummyVecEnv([e]) for e in env_fns]
+        self.envs = [self._make_venv(e()) for e in env_fns]
         self.additional = defaultdict(dict)
 
         super().__init__(1, self.envs[0].observation_space, self.envs[0].action_space)
@@ -64,16 +69,17 @@ class IndexableMultiEnv(VecEnv):
         )
 
     def env_is_wrapped(
-        self, wrapper_class: Type[Wrapper], indices: VecEnvIndices = None
+        self, wrapper_class: Type[gym.Wrapper], indices: VecEnvIndices = None
     ) -> List[bool]:
         return self.envs[self._get_index(indices)].env_is_wrapped(wrapper_class)
 
-    def _get_index(self, indices: VecEnvIndices) -> int:
+    @staticmethod
+    def _get_index(indices: VecEnvIndices) -> int:
         """
-        Convert a flexibly-typed reference to environment indices to an implied list of indices.
+        Convert a flexibly typed reference to environment indices to an implied list of indices.
 
-        :param indices: refers to indices of envs.
-        :return: the implied list of indices.
+        :param indices: Refers to indices of envs.
+        :return: The implied list of indices.
         """
         if indices is None:
             return 0
@@ -82,3 +88,9 @@ class IndexableMultiEnv(VecEnv):
         raise ValueError(
             f"IndexableMultiEnv only supports a scalar index, not {indices}."
         )
+
+    @staticmethod
+    def _make_venv(e: Env) -> VecEnv:
+        if isinstance(e, VecEnv):
+            return e
+        return DummyVecEnv([partial(identity, e)])

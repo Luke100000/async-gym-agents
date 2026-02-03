@@ -34,17 +34,20 @@ from stable_baselines3 import PPO
 
 
 def env_func():
+    # Can be one or a list of either gym.Env or VecEnv
     # return [gym.make("Pendulum-v1") for _ in range(4)]
+    # return [DummyVecEnv([partial(gym.make, "Pendulum-v1") for _ in range(4)]) for _ in range(4)]
+    # return DummyVecEnv([partial(gym.make, "Pendulum-v1")
     return gym.make("Pendulum-v1")
 
 
-# Create env to define spaces
+# Create env to define spaces, it will not be used otherwise in MP mode.
 env = gym.make("Pendulum-v1")
 
 # Create the model, injected with async capabilities
 model = get_injected_agent(PPO, use_mp=True)("MlpPolicy", env, envs=[env_func for _ in range(8)])
 ```
 
-Since not all envs can be transferred to processes, a constructor is required.
+Since not all envs can be transferred to processes, a constructor `envs` is required.
 This constructor allows returning a list of processes, run in threads within a single process.
 This allows, e.g., balancing the tradeoff between GIL and memory usage.
