@@ -362,7 +362,7 @@ class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithmInjectorB
     def _sample_action(*args):
         raise NotImplementedError()
 
-    def _episode_generator(self, index: int) -> Generator[list, None, None]:
+    def _episode_generator(self, index: int, env: None = None) -> Generator[list, None, None]:
         """
         Continuously plays the game and returns episodes of Transitions
         """
@@ -375,7 +375,7 @@ class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithmInjectorB
             self.action_noise,
         )
         generator = episode_generator.generate(
-            self.policy, self.get_indexable_env(), index
+            self.policy, env if env else self.get_indexable_env(), index
         )
         while self.running:
             yield next(generator)

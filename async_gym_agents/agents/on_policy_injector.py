@@ -45,8 +45,8 @@ class Transition:
 
 
 class OnPolicyAlgorithmInjectorBase(AsyncAgentInjectorBase, OnPolicyAlgorithm):
-    def __init__(self, *args, **kwargs):
-        super().__init__(self)
+    def __init__(self, *args, envs: Optional[EnvFactoryList] = None, **kwargs):
+        super().__init__(self, envs=envs)
         super(AsyncAgentInjectorBase, self).__init__(*args, **kwargs)
 
     # must be updated from SB3 (!)
@@ -71,9 +71,9 @@ class OnPolicyAlgorithmInjectorBase(AsyncAgentInjectorBase, OnPolicyAlgorithm):
             Collected, False if callback terminated rollout prematurely.
         """
         assert self._last_obs is not None, "No previous observation was provided"
-        assert (
-            self.n_envs == 1
-        ), "Do not pass a VecEnv > 1, use IndexableMultiEnv or thr gym.Env interface instead!"
+        # assert (
+        #     self.n_envs == 1
+        # ), "Do not pass a VecEnv > 1, use IndexableMultiEnv or thr gym.Env interface instead!"
 
         if not self.initialized:
             self.init_collect_process()
@@ -84,6 +84,7 @@ class OnPolicyAlgorithmInjectorBase(AsyncAgentInjectorBase, OnPolicyAlgorithm):
 
         n_steps = 0
         rollout_buffer.reset()
+        rollout_buffer.n_envs = 1
 
         # Sample new weights for the state-dependent exploration
         if self.use_sde:
@@ -177,7 +178,7 @@ class EpisodeGenerator:
         """
         Continuously plays the game and returns episodes of Transitions
         """
-        last_obs = env.reset(index=index)
+        last_obs = env.reset()
         last_dones = None
 
         episodes = {}
@@ -204,7 +205,7 @@ class EpisodeGenerator:
                         actions, self.action_space.low, self.action_space.high
                     )
 
-            new_obs, rewards, dones, infos = env.step(clipped_actions, index=index)
+            new_obs, rewards, dones, infos = env.step(clipped_actions)
 
             if isinstance(self.action_space, spaces.Discrete):
                 # Reshape in case of discrete action
@@ -252,13 +253,13 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithmInjectorBas
             super().train()
         self.training_policy_version += 1
 
-    def _episode_generator(self, index: int) -> Generator[list, None, None]:
+    def _episode_generator(self, index: int, env: None = None) -> Generator[list, None, None]:
         """
         Continuously plays the game and returns episodes of Transitions
         """
         episode_generator = EpisodeGenerator(self.action_space, self.device)
         generator = episode_generator.generate(
-            self.policy, self.get_indexable_env(), index
+            self.policy, env if env else self.get_indexable_env(), index
         )
         while self.running:
             yield next(generator)

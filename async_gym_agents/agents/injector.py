@@ -160,6 +160,8 @@ class AsyncAgentInjector(AsyncAgentInjectorBase):
             "rollout_policies",
             "running",
             "initialized",
+            "_envs",
+            "envs",
         ]
 
     # noinspection PyUnresolvedReferences
@@ -167,9 +169,9 @@ class AsyncAgentInjector(AsyncAgentInjectorBase):
         """
         Asserts whether a correct environment is supplied
         """
-        assert isinstance(
-            self.env, IndexableMultiEnv
-        ), "You must pass a IndexableMultiEnv"
+        # assert isinstance(
+        #     self.env, IndexableMultiEnv
+        # ), "You must pass a IndexableMultiEnv"
         return self.env
 
     def pre_collect_preparation(self, policy: BasePolicy):
@@ -179,11 +181,12 @@ class AsyncAgentInjector(AsyncAgentInjectorBase):
         self.running = True
 
         self.threads = []
-        for index in range(self.get_indexable_env().real_n_envs):
+        
+        for index, env in enumerate(self._envs):
             thread = threading.Thread(
                 name=f"CollectorThread{index}",
                 target=self._collector_loop,
-                args=(index,),
+                args=(index, env),
                 daemon=True,
             )
             self.sync_training_policy_to_rollout_policy_complete(index)
@@ -226,14 +229,14 @@ class AsyncAgentInjector(AsyncAgentInjectorBase):
             else self.discarded_episodes / self.total_episodes
         )
 
-    def _episode_generator(self, index: int):
+    def _episode_generator(self, index: int, env: None = None):
         raise NotImplementedError()
 
-    def _collector_loop(self, index: int):
+    def _collector_loop(self, index: int, env: None = None):
         """
         Batch-inserts transitions whenever an episode is done.
         """
-        for episode in self._episode_generator(index):
+        for episode in self._episode_generator(index, env=env):
             # Keeps track of truncated episodes and optionally removes them
             self.total_episodes += 1
             if episode[-1].infos[0]["TimeLimit.truncated"] and self.skip_truncated:
