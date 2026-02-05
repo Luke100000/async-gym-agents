@@ -1,6 +1,6 @@
 from collections import defaultdict
 from functools import partial
-from typing import Any, Callable, List, Optional, Sequence, Type
+from typing import Any, Callable, List, Optional, Sequence, Type, Union
 
 import gymnasium as gym
 import numpy as np
@@ -17,17 +17,32 @@ from async_gym_agents.utils import identity
 
 class IndexableMultiEnv(VecEnv):
     """
-    Same as multi env but sync.
+    A container for multiple VecEnvs / gym.Envs.
     Should not be used outside async-agents since it only uses index 0 of the envs otherwise.
     """
 
-    def __init__(self, env_fns: List[Callable[[], Env]]):
-        self.real_n_envs = len(env_fns)
+    def __init__(self, env_fns: Union[List[Callable[[], Env]], Env, List[Env]]):
+        if isinstance(env_fns, list):
+            if isinstance(env_fns[0], Callable):
+                # This is a list of constructors
+                envs = [e() for e in env_fns]
+            else:
+                # Those are already environments
+                envs = env_fns
+        else:
+            # A single env has been passed
+            envs = [env_fns]
 
-        self.envs = [self._make_venv(e()) for e in env_fns]
+        self.envs = [self._make_venv(e) for e in envs]
         self.additional = defaultdict(dict)
 
         super().__init__(1, self.envs[0].observation_space, self.envs[0].action_space)
+
+    def get_env(self, index: int) -> VecEnv:
+        return self.envs[index]
+
+    def __len__(self):
+        return len(self.envs)
 
     def step(self, actions: np.ndarray, index: int = 0) -> VecEnvStepReturn:
         self.step_async(actions, index=index)

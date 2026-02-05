@@ -5,6 +5,6 @@ from stable_baselines3.common.vec_env import VecEnv
 
 Transition = TypeVar("Transition")
 
-Env = Union[gym.Env, VecEnv]
-EnvFactory = Callable[[], Union[Env, List[Env]]]
+Env = Union[VecEnv, List[gym.Env], gym.Env]
+EnvFactory = Callable[[], Union[Env]]
 EnvFactoryList = List[EnvFactory]

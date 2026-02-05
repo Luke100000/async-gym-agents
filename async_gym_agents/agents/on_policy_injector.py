@@ -26,7 +26,6 @@ from async_gym_agents.agents.injector import (
     IAsyncAgentInjector,
     InjectorWorkerBase,
 )
-from async_gym_agents.envs.multi_env import IndexableMultiEnv
 from async_gym_agents.types import EnvFactory, EnvFactoryList
 from async_gym_agents.utils import single_slice
 
@@ -71,9 +70,6 @@ class OnPolicyAlgorithmInjectorBase(AsyncAgentInjectorBase, OnPolicyAlgorithm):
             Collected, False if callback terminated rollout prematurely.
         """
         assert self._last_obs is not None, "No previous observation was provided"
-        # assert (
-        #     self.n_envs == 1
-        # ), "Do not pass a VecEnv > 1, use IndexableMultiEnv or thr gym.Env interface instead!"
 
         if not self.initialized:
             self.init_collect_process()
@@ -173,7 +169,7 @@ class EpisodeGenerator:
         return policy
 
     def generate(
-        self, policy: BasePolicy, env: IndexableMultiEnv, index: int
+        self, policy: BasePolicy, env: VecEnv
     ) -> Generator[list[Transition], None, None]:
         """
         Continuously plays the game and returns episodes of Transitions
@@ -253,14 +249,14 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithmInjectorBas
             super().train()
         self.training_policy_version += 1
 
-    def _episode_generator(self, index: int, env: None = None) -> Generator[list, None, None]:
+    def _episode_generator(
+        self, index: int, env: VecEnv
+    ) -> Generator[list, None, None]:
         """
         Continuously plays the game and returns episodes of Transitions
         """
         episode_generator = EpisodeGenerator(self.action_space, self.device)
-        generator = episode_generator.generate(
-            self.policy, env if env else self.get_indexable_env(), index
-        )
+        generator = episode_generator.generate(self.policy, env)
         while self.running:
             yield next(generator)
             self.sync_training_policy_to_rollout_policy_weights_only(index)
@@ -283,8 +279,8 @@ class InjectorWorker(InjectorWorkerBase, EpisodeGenerator):
 
         self._logger = logging.getLogger("Worker")
 
-    def episode_generator(self, env: IndexableMultiEnv, index: int):
-        generator = self.generate(self._copy_policy_from_state(), env, index)
+    def episode_generator(self, index: int, env: VecEnv):
+        generator = self.generate(self._copy_policy_from_state(), env)
 
         while self.running:
             episode = next(generator)

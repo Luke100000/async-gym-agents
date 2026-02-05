@@ -3,17 +3,16 @@ import logging
 import multiprocessing
 import queue
 import threading
-from functools import partial
 from multiprocessing.managers import Namespace
 from queue import Queue
 from typing import Any, Dict, List, Optional, Type
 
 import torch as th
 from stable_baselines3.common.base_class import BasePolicy
+from stable_baselines3.common.vec_env import VecEnv
 
 from async_gym_agents.envs.multi_env import IndexableMultiEnv
 from async_gym_agents.types import EnvFactory, EnvFactoryList, Transition
-from async_gym_agents.utils import identity
 
 logger = logging.getLogger("async_gym_agents")
 
@@ -171,7 +170,7 @@ class AsyncAgentInjector(AsyncAgentInjectorBase):
         """
         assert isinstance(
             self.env, IndexableMultiEnv
-        ), "You must pass a IndexableMultiEnv"
+        ), "Neither a IndexableMultiEnv nor an env constructor was supplied."
         return self.env
 
     def pre_collect_preparation(self, policy: BasePolicy):
@@ -182,35 +181,29 @@ class AsyncAgentInjector(AsyncAgentInjectorBase):
 
         self.threads = []
 
-        # directly provided env_funcs
         if self._envs is not None:
-            for index, env_func in enumerate(self._envs):
-                env = env_func()  # create env here
-                thread = threading.Thread(
-                    name=f"CollectorThread{index}",
-                    target=self._collector_loop,  # start rollout cycle
-                    args=(index, env),
-                    daemon=True,
-                )
-                self.sync_training_policy_to_rollout_policy_complete(index)
-                self.thread_lookup[thread.name] = index
-                self.threads.append(thread)
-                self.threads[index].start()
+            # If an environment constructor is supplied, use that one
+            env = IndexableMultiEnv(self._envs[0]())
         else:
-            # use multi-index env wrapping
-            for index in range(self.get_indexable_env().real_n_envs):
-                thread = threading.Thread(
-                    name=f"CollectorThread{index}",
-                    target=self._collector_loop,
-                    args=(index,),
-                    daemon=True,
-                )
-                self.sync_training_policy_to_rollout_policy_complete(index)
-                self.thread_lookup[thread.name] = index
-                self.threads.append(thread)
-                self.threads[index].start()
+            # Otherwise an IndexableMultiEnv is required, which can treat environments separately
+            env = self.get_indexable_env()
+
+        for index in range(len(env)):
+            self._start_thread(index, env.get_env(index))
 
         self.initialized = True
+
+    def _start_thread(self, index: int, env: VecEnv):
+        thread = threading.Thread(
+            name=f"collector-thread-{index}",
+            target=self._collector_loop,
+            args=(index, env),
+            daemon=True,
+        )
+        self.sync_training_policy_to_rollout_policy_complete(index)
+        self.thread_lookup[thread.name] = index
+        self.threads.append(thread)
+        self.threads[index].start()
 
     def fetch_transition(self):
         while self.transition_queue.empty():
@@ -245,14 +238,14 @@ class AsyncAgentInjector(AsyncAgentInjectorBase):
             else self.discarded_episodes / self.total_episodes
         )
 
-    def _episode_generator(self, index: int, env: None = None):
+    def _episode_generator(self, index: int, env: VecEnv):
         raise NotImplementedError()
 
-    def _collector_loop(self, index: int, env: None = None):
+    def _collector_loop(self, index: int, env: VecEnv):
         """
         Batch-inserts transitions whenever an episode is done.
         """
-        for episode in self._episode_generator(index, env=env):
+        for episode in self._episode_generator(index, env):
             # Keeps track of truncated episodes and optionally removes them
             self.total_episodes += 1
             if episode[-1].infos[0]["TimeLimit.truncated"] and self.skip_truncated:
@@ -300,26 +293,20 @@ class InjectorWorkerBase:
 
         self.running = True
 
-    def episode_generator(self, env: IndexableMultiEnv, index: int):
+    def episode_generator(self, index: int, env: VecEnv):
         raise NotImplementedError()
 
     def run(self):
         threads = []
-        envs = self._env_func()
 
-        # Support single envs
-        if not isinstance(envs, list):
-            envs = [envs]
+        env = IndexableMultiEnv(self._env_func())
 
-        # Wrap into IndexableMultiEnv
-        env = IndexableMultiEnv([partial(identity, env) for env in envs])
-
-        for index in range(len(envs)):
+        for index in range(len(env)):
             thread_name = f"collector-thread-{index}"
             thread = threading.Thread(
                 name=thread_name,
                 target=self.episode_generator,
-                args=(env, index),
+                args=(index, env.get_env(index)),
                 daemon=True,
             )
             thread.start()
