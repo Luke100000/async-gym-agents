@@ -185,7 +185,7 @@ class AsyncAgentInjector(AsyncAgentInjectorBase):
         # directly provided env_funcs
         if self._envs is not None:
             for index, env_func in enumerate(self._envs):
-                env = env_func()[0]  # create env here
+                env = env_func()  # create env here
                 thread = threading.Thread(
                     name=f"CollectorThread{index}",
                     target=self._collector_loop,  # start rollout cycle
