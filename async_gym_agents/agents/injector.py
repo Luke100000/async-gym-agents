@@ -160,8 +160,8 @@ class AsyncAgentInjector(AsyncAgentInjectorBase):
             "rollout_policies",
             "running",
             "initialized",
-            "_envs",
             "envs",
+            "_envs",
         ]
 
     # noinspection PyUnresolvedReferences
@@ -169,9 +169,9 @@ class AsyncAgentInjector(AsyncAgentInjectorBase):
         """
         Asserts whether a correct environment is supplied
         """
-        # assert isinstance(
-        #     self.env, IndexableMultiEnv
-        # ), "You must pass a IndexableMultiEnv"
+        assert isinstance(
+            self.env, IndexableMultiEnv
+        ), "You must pass a IndexableMultiEnv"
         return self.env
 
     def pre_collect_preparation(self, policy: BasePolicy):
@@ -181,18 +181,34 @@ class AsyncAgentInjector(AsyncAgentInjectorBase):
         self.running = True
 
         self.threads = []
-        
-        for index, env in enumerate(self._envs):
-            thread = threading.Thread(
-                name=f"CollectorThread{index}",
-                target=self._collector_loop,
-                args=(index, env),
-                daemon=True,
-            )
-            self.sync_training_policy_to_rollout_policy_complete(index)
-            self.thread_lookup[thread.name] = index
-            self.threads.append(thread)
-            self.threads[index].start()
+
+        # directly provided env_funcs
+        if self._envs is not None:
+            for index, env_func in enumerate(self._envs):
+                env = env_func()[0]  # create env here
+                thread = threading.Thread(
+                    name=f"CollectorThread{index}",
+                    target=self._collector_loop,  # start rollout cycle
+                    args=(index, env),
+                    daemon=True,
+                )
+                self.sync_training_policy_to_rollout_policy_complete(index)
+                self.thread_lookup[thread.name] = index
+                self.threads.append(thread)
+                self.threads[index].start()
+        else:
+            # use multi-index env wrapping
+            for index in range(self.get_indexable_env().real_n_envs):
+                thread = threading.Thread(
+                    name=f"CollectorThread{index}",
+                    target=self._collector_loop,
+                    args=(index,),
+                    daemon=True,
+                )
+                self.sync_training_policy_to_rollout_policy_complete(index)
+                self.thread_lookup[thread.name] = index
+                self.threads.append(thread)
+                self.threads[index].start()
 
         self.initialized = True
 
