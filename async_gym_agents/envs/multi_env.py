@@ -1,4 +1,3 @@
-from collections import defaultdict
 from functools import partial
 from typing import Any, Callable, List, Optional, Sequence, Type, Union
 
@@ -11,7 +10,7 @@ from stable_baselines3.common.vec_env.base_vec_env import (
     VecEnvStepReturn,
 )
 
-from async_gym_agents.types import Env
+from async_gym_agents.types import Env, EnvFactoryList
 from async_gym_agents.utils import identity
 
 
@@ -21,7 +20,7 @@ class IndexableMultiEnv(VecEnv):
     Should not be used outside async-agents since it only uses index 0 of the envs otherwise.
     """
 
-    def __init__(self, env_fns: Union[List[Callable[[], Env]], Env, List[Env]]):
+    def __init__(self, env_fns: Union[EnvFactoryList, List[Env], Env]):
         if isinstance(env_fns, list):
             if isinstance(env_fns[0], Callable):
                 # This is a list of constructors
@@ -33,8 +32,8 @@ class IndexableMultiEnv(VecEnv):
             # A single env has been passed
             envs = [env_fns]
 
+        # Make sure they are all VecEnvs
         self.envs = [self._make_venv(e) for e in envs]
-        self.additional = defaultdict(dict)
 
         super().__init__(1, self.envs[0].observation_space, self.envs[0].action_space)
 
@@ -108,4 +107,8 @@ class IndexableMultiEnv(VecEnv):
     def _make_venv(e: Env) -> VecEnv:
         if isinstance(e, VecEnv):
             return e
-        return DummyVecEnv([partial(identity, e)])
+        if isinstance(e, gym.Env):
+            return DummyVecEnv([partial(identity, e)])
+        if isinstance(e, list) and isinstance(e[0], gym.Env):
+            return DummyVecEnv([partial(identity, env) for env in e])
+        raise ValueError(f"Cannot make VecEnv from {e}")

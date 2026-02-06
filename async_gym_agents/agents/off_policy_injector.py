@@ -1,15 +1,11 @@
-import io
-import logging
 import multiprocessing
-import queue
 from copy import deepcopy
 from dataclasses import dataclass
 from multiprocessing.managers import Namespace
-from typing import Any, Dict, Generator, List, Optional, Tuple, Union
+from typing import Any, Dict, Generator, List, Optional, Tuple, Type, Union
 
 import gymnasium as gym
 import numpy as np
-import torch
 from gymnasium import spaces
 from stable_baselines3.common.buffers import ReplayBuffer
 from stable_baselines3.common.callbacks import BaseCallback
@@ -17,17 +13,11 @@ from stable_baselines3.common.noise import ActionNoise
 from stable_baselines3.common.off_policy_algorithm import OffPolicyAlgorithm
 from stable_baselines3.common.policies import BasePolicy
 from stable_baselines3.common.type_aliases import RolloutReturn, TrainFreq
-from stable_baselines3.common.utils import get_device, should_collect_more_steps
+from stable_baselines3.common.utils import should_collect_more_steps
 from stable_baselines3.common.vec_env import VecEnv
 from stable_baselines3.common.vec_env.base_vec_env import VecEnvObs
 
-from async_gym_agents.agents.injector import (
-    AsyncAgentInjector,
-    AsyncAgentInjectorBase,
-    AsyncAgentInjectorMP,
-    IAsyncAgentInjector,
-    InjectorWorkerBase,
-)
+from async_gym_agents.agents.injector import AsyncAgentInjector, InjectorWorkerBase
 from async_gym_agents.envs.multi_env import IndexableMultiEnv
 from async_gym_agents.types import EnvFactoryList
 from async_gym_agents.utils import single_slice
@@ -43,10 +33,16 @@ class Transition:
     infos: list[Dict]
 
 
-class OffPolicyAlgorithmInjectorBase(AsyncAgentInjectorBase, OffPolicyAlgorithm):
-    def __init__(self, *args, **kwargs):
-        super().__init__(self)
-        super(AsyncAgentInjectorBase, self).__init__(*args, **kwargs)
+class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithm):
+    def __init__(
+        self,
+        *args,
+        envs: Optional[EnvFactoryList] = None,
+        use_mp: bool = True,
+        **kwargs,
+    ):
+        super().__init__(envs=envs, use_mp=use_mp)
+        super(AsyncAgentInjector, self).__init__(*args, **kwargs)
 
     def _store_transition(*args):
         raise NotImplementedError()
@@ -97,6 +93,7 @@ class OffPolicyAlgorithmInjectorBase(AsyncAgentInjectorBase, OffPolicyAlgorithm)
             infos,
         )
 
+    # must be updated from SB3 (!)
     def collect_rollouts(
         self,
         env: IndexableMultiEnv,
@@ -127,8 +124,7 @@ class OffPolicyAlgorithmInjectorBase(AsyncAgentInjectorBase, OffPolicyAlgorithm)
         :return:
         """
 
-        if not self.initialized:
-            self.init_collect_process()
+        self.init_collect_process()
 
         # Switch to eval mode (this affects batch norm / dropout)
         self.policy.set_training_mode(False)
@@ -232,10 +228,28 @@ class OffPolicyAlgorithmInjectorBase(AsyncAgentInjectorBase, OffPolicyAlgorithm)
             continue_training,
         )
 
+    def get_worker_class(self) -> Type[InjectorWorkerBase]:
+        return InjectorWorker
 
-class EpisodeGenerator:
+    def get_worker_kwargs(self):
+        return dict(
+            learning_starts=self.learning_starts,
+            num_timesteps=self.num_timesteps,
+            use_sde=self.use_sde,
+            use_sde_at_warmup=self.use_sde_at_warmup,
+            action_space=self.action_space,
+            action_noise=self.action_noise,
+        )
+
+
+class InjectorWorker(InjectorWorkerBase):
     def __init__(
         self,
+        env_func,
+        episode_queue: multiprocessing.Queue,
+        state: Namespace,
+        stop: multiprocessing.Event,
+        # Off policy injector specific parameters
         learning_starts: int,
         num_timesteps: int,
         use_sde: bool,
@@ -243,6 +257,8 @@ class EpisodeGenerator:
         action_space: gym.Space,
         action_noise: Optional[ActionNoise],
     ) -> None:
+        super().__init__(env_func, episode_queue, state, stop)
+
         self.learning_starts = learning_starts
         self.num_timesteps = num_timesteps
         self.use_sde = use_sde
@@ -289,30 +305,25 @@ class EpisodeGenerator:
             action = buffer_action
         return action, buffer_action
 
-    def update_policy(self, policy: BasePolicy) -> BasePolicy:
-        return policy
-
-    def generate(
-        self, policy: BasePolicy, env: VecEnv
-    ) -> Generator[list[Transition], None, None]:
+    def generate(self) -> Generator[list[Transition], None, None]:
         """
         Continuously plays the game and returns episodes of Transitions
         """
-        last_obs = env.reset()
+        last_obs = self.env.reset()
 
         episodes = {}
 
         while True:
             # Select action randomly or according to policy
             actions, buffer_actions = self.sample_action(
-                policy,
+                self.policy,
                 self.learning_starts,
                 last_obs,
                 self.action_noise,
             )
 
             # Rescale and perform action
-            new_obs, rewards, dones, infos = env.step(actions)
+            new_obs, rewards, dones, infos = self.env.step(actions)
 
             # Store transition
             for idx in range(len(dones)):
@@ -336,124 +347,4 @@ class EpisodeGenerator:
                     yield episodes[idx]
                     del episodes[idx]
 
-                    policy = self.update_policy(policy)
-
-
-class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithmInjectorBase):
-    def __init__(self, *args, max_episodes_in_buffer: int = 8, **kwargs) -> None:
-        super().__init__(max_episodes_in_buffer)
-        super(AsyncAgentInjectorBase, self).__init__(*args, **kwargs)
-
-    def train(self, *args, **kwargs) -> None:
-        with self.training_policy_lock:
-            super().train(*args, **kwargs)
-        self.training_policy_version += 1
-
-    def _excluded_save_params(self) -> List[str]:
-        return [
-            *super()._excluded_save_params(),
-            *super(AsyncAgentInjector, self)._excluded_save_params(),
-        ]
-
-    def _sample_action(*args):
-        raise NotImplementedError()
-
-    def _episode_generator(
-        self, index: int, env: VecEnv
-    ) -> Generator[list, None, None]:
-        """
-        Continuously plays the game and returns episodes of Transitions
-        """
-        episode_generator = EpisodeGenerator(
-            self.learning_starts,
-            self.num_timesteps,
-            self.use_sde,
-            self.use_sde_at_warmup,
-            self.action_space,
-            self.action_noise,
-        )
-        generator = episode_generator.generate(self.policy, env)
-        while self.running:
-            yield next(generator)
-            self.sync_training_policy_to_rollout_policy_weights_only(index)
-
-
-class InjectorWorker(InjectorWorkerBase, EpisodeGenerator):
-    def __init__(
-        self,
-        env_func,
-        trajectory: multiprocessing.Queue,
-        state: Namespace,
-        stop: multiprocessing.Event,
-        **kwargs,
-    ):
-        super().__init__(env_func, trajectory, state, stop)
-        EpisodeGenerator.__init__(self, **kwargs)
-
-        self._version = None
-        self._policy = None
-
-        self._logger = logging.getLogger("Worker")
-
-    def episode_generator(self, index: int, env: VecEnv):
-        generator = self.generate(self._copy_policy_from_state(), env)
-
-        while self.running:
-            episode = next(generator)
-
-            try:
-                self._trajectory.put_nowait(episode)
-            except queue.Full:
-                self._logger.info("Dropped episode due to buffer full")
-
-        self._logger.info("generator cycle is completed")
-
-    def _copy_policy_from_state(self):
-        state = self._state
-        policy_bytes = state.policy
-
-        if self._version != state.version:
-            data = io.BytesIO(policy_bytes)
-            # load state
-            policy = torch.load(data, weights_only=False, map_location="cpu")
-            # turn off the train mode
-            policy.set_training_mode(False)
-
-            self._policy = policy
-            self._version = state.version
-
-        return self._policy
-
-    def update_policy(self, policy: BasePolicy) -> BasePolicy:
-        return self._copy_policy_from_state()
-
-
-class OffPolicyAlgorithmInjectorMP(
-    AsyncAgentInjectorMP, OffPolicyAlgorithmInjectorBase
-):
-    def __init__(
-        self,
-        *args,
-        max_episodes_in_buffer: int = 8,
-        envs: Optional[EnvFactoryList] = None,
-        **kwargs,
-    ) -> None:
-        super().__init__(
-            envs=envs,
-            worker_class=InjectorWorker,
-            max_episodes_in_buffer=max_episodes_in_buffer,
-        )
-        super(IAsyncAgentInjector, self).__init__(*args, **kwargs)
-
-        # hardcoded override (!)
-        self.device = get_device("cpu")
-
-    def get_worker_kwargs(self):
-        return dict(
-            learning_starts=self.learning_starts,
-            num_timesteps=self.num_timesteps,
-            use_sde=self.use_sde,
-            use_sde_at_warmup=self.use_sde_at_warmup,
-            action_space=self.action_space,
-            action_noise=self.action_noise,
-        )
+                    self.copy_policy_from_state()

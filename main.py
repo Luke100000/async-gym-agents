@@ -30,14 +30,17 @@ def multi_env(venv):
 def test_on_policy():
     """Test on-policy agent with multiprocessing."""
     env = IndexableMultiEnv(multi_env(partial(make_venv, taxi_env)))
-    model = get_injected_agent(PPO, use_mp=False)("MlpPolicy", env)
+    model = get_injected_agent(PPO)("MlpPolicy", env)
     run_model_test(model)
 
 
 def test_on_policy_mp():
     """Test on-policy agent with multiprocessing."""
-    model = get_injected_agent(PPO, use_mp=True)(
-        "MlpPolicy", taxi_env(), envs=multi_env(partial(make_venv, taxi_env))
+    model = get_injected_agent(PPO)(
+        "MlpPolicy",
+        taxi_env(),
+        envs=multi_env(partial(make_venv, taxi_env)),
+        use_mp=True,
     )
     run_model_test(model)
 
@@ -45,19 +48,20 @@ def test_on_policy_mp():
 def test_off_policy():
     """Test on-policy agent with multiprocessing."""
     env = IndexableMultiEnv(multi_env(partial(make_venv, lunar_lander_env)))
-    model = get_injected_agent(SAC, use_mp=False)("MlpPolicy", env)
+    model = get_injected_agent(SAC)("MlpPolicy", env)
     run_model_test(model)
 
 
 def test_off_policy_mp():
     """Test on-policy agent with multiprocessing."""
-    model = get_injected_agent(SAC, use_mp=True)(
+    model = get_injected_agent(SAC)(
         "MlpPolicy",
         lunar_lander_env(),
         envs=multi_env(partial(make_venv, lunar_lander_env)),
+        use_mp=True,
     )
     run_model_test(model)
 
 
 if __name__ == "__main__":
-    test_off_policy_mp()
+    test_on_policy_mp()

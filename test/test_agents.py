@@ -8,7 +8,7 @@ from stable_baselines3 import PPO, SAC
 from stable_baselines3.common.base_class import BaseAlgorithm
 
 from async_gym_agents.agents.async_agent import get_injected_agent
-from async_gym_agents.agents.injector import AsyncAgentInjectorBase
+from async_gym_agents.agents.injector import AsyncAgentInjector
 
 logging.basicConfig(
     level=logging.DEBUG,
@@ -18,7 +18,7 @@ logging.basicConfig(
 TRAIN_TIMESTEPS = 1000
 
 
-def run_model_test(model: Union[BaseAlgorithm, AsyncAgentInjectorBase]):
+def run_model_test(model: Union[BaseAlgorithm, AsyncAgentInjector]):
     """Helper function to test a model's basic functionality."""
     # Train the model
     t = time.time()
@@ -45,6 +45,10 @@ def run_model_test(model: Union[BaseAlgorithm, AsyncAgentInjectorBase]):
     # Cleanup
     if hasattr(model, "shutdown"):
         model.shutdown()
+
+        print("Buffer utilization: ", model.buffer_utilization)
+        print("Buffer emptiness: ", model.buffer_emptyness)
+        print("Discarded episodes: ", model.discarded_episodes_fraction)
 
 
 def test_on_policy(taxi_multi_env):
