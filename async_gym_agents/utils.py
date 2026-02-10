@@ -1,4 +1,10 @@
+from functools import partial
 from typing import Any, Tuple, TypeVar
+
+import gymnasium as gym
+from stable_baselines3.common.vec_env import DummyVecEnv, VecEnv
+
+from async_gym_agents.types import Env
 
 T = TypeVar("T")
 
@@ -11,3 +17,13 @@ def single_slice(x: T, idx: int) -> T | Tuple[Any, ...]:
 
 def identity(x):
     return x
+
+
+def make_venv(e: Env) -> VecEnv:
+    if isinstance(e, VecEnv):
+        return e
+    if isinstance(e, gym.Env):
+        return DummyVecEnv([partial(identity, e)])
+    if isinstance(e, list) and isinstance(e[0], gym.Env):
+        return DummyVecEnv([partial(identity, env) for env in e])
+    raise ValueError(f"Cannot make VecEnv from {e}")

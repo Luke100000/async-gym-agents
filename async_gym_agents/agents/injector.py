@@ -18,7 +18,7 @@ from stable_baselines3.common.base_class import BasePolicy
 
 from async_gym_agents.envs.multi_env import IndexableMultiEnv
 from async_gym_agents.types import EnvFactory, EnvFactoryList, Transition
-from async_gym_agents.utils import identity
+from async_gym_agents.utils import identity, make_venv
 
 logger = logging.getLogger("async_gym_agents")
 
@@ -76,9 +76,6 @@ class AsyncAgentInjector:
         self._buffer_utilization = 0.0
         self._buffer_emptiness = 0.0
         self._buffer_stat_count = 0
-
-    def _episode_generator(self, index: int):
-        raise NotImplementedError()
 
     @staticmethod
     def _run_worker(
@@ -299,7 +296,7 @@ class InjectorWorkerBase:
         queue_put_timeout: float,
         **kwargs,
     ):
-        self.env = IndexableMultiEnv._make_venv(env_func())
+        self.env = make_venv(env_func())
 
         self.policy = None
         self._policy_version = None

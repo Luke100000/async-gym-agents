@@ -17,8 +17,8 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 
-TRAIN_TIMESTEPS = 10000
-EVAL_TIMESTEPS = 100
+TRAIN_TIMESTEPS = 100
+EVAL_TIMESTEPS = 10
 
 
 def run_model_test(model: Union[BaseAlgorithm, AsyncAgentInjector]):

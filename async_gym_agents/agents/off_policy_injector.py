@@ -16,7 +16,6 @@ from stable_baselines3.common.vec_env import VecEnv
 from stable_baselines3.common.vec_env.base_vec_env import VecEnvObs
 
 from async_gym_agents.agents.injector import AsyncAgentInjector, InjectorWorkerBase
-from async_gym_agents.envs.multi_env import IndexableMultiEnv
 from async_gym_agents.types import EnvFactoryList
 from async_gym_agents.utils import single_slice
 
@@ -94,7 +93,7 @@ class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithm):
     # must be updated from SB3 (!)
     def collect_rollouts(
         self,
-        env: IndexableMultiEnv,
+        env: VecEnv,
         callback: BaseCallback,
         train_freq: TrainFreq,
         replay_buffer: ReplayBuffer,

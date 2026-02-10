@@ -10,10 +10,7 @@ from async_gym_agents.agents.async_agent import get_injected_agent
 from async_gym_agents.envs.multi_env import IndexableMultiEnv
 
 
-def test_truncating(
-    threads: int = 8,
-    agent: Type[BaseAlgorithm] = PPO,
-):
+def test_truncating(threads: int = 8, agent: Type[BaseAlgorithm] = PPO):
     """Test that the agent is able to truncate episodes."""
     env = IndexableMultiEnv([lambda: get_buggy_env(True) for _ in range(threads)])
 

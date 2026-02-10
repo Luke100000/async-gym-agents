@@ -8,52 +8,63 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.base_class import BaseAlgorithm
 from stable_baselines3.common.evaluation import evaluate_policy
 from stable_baselines3.common.monitor import Monitor
+from stable_baselines3.common.vec_env import DummyVecEnv
 
 from async_gym_agents.agents.async_agent import get_injected_agent
-from async_gym_agents.envs.multi_env import IndexableMultiEnv
 from async_gym_agents.envs.slow_cartpole import SlowCartPoleEnv
 from async_gym_agents.envs.threaded_env import ThreadedVecEnv
 
+TRAIN_TIMESTEPS = 1000
+EVAL_TIMESTEPS = 100
+
 
 class Mode(Enum):
-    ASYNC = (0,)
-    PARALLEL = (1,)
-    SEQUENTIAL = (2,)
+    ASYNC = 0
+    PARALLEL = 1
+    SEQUENTIAL = 2
 
 
 def get_env(slow: bool) -> gym.Env:
-    return Monitor(SlowCartPoleEnv(min_sleep=0, max_sleep=0.1 if slow else 0))
+    return Monitor(SlowCartPoleEnv(min_sleep=0, max_sleep=0.01 if slow else 0))
 
 
-def get_envs(threads) -> List[gym.Env]:
-    return [get_env(True) for _ in range(threads)]
+def get_envs(n_envs: int) -> List[gym.Env]:
+    return [get_env(True) for _ in range(n_envs)]
 
 
 def evaluate(
     mode: Mode = Mode.ASYNC,
     use_mp: bool = False,
-    threads: int = 8,
+    n_envs: int = 1,
+    n_workers: int = 4,
     agent: Type[BaseAlgorithm] = PPO,
 ):
-    env = (ThreadedVecEnv if mode == Mode.PARALLEL else IndexableMultiEnv)(
-        [lambda: get_env(True) for _ in range(threads * threads)]
-    )
+    if mode == Mode.ASYNC:
+        batch_size = n_envs
+        env = get_env(True)
+    else:
+        batch_size = n_workers * n_envs
+        env = (DummyVecEnv if mode == Mode.SEQUENTIAL else ThreadedVecEnv)(
+            [lambda: get_env(True) for _ in range(batch_size)]
+        )
 
     injected_agent = get_injected_agent(agent) if mode == Mode.ASYNC else agent
 
     model = injected_agent(
         "MlpPolicy",
         env,
-        use_mp=use_mp,
         learning_rate=3e-4,
         **(
-            {"envs": [partial(get_envs, threads=threads) for _ in range(threads)]}
-            if mode == Mode.ASYNC and use_mp
+            {
+                "envs": [partial(get_envs, n_envs=n_envs) for _ in range(n_workers)],
+                "use_mp": use_mp,
+            }
+            if mode == Mode.ASYNC
             else {}
         ),
     )
 
-    model.learn(total_timesteps=1000)
+    model.learn(total_timesteps=TRAIN_TIMESTEPS // batch_size)
 
     if mode == Mode.ASYNC:
         model.shutdown()
@@ -62,7 +73,9 @@ def evaluate(
         print(f"Discarded episodes: {model.discarded_episodes_fraction}")
 
     eval_env = get_env(False)
-    mean_reward, std_reward = evaluate_policy(model, eval_env, n_eval_episodes=100)
+    mean_reward, std_reward = evaluate_policy(
+        model, eval_env, n_eval_episodes=EVAL_TIMESTEPS
+    )
     print(f"Mean reward: {mean_reward}, Std reward: {std_reward}")
 
 

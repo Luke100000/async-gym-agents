@@ -1,9 +1,8 @@
-from functools import partial
 from typing import Any, Callable, List, Optional, Sequence, Type, Union
 
 import gymnasium as gym
 import numpy as np
-from stable_baselines3.common.vec_env import DummyVecEnv, VecEnv
+from stable_baselines3.common.vec_env import VecEnv
 from stable_baselines3.common.vec_env.base_vec_env import (
     VecEnvIndices,
     VecEnvObs,
@@ -11,7 +10,7 @@ from stable_baselines3.common.vec_env.base_vec_env import (
 )
 
 from async_gym_agents.types import Env, EnvFactoryList
-from async_gym_agents.utils import identity
+from async_gym_agents.utils import make_venv
 
 
 class IndexableMultiEnv(VecEnv):
@@ -33,7 +32,7 @@ class IndexableMultiEnv(VecEnv):
             envs = [env_fns]
 
         # Make sure they are all VecEnvs
-        self.envs = [self._make_venv(e) for e in envs]
+        self.envs = [make_venv(e) for e in envs]
         self.real_num_envs = self.envs[0].num_envs
 
         super().__init__(1, self.envs[0].observation_space, self.envs[0].action_space)
@@ -103,13 +102,3 @@ class IndexableMultiEnv(VecEnv):
         raise ValueError(
             f"IndexableMultiEnv only supports a scalar index, not {indices}."
         )
-
-    @staticmethod
-    def _make_venv(e: Env) -> VecEnv:
-        if isinstance(e, VecEnv):
-            return e
-        if isinstance(e, gym.Env):
-            return DummyVecEnv([partial(identity, e)])
-        if isinstance(e, list) and isinstance(e[0], gym.Env):
-            return DummyVecEnv([partial(identity, env) for env in e])
-        raise ValueError(f"Cannot make VecEnv from {e}")
