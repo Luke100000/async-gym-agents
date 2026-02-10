@@ -8,7 +8,7 @@ from async_gym_agents.agents.async_agent import get_injected_agent
 from async_gym_agents.envs.multi_env import IndexableMultiEnv
 from async_gym_agents.envs.threaded_env import ThreadedVecEnv
 
-PROCESSES = 2
+PROCESSES = 4
 
 
 def taxi_env():
@@ -64,4 +64,4 @@ def test_off_policy_mp():
 
 
 if __name__ == "__main__":
-    test_on_policy_mp()
+    test_off_policy_mp()

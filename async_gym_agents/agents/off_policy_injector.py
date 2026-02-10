@@ -1,7 +1,5 @@
-import multiprocessing
 from copy import deepcopy
 from dataclasses import dataclass
-from multiprocessing.managers import Namespace
 from typing import Any, Dict, Generator, List, Optional, Tuple, Type, Union
 
 import gymnasium as gym
@@ -38,7 +36,7 @@ class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithm):
         self,
         *args,
         envs: Optional[EnvFactoryList] = None,
-        use_mp: bool = True,
+        use_mp: bool = False,
         **kwargs,
     ):
         super().__init__(envs=envs, use_mp=use_mp)
@@ -124,10 +122,9 @@ class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithm):
         :return:
         """
 
-        self.init_collect_process()
-
         # Switch to eval mode (this affects batch norm / dropout)
         self.policy.set_training_mode(False)
+
         self.pre_collect_preparation(self.policy)
 
         num_collected_steps, num_collected_episodes = 0, 0
@@ -233,6 +230,7 @@ class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithm):
 
     def get_worker_kwargs(self):
         return dict(
+            **super().get_worker_kwargs(),
             learning_starts=self.learning_starts,
             num_timesteps=self.num_timesteps,
             use_sde=self.use_sde,
@@ -245,19 +243,15 @@ class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithm):
 class InjectorWorker(InjectorWorkerBase):
     def __init__(
         self,
-        env_func,
-        episode_queue: multiprocessing.Queue,
-        state: Namespace,
-        stop: multiprocessing.Event,
-        # Off policy injector specific parameters
         learning_starts: int,
         num_timesteps: int,
         use_sde: bool,
         use_sde_at_warmup: bool,
         action_space: gym.Space,
         action_noise: Optional[ActionNoise],
+        **kwargs,
     ) -> None:
-        super().__init__(env_func, episode_queue, state, stop)
+        super().__init__(**kwargs)
 
         self.learning_starts = learning_starts
         self.num_timesteps = num_timesteps

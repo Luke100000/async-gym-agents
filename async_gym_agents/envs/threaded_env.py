@@ -67,7 +67,6 @@ def _worker(
                 result_queue.put(env.render())
             elif cmd == "close":
                 env.close()
-                result_queue.join()
                 break
             elif cmd == "get_spaces":
                 result_queue.put((env.observation_space, env.action_space))

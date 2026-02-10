@@ -3,6 +3,7 @@ import logging
 import multiprocessing
 import queue
 import threading
+import time
 from functools import partial
 from multiprocessing.context import Process as MPProcess
 from multiprocessing.managers import Namespace
@@ -31,13 +32,30 @@ GenericWorker: TypeAlias = MPProcess | threading.Thread
 class AsyncAgentInjector:
     def __init__(
         self,
+        *args,
         envs: Optional[EnvFactoryList],
         max_episodes_in_buffer: int = 8,
         use_mp: bool = False,
+        skip_truncated: bool = False,
+        queue_put_timeout: float = 60.0,
+        worker_join_timeout: float = 120.0,
+        **kwargs,
     ):
+        """
+        :param envs: The environment constructors
+        :param max_episodes_in_buffer: Max episodes in the buffer before blocking
+        :param use_mp: Use processes instead of threads
+        :param skip_truncated: Skip episodes with truncated signal
+        :param queue_put_timeout: Timeout when putting an episode before dropping
+        :param worker_join_timeout: Shutdown time before killing the process
+        """
         self._envs = envs
         self.max_episodes_in_buffer = max_episodes_in_buffer
         self.use_mp = use_mp
+
+        self._skip_truncated = skip_truncated
+        self._queue_put_timeout = queue_put_timeout
+        self._worker_join_timeout = worker_join_timeout
 
         # shared memory
         self._episode_queue: GenericQueue | None = None
@@ -51,12 +69,8 @@ class AsyncAgentInjector:
         self._stop: GenericEvent | None = None
 
         self._initialized = False
+        self._initialized_workers = False
         self._workers: List[GenericWorker] = []
-
-        # 1 minute wait for a new message in the queue
-        self._queue_get_timeout = 60.0
-        # 2-minute wait before try to kill the process
-        self._worker_join_timeout = 120.0
 
         # Metrics
         self._buffer_utilization = 0.0
@@ -92,10 +106,49 @@ class AsyncAgentInjector:
         raise NotImplementedError()
 
     def get_worker_kwargs(self) -> Dict[str, Any]:
-        raise NotImplementedError()
+        return dict(
+            skip_truncated=self._skip_truncated,
+            queue_put_timeout=self._queue_put_timeout,
+        )
 
-    def init_collect_process(self):
+    def pre_collect_preparation(self, policy: BasePolicy):
+        self._init_collect_state()
+
+        weights_buf = io.BytesIO()
+        th.save(policy.state_dict(), weights_buf)
+        weights_bytes = weights_buf.getvalue()
+        policy_buf = io.BytesIO()
+        th.save(policy, policy_buf)
+        policy_bytes = policy_buf.getvalue()
+
+        self._state.version = self._version
+        self._state.weights = weights_bytes
+        self._state.policy = policy_bytes
+        self._version += 1
+
+        self._init_collect_processes()
+
+    def _init_collect_state(self):
         if self._initialized:
+            return
+
+        # Environment queue
+        self._episode_queue = multiprocessing.Queue(maxsize=self.max_episodes_in_buffer)
+
+        # Shared state for policy and metrics
+        self._manager = multiprocessing.Manager() if self.use_mp else None
+        self._state = self._manager.Namespace() if self.use_mp else SimpleNamespace()
+
+        self._state.total_episodes = 0
+        self._state.discarded_episodes = 0
+
+        # Stop signal
+        self._stop = multiprocessing.Event() if self.use_mp else threading.Event()
+
+        self._initialized = True
+
+    def _init_collect_processes(self):
+        if self._initialized_workers:
             return
 
         env_funcs = self._envs
@@ -109,27 +162,8 @@ class AsyncAgentInjector:
                 "Multi-processed injectors must have the envs constructor set."
             )
 
-        # Environment queue
-        if self._episode_queue is None:
-            self._episode_queue = multiprocessing.Queue(
-                maxsize=self.max_episodes_in_buffer
-            )
-
-        # Shared state for policy and metrics
-        if self._state is None:
-            self._manager = multiprocessing.Manager() if self.use_mp else None
-            self._state = (
-                self._manager.Namespace() if self.use_mp else SimpleNamespace()
-            )
-
-            self._state.total_episodes = 0
-            self._state.discarded_episodes = 0
-
-        # Stop signal
-        if self._stop is None:
-            self._stop = multiprocessing.Event() if self.use_mp else threading.Event()
-
         # Start workers
+        self._workers = []
         for env_func in env_funcs:
             worker = (multiprocessing.Process if self.use_mp else threading.Thread)(
                 target=AsyncAgentInjector._run_worker,
@@ -146,7 +180,7 @@ class AsyncAgentInjector:
 
             self._workers.append(worker)
 
-        self._initialized = True
+        self._initialized_workers = True
 
     def _excluded_save_params(self) -> List[str]:
         # noinspection PyUnresolvedReferences
@@ -159,12 +193,13 @@ class AsyncAgentInjector:
             "_version",
             "_stop",
             "_initialized",
+            "_initialized_workers",
             "_workers",
         ]
 
     def _fetch_transitions(self) -> List[Transition]:
         try:
-            return self._episode_queue.get(timeout=self._queue_get_timeout)
+            return self._episode_queue.get()
         except queue.Empty:
             return []
 
@@ -182,34 +217,22 @@ class AsyncAgentInjector:
 
         return self._transitions.pop(0)
 
-    def pre_collect_preparation(self, policy: BasePolicy):
-        weights_buf = io.BytesIO()
-        th.save(policy.state_dict(), weights_buf)
-        weights_bytes = weights_buf.getvalue()
-        policy_buf = io.BytesIO()
-        th.save(policy, policy_buf)
-        policy_bytes = policy_buf.getvalue()
-
-        self._state.version = self._version
-        self._state.weights = weights_bytes
-        self._state.policy = policy_bytes
-        self._version += 1
-
     def shutdown(self):
-        logger.info("send stop event to all processes")
+        logger.info("Send stop event to all processes")
         self._stop.set()
         self._stop = None
 
-        for proc in self._workers:
-            if not proc.is_alive():
+        for worker in self._workers:
+            if not worker.is_alive():
                 continue
 
-            proc.join(timeout=self._worker_join_timeout)
+            worker.join(timeout=self._worker_join_timeout)
 
-            try:
-                proc.kill()
-            except PermissionError:
-                logger.warning("cannot kill process due to permission error")
+            if self.use_mp:
+                try:
+                    worker.kill()
+                except PermissionError:
+                    logger.warning("cannot kill process due to permission error")
 
         # close the queue
         if self._episode_queue is not None:
@@ -219,35 +242,48 @@ class AsyncAgentInjector:
 
         # release a shared object: manager
         if self._manager is not None:
+            self._state = SimpleNamespace(
+                total_episodes=self._state.total_episodes,
+                discarded_episodes=self._state.discarded_episodes,
+            )
             self._manager.shutdown()
             self._manager = None
-            self._state = None
 
         self._initialized = False
+        self._initialized_workers = False
 
-        logger.info("stop manager")
+        logger.info("Stopped manager")
 
     @property
     def buffer_utilization(self) -> float:
+        """
+        The average size of the buffer in episodes.
+        """
         return (
             0
-            if self._state.buffer_stat_count == 0
-            else self._state.buffer_utilization / self._state.buffer_stat_count
+            if self._buffer_stat_count == 0
+            else self._buffer_utilization / self._buffer_stat_count
         )
 
     @property
     def buffer_emptyness(self) -> float:
+        """
+        The fraction of the time the buffer was empty.
+        """
         return (
             0
-            if self._state.buffer_stat_count == 0
-            else self._state.buffer_emptiness / self._state.buffer_stat_count
+            if self._buffer_stat_count == 0
+            else self._buffer_emptiness / self._buffer_stat_count
         )
 
     @property
     def discarded_episodes_fraction(self) -> float:
+        """
+        The fraction of episodes dropped, either due to full buffer or truncation.
+        """
         return (
             0
-            if self._state.total_episodes == 0
+            if self._state is None or self._state.total_episodes == 0
             else self._state.discarded_episodes / self._state.total_episodes
         )
 
@@ -259,6 +295,8 @@ class InjectorWorkerBase:
         episode_queue: multiprocessing.Queue,
         state: Namespace,
         stop: multiprocessing.Event,
+        skip_truncated: bool,
+        queue_put_timeout: float,
         **kwargs,
     ):
         self.env = IndexableMultiEnv._make_venv(env_func())
@@ -272,8 +310,8 @@ class InjectorWorkerBase:
 
         self._logger = logging.getLogger("Worker")
 
-        self._skip_truncated = True  # skip_truncated # TODO
-        self._timeout = 1.0  # timeout # TODO
+        self._skip_truncated = skip_truncated
+        self._queue_put_timeout = queue_put_timeout
 
     def copy_policy_from_state(self):
         version = self._state
@@ -287,37 +325,49 @@ class InjectorWorkerBase:
 
             self._policy_version = version
 
+    def _put_episode_with_timeout(self, episode):
+        deadline = time.time() + self._queue_put_timeout
+
+        while time.time() < deadline:
+            if self._stop.is_set():
+                return
+
+            try:
+                self._episode_queue.put(
+                    episode,
+                    block=True,
+                    timeout=min(0.1, deadline - time.time()),
+                )
+                return
+            except queue.Full:
+                pass
+
+        try:
+            self._episode_queue.get(block=False)
+            self._episode_queue.put(episode, block=False)
+        except (queue.Full, queue.Empty):
+            pass
+
+        self._state.discarded_episodes += 1
+        logger.info("Dropped episode due to buffer full")
+
     def run(self):
         self.copy_policy_from_state()
 
         for episode in self.generate():
-            # Keeps track of truncated episodes and optionally removes them
             self._state.total_episodes += 1
+
             if episode[-1].infos[0]["TimeLimit.truncated"] and self._skip_truncated:
                 self._state.discarded_episodes += 1
                 continue
 
-            # Feeds the episodes into the queue
-            try:
-                self._episode_queue.put(episode, block=True, timeout=self._timeout)
-            except queue.Full:
-                try:
-                    # Try to drop from the start to keep the more recent episodes
-                    self._episode_queue.get(block=False)
-                    self._episode_queue.put(episode, block=False)
-                except queue.Full:
-                    pass
-                self._state.discarded_episodes += 1
-                logger.info("Dropped episode due to buffer full")
+            self._put_episode_with_timeout(episode)
 
-            # Shut down
             if self._stop.is_set():
                 break
 
-        self._logger.info("Generator cycle is completed")
-
-        # stop environment
         self.env.close()
+        self._logger.info("Generator cycle is completed")
 
     def generate(self) -> Generator[list[Transition], None, None]:
         raise NotImplementedError()

@@ -34,6 +34,7 @@ class IndexableMultiEnv(VecEnv):
 
         # Make sure they are all VecEnvs
         self.envs = [self._make_venv(e) for e in envs]
+        self.real_num_envs = self.envs[0].num_envs
 
         super().__init__(1, self.envs[0].observation_space, self.envs[0].action_space)
 

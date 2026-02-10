@@ -1,7 +1,5 @@
-import multiprocessing
 from copy import deepcopy
 from dataclasses import dataclass
-from multiprocessing.managers import Namespace
 from typing import Dict, Generator, Optional, Type
 
 import gymnasium as gym
@@ -16,7 +14,7 @@ from stable_baselines3.common.vec_env import VecEnv
 from stable_baselines3.common.vec_env.base_vec_env import VecEnvObs
 
 from async_gym_agents.agents.injector import AsyncAgentInjector, InjectorWorkerBase
-from async_gym_agents.types import EnvFactory, EnvFactoryList
+from async_gym_agents.types import EnvFactoryList
 from async_gym_agents.utils import single_slice
 
 
@@ -38,7 +36,7 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
         self,
         *args,
         envs: Optional[EnvFactoryList] = None,
-        use_mp: bool = True,
+        use_mp: bool = False,
         **kwargs,
     ):
         super().__init__(envs=envs, use_mp=use_mp)
@@ -67,10 +65,9 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
         """
         assert self._last_obs is not None, "No previous observation was provided"
 
-        self.init_collect_process()
-
         # Switch to eval mode (this affects batch norm / dropout)
         self.policy.set_training_mode(False)
+
         self.pre_collect_preparation(self.policy)
 
         n_steps = 0
@@ -159,6 +156,7 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
 
     def get_worker_kwargs(self):
         return dict(
+            **super().get_worker_kwargs(),
             action_space=self.action_space,
             device=self.device,
         )
@@ -167,15 +165,11 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
 class InjectorWorker(InjectorWorkerBase):
     def __init__(
         self,
-        env_func: EnvFactory,
-        episode_queue: multiprocessing.Queue,
-        state: Namespace,
-        stop: multiprocessing.Event,
-        # On policy injector specific parameters
         action_space: gym.Space,
         device: torch.device,
+        **kwargs,
     ):
-        super().__init__(env_func, episode_queue, state, stop)
+        super().__init__(**kwargs)
 
         self.action_space = action_space
         self.device = device

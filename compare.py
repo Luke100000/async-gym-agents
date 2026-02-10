@@ -39,13 +39,12 @@ def evaluate(
         [lambda: get_env(True) for _ in range(threads * threads)]
     )
 
-    injected_agent = (
-        get_injected_agent(agent, use_mp=use_mp) if mode == Mode.ASYNC else agent
-    )
+    injected_agent = get_injected_agent(agent) if mode == Mode.ASYNC else agent
 
     model = injected_agent(
         "MlpPolicy",
         env,
+        use_mp=use_mp,
         learning_rate=3e-4,
         **(
             {"envs": [partial(get_envs, threads=threads) for _ in range(threads)]}
