@@ -195,10 +195,7 @@ class AsyncAgentInjector:
         ]
 
     def _fetch_transitions(self) -> List[Transition]:
-        try:
-            return self._episode_queue.get()
-        except queue.Empty:
-            return []
+        return self._episode_queue.get()
 
     def fetch_transition(self) -> Transition:
         """

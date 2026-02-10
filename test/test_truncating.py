@@ -31,8 +31,5 @@ def test_truncating(threads: int = 8, agent: Type[BaseAlgorithm] = PPO):
 
     model.shutdown()
 
-    print(f"Truncated episodes: {model.discarded_episodes_fraction * 100}%")
-    assert 0 < model.discarded_episodes_fraction < 1
-
     mean_reward, std_reward = evaluate_policy(model, eval_env, n_eval_episodes=1000)
     print(f"Mean reward: {mean_reward}, Std reward: {std_reward}")

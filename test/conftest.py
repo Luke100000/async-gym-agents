@@ -1,3 +1,5 @@
+from functools import partial
+
 import gymnasium as gym
 import pytest
 from stable_baselines3.common.monitor import Monitor
@@ -25,13 +27,13 @@ def lunar_lander_multi_env():
 @pytest.fixture
 def taxi_env():
     """Fixture for creating a discrete action space environment."""
-    return gym.make("Taxi-v3")
+    return partial(gym.make, "Taxi-v3")
 
 
 @pytest.fixture
 def lunar_lander_env():
     """Fixture for creating a continuous action space environment."""
-    return gym.make("LunarLanderContinuous-v3")
+    return partial(gym.make, "LunarLanderContinuous-v3")
 
 
 def get_buggy_env(buggy: bool) -> gym.Env:

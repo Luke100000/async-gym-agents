@@ -72,7 +72,7 @@ def test_on_policy(taxi_multi_env):
 def test_on_policy_mp(taxi_env):
     """Test on-policy agent with multiprocessing."""
     model = get_injected_agent(PPO)(
-        "MlpPolicy", taxi_env, envs=[taxi_env for _ in range(PROCESSES)], use_mp=True
+        "MlpPolicy", taxi_env(), envs=[taxi_env for _ in range(PROCESSES)], use_mp=True
     )
     run_model_test(model)
 
@@ -87,7 +87,7 @@ def test_off_policy_mp(lunar_lander_env):
     """Test off-policy agent with multiprocessing."""
     model = get_injected_agent(SAC)(
         "MlpPolicy",
-        lunar_lander_env,
+        lunar_lander_env(),
         envs=[lunar_lander_env for _ in range(PROCESSES)],
         use_mp=True,
     )
