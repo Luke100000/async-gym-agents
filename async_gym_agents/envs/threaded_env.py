@@ -55,7 +55,7 @@ def _worker(
                 done = terminated or truncated
                 info["TimeLimit.truncated"] = truncated and not terminated
                 if done:
-                    # save final observation where user can get it, then reset
+                    # save the final observation where the user can get it, then reset
                     info["terminal_observation"] = observation
                     observation, reset_info = env.reset()
                 result_queue.put((observation, reward, done, info, reset_info))
@@ -109,14 +109,14 @@ class ThreadedVecEnv(VecEnv):
         super().__init__(len(envs), observation_space, action_space)
 
     def step_async(self, actions: np.ndarray) -> None:
-        for queue, action in zip(self.task_queues, actions):
+        for queue, action in zip(self.task_queues, actions, strict=True):
             queue.put(("step", action))
         self.waiting = True
 
     def step_wait(self) -> VecEnvStepReturn:
         results = [queue.get() for queue in self.result_queues]
         self.waiting = False
-        obs, rewards, dones, infos, self.reset_infos = zip(*results)  # type: ignore[assignment]
+        obs, rewards, dones, infos, self.reset_infos = zip(*results, strict=True)  # type: ignore[assignment]
         return (
             _stack_observations(obs, self.observation_space),
             np.stack(rewards),
@@ -130,7 +130,7 @@ class ThreadedVecEnv(VecEnv):
         for env_idx, queue in enumerate(self.task_queues):
             queue.put(("reset", (self._seeds[env_idx], self._options[env_idx])))
         results = [queue.get() for queue in self.result_queues]
-        obs, self.reset_infos = zip(*results)  # type: ignore[assignment]
+        obs, self.reset_infos = zip(*results, strict=True)  # type: ignore[assignment]
         # Seeds and options are only used once
         self._reset_seeds()
         self._reset_options()
@@ -152,7 +152,7 @@ class ThreadedVecEnv(VecEnv):
         raise NotImplementedError
 
     def get_attr(self, attr_name: str, indices: VecEnvIndices = None) -> List[Any]:
-        """Return attribute from vectorized environment (see base class)."""
+        """Return attribute from a vectorized environment (see base class)."""
         for queue in self._get_target_queues(self.task_queues, indices):
             queue.put(("get_attr", attr_name))
         return [

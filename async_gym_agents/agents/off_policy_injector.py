@@ -16,7 +16,6 @@ from stable_baselines3.common.vec_env import VecEnv
 from stable_baselines3.common.vec_env.base_vec_env import VecEnvObs
 
 from async_gym_agents.agents.injector import AsyncAgentInjector, InjectorWorkerBase
-from async_gym_agents.types import EnvFactoryList
 from async_gym_agents.utils import single_slice
 
 
@@ -31,14 +30,8 @@ class Transition:
 
 
 class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithm):
-    def __init__(
-        self,
-        *args,
-        envs: Optional[EnvFactoryList] = None,
-        use_mp: bool = False,
-        **kwargs,
-    ):
-        super().__init__(envs=envs, use_mp=use_mp)
+    def __init__(self, *args, use_mp: bool = False, **kwargs):
+        super().__init__(use_mp=use_mp)
         super(AsyncAgentInjector, self).__init__(*args, **kwargs)
 
     def _store_transition(*args):
@@ -81,6 +74,7 @@ class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithm):
                             new_obs[i, :]
                         )
 
+        assert replay_buffer.n_envs == 1
         replay_buffer.add(
             last_obs,
             new_obs,
@@ -120,6 +114,10 @@ class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithm):
         :param log_interval: Log data every `log_interval` episode
         :return:
         """
+
+        if replay_buffer.n_envs != 1:
+            replay_buffer.n_envs = 1
+            replay_buffer.reset()
 
         # Switch to eval mode (this affects batch norm / dropout)
         self.policy.set_training_mode(False)

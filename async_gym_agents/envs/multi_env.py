@@ -1,4 +1,5 @@
-from typing import Any, Callable, List, Optional, Sequence, Type, Union
+import logging
+from typing import Any, List, Optional, Sequence, Type, Union
 
 import gymnasium as gym
 import numpy as np
@@ -9,7 +10,7 @@ from stable_baselines3.common.vec_env.base_vec_env import (
     VecEnvStepReturn,
 )
 
-from async_gym_agents.types import Env, EnvFactoryList
+from async_gym_agents.types import EnvFactoryList
 from async_gym_agents.utils import make_venv
 
 
@@ -19,29 +20,29 @@ class IndexableMultiEnv(VecEnv):
     Should not be used outside async-agents since it only uses index 0 of the envs otherwise.
     """
 
-    def __init__(self, env_fns: Union[EnvFactoryList, List[Env], Env]):
-        if isinstance(env_fns, list):
-            if isinstance(env_fns[0], Callable):
-                # This is a list of constructors
-                envs = [e() for e in env_fns]
-            else:
-                # Those are already environments
-                envs = env_fns
-        else:
-            # A single env has been passed
-            envs = [env_fns]
-
+    def __init__(self, env_fns: Union[EnvFactoryList], stub_env: gym.Env | None = None):
         # Make sure they are all VecEnvs
-        self.envs = [make_venv(e) for e in envs]
-        self.real_num_envs = self.envs[0].num_envs
+        self.env_fns = env_fns
 
-        super().__init__(1, self.envs[0].observation_space, self.envs[0].action_space)
+        stub_env = make_venv(stub_env or env_fns[0]())
 
-    def get_env(self, index: int) -> VecEnv:
-        return self.envs[index]
+        # This is when using the IndexableMultiEnv directly
+        # This is not recommended but may have use cases like reusing envs for evaluation
+        self._envs = None
+
+        super().__init__(
+            stub_env.num_envs, stub_env.observation_space, stub_env.action_space
+        )
 
     def __len__(self):
-        return len(self.envs)
+        return len(self.env_fns)
+
+    @property
+    def envs(self):
+        if self._envs is None:
+            logging.info("IndexableMultiEnv is creating environments!")
+            self._envs = [make_venv(e()) for e in self.env_fns]
+        return self._envs
 
     def step(self, actions: np.ndarray, index: int = 0) -> VecEnvStepReturn:
         self.step_async(actions, index=index)
@@ -57,13 +58,16 @@ class IndexableMultiEnv(VecEnv):
         return self.envs[index].reset()
 
     def close(self) -> None:
-        for env in self.envs:
-            env.close()
+        if self._envs is not None:
+            for env in self.envs:
+                env.close()
 
     def get_images(self) -> Sequence[Optional[np.ndarray]]:
         raise NotImplementedError
 
     def get_attr(self, attr_name: str, indices: VecEnvIndices = None) -> List[Any]:
+        if attr_name == "render_mode":
+            return [None for _ in range(self.num_envs)]
         return self.envs[self._get_index(indices)].get_attr(attr_name)
 
     def set_attr(

@@ -11,6 +11,7 @@ from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv
 
 from async_gym_agents.agents.async_agent import get_injected_agent
+from async_gym_agents.envs.multi_env import IndexableMultiEnv
 from async_gym_agents.envs.slow_cartpole import SlowCartPoleEnv
 from async_gym_agents.envs.threaded_env import ThreadedVecEnv
 
@@ -35,13 +36,13 @@ def get_envs(n_envs: int) -> List[gym.Env]:
 def evaluate(
     mode: Mode = Mode.ASYNC,
     use_mp: bool = False,
-    n_envs: int = 1,
-    n_workers: int = 4,
+    n_envs: int = 2,
+    n_workers: int = 2,
     agent: Type[BaseAlgorithm] = PPO,
 ):
     if mode == Mode.ASYNC:
         batch_size = n_envs
-        env = get_env(True)
+        env = IndexableMultiEnv([partial(get_envs, n_envs) for _ in range(n_workers)])
     else:
         batch_size = n_workers * n_envs
         env = (DummyVecEnv if mode == Mode.SEQUENTIAL else ThreadedVecEnv)(
@@ -54,14 +55,7 @@ def evaluate(
         "MlpPolicy",
         env,
         learning_rate=3e-4,
-        **(
-            {
-                "envs": [partial(get_envs, n_envs=n_envs) for _ in range(n_workers)],
-                "use_mp": use_mp,
-            }
-            if mode == Mode.ASYNC
-            else {}
-        ),
+        **({"use_mp": use_mp} if mode == Mode.ASYNC else {}),
     )
 
     model.learn(total_timesteps=TRAIN_TIMESTEPS // batch_size)

@@ -1,3 +1,4 @@
+from functools import partial
 from test.conftest import get_buggy_env
 from typing import Type
 
@@ -12,7 +13,7 @@ from async_gym_agents.envs.multi_env import IndexableMultiEnv
 
 def test_truncating(threads: int = 8, agent: Type[BaseAlgorithm] = PPO):
     """Test that the agent is able to truncate episodes."""
-    env = IndexableMultiEnv([lambda: get_buggy_env(True) for _ in range(threads)])
+    env = IndexableMultiEnv([partial(get_buggy_env, True) for _ in range(threads)])
 
     model = get_injected_agent(agent)("MlpPolicy", env, learning_rate=3e-4)
 

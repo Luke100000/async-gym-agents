@@ -1,6 +1,6 @@
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Dict, Generator, Optional, Type
+from typing import Dict, Generator, Type
 
 import gymnasium as gym
 import numpy as np
@@ -14,7 +14,6 @@ from stable_baselines3.common.vec_env import VecEnv
 from stable_baselines3.common.vec_env.base_vec_env import VecEnvObs
 
 from async_gym_agents.agents.injector import AsyncAgentInjector, InjectorWorkerBase
-from async_gym_agents.types import EnvFactoryList
 from async_gym_agents.utils import single_slice
 
 
@@ -35,11 +34,10 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
     def __init__(
         self,
         *args,
-        envs: Optional[EnvFactoryList] = None,
         use_mp: bool = False,
         **kwargs,
     ):
-        super().__init__(envs=envs, use_mp=use_mp)
+        super().__init__(use_mp=use_mp)
         super(AsyncAgentInjector, self).__init__(*args, **kwargs)
 
     # must be updated from SB3 (!)
@@ -71,8 +69,8 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
         self.pre_collect_preparation(self.policy)
 
         n_steps = 0
-        rollout_buffer.reset()
         rollout_buffer.n_envs = 1
+        rollout_buffer.reset()
 
         # Sample new weights for the state-dependent exploration
         if self.use_sde:
@@ -130,6 +128,7 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
                         terminal_value = self.policy.predict_values(terminal_obs)[0]
                     rewards[idx] += self.gamma * terminal_value
 
+            assert rollout_buffer.n_envs == 1
             rollout_buffer.add(
                 self._last_obs,
                 actions,

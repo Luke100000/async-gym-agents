@@ -4,7 +4,6 @@ import multiprocessing
 import queue
 import threading
 import time
-from functools import partial
 from multiprocessing.context import Process as MPProcess
 from multiprocessing.managers import Namespace
 from multiprocessing.queues import Queue as MPQueue
@@ -17,8 +16,8 @@ import torch as th
 from stable_baselines3.common.base_class import BasePolicy
 
 from async_gym_agents.envs.multi_env import IndexableMultiEnv
-from async_gym_agents.types import EnvFactory, EnvFactoryList, Transition
-from async_gym_agents.utils import identity, make_venv
+from async_gym_agents.types import EnvFactory, Transition
+from async_gym_agents.utils import make_venv
 
 logger = logging.getLogger("async_gym_agents")
 
@@ -33,7 +32,6 @@ class AsyncAgentInjector:
     def __init__(
         self,
         *args,
-        envs: Optional[EnvFactoryList],
         max_episodes_in_buffer: int = 8,
         use_mp: bool = False,
         skip_truncated: bool = False,
@@ -42,14 +40,12 @@ class AsyncAgentInjector:
         **kwargs,
     ):
         """
-        :param envs: The environment constructors
         :param max_episodes_in_buffer: Max episodes in the buffer before blocking
         :param use_mp: Use processes instead of threads
         :param skip_truncated: Skip episodes with truncated signal
         :param queue_put_timeout: Timeout when putting an episode before dropping
         :param worker_join_timeout: Shutdown time before killing the process
         """
-        self._envs = envs
         self.max_episodes_in_buffer = max_episodes_in_buffer
         self.use_mp = use_mp
 
@@ -108,6 +104,16 @@ class AsyncAgentInjector:
             queue_put_timeout=self._queue_put_timeout,
         )
 
+    # noinspection PyUnresolvedReferences
+    def get_indexable_env(self) -> IndexableMultiEnv:
+        """
+        Asserts whether a correct environment is supplied
+        """
+        assert isinstance(
+            self.env, IndexableMultiEnv
+        ), "You must pass a IndexableMultiEnv"
+        return self.env
+
     def pre_collect_preparation(self, policy: BasePolicy):
         self._init_collect_state()
 
@@ -148,20 +154,9 @@ class AsyncAgentInjector:
         if self._initialized_workers:
             return
 
-        env_funcs = self._envs
-        # noinspection PyUnresolvedReferences
-        if env_funcs is None and isinstance(self.env, IndexableMultiEnv):
-            # noinspection PyUnresolvedReferences
-            env_funcs = [partial(identity, e) for e in self.env.envs]
-
-        if env_funcs is None:
-            raise ValueError(
-                "Multi-processed injectors must have the envs constructor set."
-            )
-
         # Start workers
         self._workers = []
-        for env_func in env_funcs:
+        for env_func in self.get_indexable_env().env_fns:
             worker = (multiprocessing.Process if self.use_mp else threading.Thread)(
                 target=AsyncAgentInjector._run_worker,
                 kwargs=dict(
