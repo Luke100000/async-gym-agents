@@ -34,10 +34,20 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
     def __init__(
         self,
         *args,
+        max_episodes_in_buffer: int = 8,
         use_mp: bool = False,
+        skip_truncated: bool = False,
+        queue_put_timeout: float = 60.0,
+        worker_join_timeout: float = 120.0,
         **kwargs,
     ):
-        super().__init__(use_mp=use_mp)
+        super().__init__(
+            max_episodes_in_buffer=max_episodes_in_buffer,
+            use_mp=use_mp,
+            skip_truncated=skip_truncated,
+            queue_put_timeout=queue_put_timeout,
+            worker_join_timeout=worker_join_timeout,
+        )
         super(AsyncAgentInjector, self).__init__(*args, **kwargs)
 
     # must be updated from SB3 (!)
