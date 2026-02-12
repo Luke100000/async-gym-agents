@@ -13,33 +13,50 @@ from async_gym_agents.types import EnvFactoryList
 from async_gym_agents.utils import make_venv
 
 
+class RandomEnv(gym.Env):
+    def __init__(self, obs_space, action_space):
+        self.observation_space = obs_space
+        self.action_space = action_space
+
+    def reset(self, seed=None, options=None):
+        super().reset(seed=seed)
+        return self.observation_space.sample(), {}
+
+    def step(self, action):
+        obs = self.observation_space.sample()
+        reward = 0.0
+        terminated = True
+        truncated = True
+        info = {}
+        return obs, reward, terminated, truncated, info
+
+
 class IndexableMultiEnv(VecEnv):
     """
     A container for multiple VecEnvs / gym.Envs.
-    Should not be used outside async-agents since it only uses index 0 of the envs otherwise.
+    Should not be used outside async-agents since it will return random sampled episodes.
     """
 
     def __init__(self, env_fns: Union[EnvFactoryList], stub_env: gym.Env | None = None):
         # Make sure they are all VecEnvs
         self.env_fns = env_fns
 
-        # This is when using the IndexableMultiEnv directly
-        # This is not recommended but may have use cases like reusing envs for evaluation
-        self._env = None
-
         stub_env = make_venv(stub_env or env_fns[0]())
+
+        # This is when using the IndexableMultiEnv directly and only serves to not raise exceptions
+        self.env = make_venv(
+            [
+                RandomEnv(stub_env.observation_space, stub_env.action_space)
+                for _ in range(stub_env.num_envs)
+            ]
+        )
+
         super().__init__(
             stub_env.num_envs, stub_env.observation_space, stub_env.action_space
         )
 
     def __len__(self):
         return len(self.env_fns)
-
-    @property
-    def env(self) -> VecEnv:
-        if self._env is None:
-            self._env = make_venv(self.env_fns[0]())
-        return self._env
 
     def step_async(self, actions: np.ndarray, index: int = 0) -> None:
         self.env.step_async(actions)

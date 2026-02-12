@@ -44,8 +44,10 @@ def run_model_test(model: Union[BaseAlgorithm, AsyncAgentInjector]):
     model.learn(total_timesteps=10)
 
     # Evaluate
+    # noinspection PyUnresolvedReferences
+    eval_env = model.env.env_fns[0]()
     mean_reward, std_reward = evaluate_policy(
-        model, model.env, n_eval_episodes=EVAL_TIMESTEPS
+        model, eval_env, n_eval_episodes=EVAL_TIMESTEPS
     )
     print(f"Mean reward: {mean_reward}, Std reward: {std_reward}")
 
