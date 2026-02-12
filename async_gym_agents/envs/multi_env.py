@@ -1,5 +1,4 @@
-import logging
-from typing import Any, List, Optional, Sequence, Type, Union
+from typing import Any, List, Type, Union
 
 import gymnasium as gym
 import numpy as np
@@ -24,12 +23,11 @@ class IndexableMultiEnv(VecEnv):
         # Make sure they are all VecEnvs
         self.env_fns = env_fns
 
-        stub_env = make_venv(stub_env or env_fns[0]())
-
         # This is when using the IndexableMultiEnv directly
         # This is not recommended but may have use cases like reusing envs for evaluation
-        self._envs = None
+        self._env = None
 
+        stub_env = make_venv(stub_env or env_fns[0]())
         super().__init__(
             stub_env.num_envs, stub_env.observation_space, stub_env.action_space
         )
@@ -38,42 +36,30 @@ class IndexableMultiEnv(VecEnv):
         return len(self.env_fns)
 
     @property
-    def envs(self):
-        if self._envs is None:
-            logging.info("IndexableMultiEnv is creating environments!")
-            self._envs = [make_venv(e()) for e in self.env_fns]
-        return self._envs
-
-    def step(self, actions: np.ndarray, index: int = 0) -> VecEnvStepReturn:
-        self.step_async(actions, index=index)
-        return self.step_wait(index=index)
+    def env(self) -> VecEnv:
+        if self._env is None:
+            self._env = make_venv(self.env_fns[0]())
+        return self._env
 
     def step_async(self, actions: np.ndarray, index: int = 0) -> None:
-        self.envs[index].step_async(actions)
+        self.env.step_async(actions)
 
     def step_wait(self, index: int = 0) -> VecEnvStepReturn:
-        return self.envs[index].step_wait()
+        return self.env.step_wait()
 
     def reset(self, index: int = 0, **kwargs) -> VecEnvObs:
-        return self.envs[index].reset()
+        return self.env.reset()
 
     def close(self) -> None:
-        if self._envs is not None:
-            for env in self.envs:
-                env.close()
-
-    def get_images(self) -> Sequence[Optional[np.ndarray]]:
-        raise NotImplementedError
+        self.env.close()
 
     def get_attr(self, attr_name: str, indices: VecEnvIndices = None) -> List[Any]:
-        if attr_name == "render_mode":
-            return [None for _ in range(self.num_envs)]
-        return self.envs[self._get_index(indices)].get_attr(attr_name)
+        return self.env.get_attr(attr_name, indices)
 
     def set_attr(
         self, attr_name: str, value: Any, indices: VecEnvIndices = None
     ) -> None:
-        self.envs[self._get_index(indices)].set_attr(attr_name, value)
+        self.env.set_attr(attr_name, value, indices)
 
     def env_method(
         self,
@@ -82,14 +68,12 @@ class IndexableMultiEnv(VecEnv):
         indices: VecEnvIndices = None,
         **method_kwargs,
     ) -> List[Any]:
-        return self.envs[self._get_index(indices)].env_method(
-            *method_args, *method_kwargs
-        )
+        return self.env.env_method(*method_args, indices=indices, **method_kwargs)
 
     def env_is_wrapped(
         self, wrapper_class: Type[gym.Wrapper], indices: VecEnvIndices = None
     ) -> List[bool]:
-        return self.envs[self._get_index(indices)].env_is_wrapped(wrapper_class)
+        return self.env.env_is_wrapped(wrapper_class, indices)
 
     @staticmethod
     def _get_index(indices: VecEnvIndices) -> int:

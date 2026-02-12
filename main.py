@@ -72,8 +72,8 @@ def test_off_policy_mp():
 
 
 if __name__ == "__main__":
-    # test_on_policy_vanilla()
-    # test_off_policy_vanilla()
+    test_on_policy_vanilla()
+    test_off_policy_vanilla()
     test_on_policy()
     test_off_policy()
     test_on_policy_mp()
