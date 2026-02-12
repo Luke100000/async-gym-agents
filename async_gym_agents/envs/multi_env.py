@@ -1,61 +1,65 @@
-from collections import defaultdict
-from functools import partial
-from typing import Any, Callable, List, Optional, Sequence, Type
+from typing import Any, List, Type, Union
 
 import gymnasium as gym
 import numpy as np
-from stable_baselines3.common.vec_env import DummyVecEnv, VecEnv
+from stable_baselines3.common.vec_env import VecEnv
 from stable_baselines3.common.vec_env.base_vec_env import (
     VecEnvIndices,
     VecEnvObs,
     VecEnvStepReturn,
 )
 
-from async_gym_agents.types import Env
-from async_gym_agents.utils import identity
+from async_gym_agents.types import EnvFactoryList
+from async_gym_agents.utils import make_venv
 
 
 class IndexableMultiEnv(VecEnv):
     """
-    Same as multi env but sync.
+    A container for multiple VecEnvs / gym.Envs.
     Should not be used outside async-agents since it only uses index 0 of the envs otherwise.
     """
 
-    def __init__(self, env_fns: List[Callable[[], Env]]):
-        self.real_n_envs = len(env_fns)
+    def __init__(self, env_fns: Union[EnvFactoryList], stub_env: gym.Env | None = None):
+        # Make sure they are all VecEnvs
+        self.env_fns = env_fns
 
-        self.envs = [self._make_venv(e()) for e in env_fns]
-        self.additional = defaultdict(dict)
+        # This is when using the IndexableMultiEnv directly
+        # This is not recommended but may have use cases like reusing envs for evaluation
+        self._env = None
 
-        super().__init__(1, self.envs[0].observation_space, self.envs[0].action_space)
+        stub_env = make_venv(stub_env or env_fns[0]())
+        super().__init__(
+            stub_env.num_envs, stub_env.observation_space, stub_env.action_space
+        )
 
-    def step(self, actions: np.ndarray, index: int = 0) -> VecEnvStepReturn:
-        self.step_async(actions, index=index)
-        return self.step_wait(index=index)
+    def __len__(self):
+        return len(self.env_fns)
+
+    @property
+    def env(self) -> VecEnv:
+        if self._env is None:
+            self._env = make_venv(self.env_fns[0]())
+        return self._env
 
     def step_async(self, actions: np.ndarray, index: int = 0) -> None:
-        self.envs[index].step_async(actions)
+        self.env.step_async(actions)
 
     def step_wait(self, index: int = 0) -> VecEnvStepReturn:
-        return self.envs[index].step_wait()
+        return self.env.step_wait()
 
     def reset(self, index: int = 0, **kwargs) -> VecEnvObs:
-        return self.envs[index].reset()
+        return self.env.reset()
 
     def close(self) -> None:
-        for env in self.envs:
-            env.close()
-
-    def get_images(self) -> Sequence[Optional[np.ndarray]]:
-        raise NotImplementedError
+        self.env.close()
 
     def get_attr(self, attr_name: str, indices: VecEnvIndices = None) -> List[Any]:
-        return self.envs[self._get_index(indices)].get_attr(attr_name)
+        return self.env.get_attr(attr_name, indices)
 
     def set_attr(
         self, attr_name: str, value: Any, indices: VecEnvIndices = None
     ) -> None:
-        self.envs[self._get_index(indices)].set_attr(attr_name, value)
+        self.env.set_attr(attr_name, value, indices)
 
     def env_method(
         self,
@@ -64,14 +68,12 @@ class IndexableMultiEnv(VecEnv):
         indices: VecEnvIndices = None,
         **method_kwargs,
     ) -> List[Any]:
-        return self.envs[self._get_index(indices)].env_method(
-            *method_args, *method_kwargs
-        )
+        return self.env.env_method(*method_args, indices=indices, **method_kwargs)
 
     def env_is_wrapped(
         self, wrapper_class: Type[gym.Wrapper], indices: VecEnvIndices = None
     ) -> List[bool]:
-        return self.envs[self._get_index(indices)].env_is_wrapped(wrapper_class)
+        return self.env.env_is_wrapped(wrapper_class, indices)
 
     @staticmethod
     def _get_index(indices: VecEnvIndices) -> int:
@@ -88,9 +90,3 @@ class IndexableMultiEnv(VecEnv):
         raise ValueError(
             f"IndexableMultiEnv only supports a scalar index, not {indices}."
         )
-
-    @staticmethod
-    def _make_venv(e: Env) -> VecEnv:
-        if isinstance(e, VecEnv):
-            return e
-        return DummyVecEnv([partial(identity, e)])
