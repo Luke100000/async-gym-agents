@@ -188,7 +188,7 @@ class InjectorWorker(InjectorWorkerBase):
         Continuously plays the game and returns episodes of Transitions
         """
         last_obs = self.env.reset()
-        last_dones = None
+        last_dones = np.ones((self.env.num_envs,), dtype=bool)
 
         episodes = {}
 
@@ -233,9 +233,7 @@ class InjectorWorker(InjectorWorkerBase):
                         deepcopy(single_slice(new_obs, idx)),
                         single_slice(rewards, idx),
                         single_slice(dones, idx),
-                        single_slice(last_dones, idx)
-                        if last_dones is not None
-                        else [False],
+                        single_slice(last_dones, idx),
                         single_slice(infos, idx),
                     )
                 )

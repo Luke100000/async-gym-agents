@@ -81,6 +81,7 @@ class AsyncAgentInjector:
         state: GenericState,
         stop: GenericEvent,
         worker_kwargs: Dict[str, Any],
+        use_mp: bool = False,
     ):
         worker = worker_class(
             env_func=env_func,
@@ -91,9 +92,11 @@ class AsyncAgentInjector:
         )
         worker.run()
 
-        # Close the queue
-        episode_queue.close()
-        episode_queue.cancel_join_thread()
+        # Only close the queue in a child process; closing it in a thread
+        # would close the shared queue for all workers.
+        if use_mp:
+            episode_queue.close()
+            episode_queue.cancel_join_thread()
 
     def get_worker_class(self) -> Type["InjectorWorkerBase"]:
         raise NotImplementedError()
@@ -166,6 +169,7 @@ class AsyncAgentInjector:
                     state=self._state,
                     stop=self._stop,
                     worker_kwargs=self.get_worker_kwargs(),
+                    use_mp=self.use_mp,
                 ),
             )
             worker.start()
@@ -346,7 +350,7 @@ class InjectorWorkerBase:
         for episode in self.generate():
             self._state.total_episodes += 1
 
-            if episode[-1].infos[0]["TimeLimit.truncated"] and self._skip_truncated:
+            if episode[-1].infos[0].get("TimeLimit.truncated", False) and self._skip_truncated:
                 self._state.discarded_episodes += 1
                 continue
 
