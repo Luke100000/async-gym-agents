@@ -303,7 +303,7 @@ class InjectorWorkerBase:
         self._queue_put_timeout = queue_put_timeout
 
     def copy_policy_from_state(self):
-        version = self._state
+        version = self._state.version
         if self._policy_version != version:
             # load state
             data = io.BytesIO(self._state.policy)
