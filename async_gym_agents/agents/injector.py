@@ -139,7 +139,11 @@ class AsyncAgentInjector:
             return
 
         # Environment queue
-        self._episode_queue = multiprocessing.Queue(maxsize=self.max_episodes_in_buffer)
+        self._episode_queue = (
+            multiprocessing.Queue(maxsize=self.max_episodes_in_buffer)
+            if self.use_mp
+            else queue.Queue(maxsize=self.max_episodes_in_buffer)
+        )
 
         # Shared state for policy and metrics
         self._manager = multiprocessing.Manager() if self.use_mp else None
@@ -227,10 +231,11 @@ class AsyncAgentInjector:
                 except PermissionError:
                     logger.warning("cannot kill process due to permission error")
 
-        # close the queue
+        # close the queue (multiprocessing.Queue needs explicit cleanup)
         if self._episode_queue is not None:
-            self._episode_queue.close()
-            self._episode_queue.cancel_join_thread()
+            if self.use_mp:
+                self._episode_queue.close()
+                self._episode_queue.cancel_join_thread()
             self._episode_queue = None
 
         # release a shared object: manager
@@ -285,9 +290,9 @@ class InjectorWorkerBase:
     def __init__(
         self,
         env_func: EnvFactory,
-        episode_queue: multiprocessing.Queue,
-        state: Namespace,
-        stop: multiprocessing.Event,
+        episode_queue: GenericQueue,
+        state: GenericState,
+        stop: GenericEvent,
         skip_truncated: bool,
         queue_put_timeout: float,
         **kwargs,
