@@ -85,7 +85,7 @@ class IndexableMultiEnv(VecEnv):
         indices: VecEnvIndices = None,
         **method_kwargs,
     ) -> List[Any]:
-        return self.env.env_method(*method_args, indices=indices, **method_kwargs)
+        return self.env.env_method(method_name, *method_args, indices=indices, **method_kwargs)
 
     def env_is_wrapped(
         self, wrapper_class: Type[gym.Wrapper], indices: VecEnvIndices = None

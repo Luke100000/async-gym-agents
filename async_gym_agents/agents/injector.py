@@ -81,6 +81,7 @@ class AsyncAgentInjector:
         state: GenericState,
         stop: GenericEvent,
         worker_kwargs: Dict[str, Any],
+        use_mp: bool = False,
     ):
         worker = worker_class(
             env_func=env_func,
@@ -91,9 +92,11 @@ class AsyncAgentInjector:
         )
         worker.run()
 
-        # Close the queue
-        episode_queue.close()
-        episode_queue.cancel_join_thread()
+        # Only close the queue in a child process; closing it in a thread
+        # would close the shared queue for all workers.
+        if use_mp:
+            episode_queue.close()
+            episode_queue.cancel_join_thread()
 
     def get_worker_class(self) -> Type["InjectorWorkerBase"]:
         raise NotImplementedError()
@@ -136,7 +139,11 @@ class AsyncAgentInjector:
             return
 
         # Environment queue
-        self._episode_queue = multiprocessing.Queue(maxsize=self.max_episodes_in_buffer)
+        self._episode_queue = (
+            multiprocessing.Queue(maxsize=self.max_episodes_in_buffer)
+            if self.use_mp
+            else queue.Queue(maxsize=self.max_episodes_in_buffer)
+        )
 
         # Shared state for policy and metrics
         self._manager = multiprocessing.Manager() if self.use_mp else None
@@ -166,6 +173,7 @@ class AsyncAgentInjector:
                     state=self._state,
                     stop=self._stop,
                     worker_kwargs=self.get_worker_kwargs(),
+                    use_mp=self.use_mp,
                 ),
             )
             worker.start()
@@ -223,10 +231,11 @@ class AsyncAgentInjector:
                 except PermissionError:
                     logger.warning("cannot kill process due to permission error")
 
-        # close the queue
+        # close the queue (multiprocessing.Queue needs explicit cleanup)
         if self._episode_queue is not None:
-            self._episode_queue.close()
-            self._episode_queue.cancel_join_thread()
+            if self.use_mp:
+                self._episode_queue.close()
+                self._episode_queue.cancel_join_thread()
             self._episode_queue = None
 
         # release a shared object: manager
@@ -281,9 +290,9 @@ class InjectorWorkerBase:
     def __init__(
         self,
         env_func: EnvFactory,
-        episode_queue: multiprocessing.Queue,
-        state: Namespace,
-        stop: multiprocessing.Event,
+        episode_queue: GenericQueue,
+        state: GenericState,
+        stop: GenericEvent,
         skip_truncated: bool,
         queue_put_timeout: float,
         **kwargs,
@@ -346,7 +355,7 @@ class InjectorWorkerBase:
         for episode in self.generate():
             self._state.total_episodes += 1
 
-            if episode[-1].infos[0]["TimeLimit.truncated"] and self._skip_truncated:
+            if episode[-1].infos[0].get("TimeLimit.truncated", False) and self._skip_truncated:
                 self._state.discarded_episodes += 1
                 continue
 
