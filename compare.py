@@ -26,7 +26,7 @@ class Mode(Enum):
 
 
 def get_env(slow: bool) -> gym.Env:
-    return Monitor(SlowCartPoleEnv(min_sleep=0, max_sleep=0.01 if slow else 0))
+    return Monitor(SlowCartPoleEnv(min_sleep=0, max_sleep=0.1 if slow else 0))
 
 
 def get_envs(n_envs: int) -> List[gym.Env]:
@@ -36,8 +36,8 @@ def get_envs(n_envs: int) -> List[gym.Env]:
 def evaluate(
     mode: Mode = Mode.ASYNC,
     use_mp: bool = False,
-    n_envs: int = 2,
-    n_workers: int = 2,
+    n_envs: int = 1,
+    n_workers: int = 10,
     agent: Type[BaseAlgorithm] = PPO,
 ):
     if mode == Mode.ASYNC:
