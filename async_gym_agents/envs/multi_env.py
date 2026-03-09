@@ -1,56 +1,82 @@
-from collections import defaultdict
-from typing import Any, Callable, List, Optional, Sequence, Type
+from typing import Any, List, Type, Union
 
+import gymnasium as gym
 import numpy as np
-from gymnasium import Env, Wrapper
-from stable_baselines3.common.vec_env import DummyVecEnv, VecEnv
+from stable_baselines3.common.vec_env import VecEnv
 from stable_baselines3.common.vec_env.base_vec_env import (
     VecEnvIndices,
     VecEnvObs,
     VecEnvStepReturn,
 )
 
+from async_gym_agents.types import EnvFactoryList
+from async_gym_agents.utils import make_venv
+
+
+class RandomEnv(gym.Env):
+    def __init__(self, obs_space, action_space):
+        self.observation_space = obs_space
+        self.action_space = action_space
+
+    def reset(self, seed=None, options=None):
+        super().reset(seed=seed)
+        return self.observation_space.sample(), {}
+
+    def step(self, action):
+        obs = self.observation_space.sample()
+        reward = 0.0
+        terminated = True
+        truncated = True
+        info = {}
+        return obs, reward, terminated, truncated, info
+
 
 class IndexableMultiEnv(VecEnv):
     """
-    Same as multi env but sync
+    A container for multiple VecEnvs / gym.Envs.
+    Should not be used outside async-agents since it will return random sampled episodes.
     """
 
-    def __init__(self, env_fns: List[Callable[[], Env]]):
-        self.real_n_envs = len(env_fns)
+    def __init__(self, env_fns: Union[EnvFactoryList], stub_env: gym.Env | None = None):
+        # Make sure they are all VecEnvs
+        self.env_fns = env_fns
 
-        self.envs = [DummyVecEnv([e]) for e in env_fns]
-        self.additional = defaultdict(dict)
+        stub_env = make_venv(stub_env or env_fns[0]())
 
-        super().__init__(1, self.envs[0].observation_space, self.envs[0].action_space)
+        # This is when using the IndexableMultiEnv directly and only serves to not raise exceptions
+        self.env = make_venv(
+            [
+                RandomEnv(stub_env.observation_space, stub_env.action_space)
+                for _ in range(stub_env.num_envs)
+            ]
+        )
 
-    def step(self, actions: np.ndarray, index: int = 0) -> VecEnvStepReturn:
-        self.step_async(actions, index=index)
-        return self.step_wait(index=index)
+        super().__init__(
+            stub_env.num_envs, stub_env.observation_space, stub_env.action_space
+        )
+
+    def __len__(self):
+        return len(self.env_fns)
 
     def step_async(self, actions: np.ndarray, index: int = 0) -> None:
-        self.envs[index].step_async(actions)
+        self.env.step_async(actions)
 
     def step_wait(self, index: int = 0) -> VecEnvStepReturn:
-        return self.envs[index].step_wait()
+        return self.env.step_wait()
 
     def reset(self, index: int = 0, **kwargs) -> VecEnvObs:
-        return self.envs[index].reset()
+        return self.env.reset()
 
     def close(self) -> None:
-        for env in self.envs:
-            env.close()
-
-    def get_images(self) -> Sequence[Optional[np.ndarray]]:
-        raise NotImplementedError
+        self.env.close()
 
     def get_attr(self, attr_name: str, indices: VecEnvIndices = None) -> List[Any]:
-        return self.envs[self._get_index(indices)].get_attr(attr_name)
+        return self.env.get_attr(attr_name, indices)
 
     def set_attr(
         self, attr_name: str, value: Any, indices: VecEnvIndices = None
     ) -> None:
-        self.envs[self._get_index(indices)].set_attr(attr_name, value)
+        self.env.set_attr(attr_name, value, indices)
 
     def env_method(
         self,
@@ -59,21 +85,20 @@ class IndexableMultiEnv(VecEnv):
         indices: VecEnvIndices = None,
         **method_kwargs,
     ) -> List[Any]:
-        return self.envs[self._get_index(indices)].env_method(
-            *method_args, *method_kwargs
-        )
+        return self.env.env_method(method_name, *method_args, indices=indices, **method_kwargs)
 
     def env_is_wrapped(
-        self, wrapper_class: Type[Wrapper], indices: VecEnvIndices = None
+        self, wrapper_class: Type[gym.Wrapper], indices: VecEnvIndices = None
     ) -> List[bool]:
-        return self.envs[self._get_index(indices)].env_is_wrapped(wrapper_class)
+        return self.env.env_is_wrapped(wrapper_class, indices)
 
-    def _get_index(self, indices: VecEnvIndices) -> int:
+    @staticmethod
+    def _get_index(indices: VecEnvIndices) -> int:
         """
-        Convert a flexibly-typed reference to environment indices to an implied list of indices.
+        Convert a flexibly typed reference to environment indices to an implied list of indices.
 
-        :param indices: refers to indices of envs.
-        :return: the implied list of indices.
+        :param indices: Refers to indices of envs.
+        :return: The implied list of indices.
         """
         if indices is None:
             return 0
