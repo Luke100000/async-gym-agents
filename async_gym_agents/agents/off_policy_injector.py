@@ -27,6 +27,7 @@ class Transition:
     rewards: np.ndarray
     dones: np.ndarray
     infos: list[Dict]
+    reset_infos: list[Dict]
 
 
 class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithm):
@@ -173,6 +174,7 @@ class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithm):
             rewards = transition.rewards
             dones = transition.dones
             infos = transition.infos
+            reset_infos = transition.reset_infos
 
             # Update stats
             self.num_timesteps += 1
@@ -343,6 +345,7 @@ class InjectorWorker(InjectorWorkerBase):
                         single_slice(rewards, idx),
                         single_slice(dones, idx),
                         single_slice(infos, idx),
+                        single_slice(self.env.reset_infos, idx)
                     )
                 )
             last_obs = new_obs
