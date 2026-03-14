@@ -8,8 +8,9 @@ from multiprocessing.context import Process as MPProcess
 from multiprocessing.managers import Namespace
 from multiprocessing.queues import Queue as MPQueue
 from multiprocessing.synchronize import Event as MPEvent
+from multiprocessing.synchronize import SemLock
 from types import SimpleNamespace
-from typing import Any, Dict, Generator, List, Optional, Type, TypeAlias
+from typing import Any, Dict, Generator, List, Optional, Type, TypeAlias, Callable
 
 import torch
 import torch as th
@@ -19,10 +20,20 @@ from async_gym_agents.envs.multi_env import IndexableMultiEnv
 from async_gym_agents.types import EnvFactory, Transition
 from async_gym_agents.utils import make_venv
 
+from functools import partial
+
 logger = logging.getLogger("async_gym_agents")
 
+class MockLock:
+    def __enter__(self):
+        return self
 
-GenericState: TypeAlias = SimpleNamespace | Namespace
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+
+GenericState: TypeAlias = Namespace | SimpleNamespace
+GenericStateLock: TypeAlias = SemLock | MockLock
 GenericEvent: TypeAlias = MPEvent | threading.Event
 GenericQueue: TypeAlias = MPQueue | queue.Queue
 GenericWorker: TypeAlias = MPProcess | threading.Thread
@@ -60,6 +71,7 @@ class AsyncAgentInjector:
         # shared object (!)
         self._manager: Optional[multiprocessing.Manager] = None
         self._state: GenericState | None = None
+        self._state_lock: GenericStateLock | None = multiprocessing.Lock() if use_mp else MockLock()
         self._version = 0
 
         self._stop: GenericEvent | None = None
@@ -73,21 +85,27 @@ class AsyncAgentInjector:
         self._buffer_emptiness = 0.0
         self._buffer_stat_count = 0
 
+        self.__log = logging.getLogger("AsyncAgentInjector")
+
     @staticmethod
     def _run_worker(
         worker_class: Type["InjectorWorkerBase"],
         env_func: EnvFactory,
         episode_queue: GenericQueue,
         state: GenericState,
+        state_lock: GenericStateLock,
         stop: GenericEvent,
         worker_kwargs: Dict[str, Any],
         use_mp: bool = False,
+        policy_func: Callable[[], Any] = None
     ):
         worker = worker_class(
             env_func=env_func,
             episode_queue=episode_queue,
             state=state,
+            state_lock=state_lock,
             stop=stop,
+            policy_func=policy_func,
             **worker_kwargs,
         )
         worker.run()
@@ -123,14 +141,19 @@ class AsyncAgentInjector:
         weights_buf = io.BytesIO()
         th.save(policy.state_dict(), weights_buf)
         weights_bytes = weights_buf.getvalue()
-        policy_buf = io.BytesIO()
-        th.save(policy, policy_buf)
-        policy_bytes = policy_buf.getvalue()
 
-        self._state.version = self._version
-        self._state.weights = weights_bytes
-        self._state.policy = policy_bytes
-        self._version += 1
+        # policy_buf = io.BytesIO()
+        # th.save(policy, policy_buf)
+        # policy_bytes = policy_buf.getvalue()
+
+        with self._state_lock:
+            self._version += 1
+            self._state.version = self._version
+            self._state.weights = weights_bytes
+            # self._state.policy = policy_bytes
+
+            self.__log.warning(f"update policy to the version: {self._version}")
+
 
         self._init_collect_processes()
 
@@ -163,6 +186,15 @@ class AsyncAgentInjector:
 
         # Start workers
         self._workers = []
+
+        policy_func = partial(
+            self.policy_class,
+            self.observation_space,
+            self.action_space,
+            self.lr_schedule,
+            **self.policy_kwargs
+        )
+
         for env_func in self.get_indexable_env().env_fns:
             worker = (multiprocessing.Process if self.use_mp else threading.Thread)(
                 target=AsyncAgentInjector._run_worker,
@@ -171,9 +203,11 @@ class AsyncAgentInjector:
                     env_func=env_func,
                     episode_queue=self._episode_queue,
                     state=self._state,
+                    state_lock=self._state_lock,
                     stop=self._stop,
                     worker_kwargs=self.get_worker_kwargs(),
                     use_mp=self.use_mp,
+                    policy_func=policy_func
                 ),
             )
             worker.start()
@@ -190,11 +224,13 @@ class AsyncAgentInjector:
             "_transitions",
             "_manager",
             "_state",
+            "_state_lock",
             "_version",
             "_stop",
             "_initialized",
             "_initialized_workers",
             "_workers",
+            "__log"
         ]
 
     def _fetch_transitions(self) -> List[Transition]:
@@ -292,18 +328,28 @@ class InjectorWorkerBase:
         env_func: EnvFactory,
         episode_queue: GenericQueue,
         state: GenericState,
+        state_lock: GenericStateLock,
         stop: GenericEvent,
         skip_truncated: bool,
         queue_put_timeout: float,
+        policy_func: Callable[[], Any] | None = None,
         **kwargs,
     ):
         self.env = make_venv(env_func())
 
         self.policy = None
+        self.policy_func = policy_func
+
+        if self.policy_func is not None:
+            # create a new instance of policy
+            self.policy = self.policy_func()
+            self.policy.set_training_mode(False)
+
         self._policy_version = None
 
         self._episode_queue = episode_queue
         self._state = state
+        self._state_lock = state_lock
         self._stop = stop
 
         self._logger = logging.getLogger("Worker")
@@ -312,16 +358,24 @@ class InjectorWorkerBase:
         self._queue_put_timeout = queue_put_timeout
 
     def copy_policy_from_state(self):
-        version = self._state.version
-        if self._policy_version != version:
-            # load state
-            data = io.BytesIO(self._state.policy)
-            self.policy = torch.load(data, weights_only=False, map_location="cpu")
+        with self._state_lock:
+            version = self._state.version
+            if self._policy_version != version:
+                # load state
+                if self.policy is None:
+                    data = io.BytesIO(self._state.policy)
+                    self.policy = torch.load(data, weights_only=False, map_location="cpu")
 
-            # turn off the train mode
-            self.policy.set_training_mode(False)
+                # read weight to CPU
+                weights = torch.load(io.BytesIO(self._state.weights), map_location="cpu")
+                self.policy.load_state_dict(weights)
 
-            self._policy_version = version
+                # turn off the train mode
+                self.policy.set_training_mode(False)
+
+                self._policy_version = version
+
+                self._logger.warning(f"policy loaded from state: version={self._policy_version}")
 
     def _put_episode_with_timeout(self, episode):
         deadline = time.time() + self._queue_put_timeout
