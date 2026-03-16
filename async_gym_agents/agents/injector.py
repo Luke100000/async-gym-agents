@@ -139,8 +139,6 @@ class AsyncAgentInjector:
         weights_bytes = weights_buf.getvalue()
 
         with self._state_lock:
-            self._version += 1
-            self._state.version = self._version
             self._state.weights = weights_bytes
             # Serialize the full policy only once, for workers to create their
             # initial policy instance via torch.load (creating via constructor
@@ -150,6 +148,8 @@ class AsyncAgentInjector:
                 th.save(policy, policy_buf)
                 self._state.policy = policy_buf.getvalue()
                 self._policy_initialized = True
+            self._version += 1
+            self._state.version = self._version
 
         self._init_collect_processes()
 
