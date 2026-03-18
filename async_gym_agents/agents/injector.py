@@ -32,9 +32,6 @@ class MockLock:
         return False
 
 
-# use spawn always
-mp_ctx = multiprocessing.get_context("spawn")
-
 GenericState: TypeAlias = Namespace | SimpleNamespace
 GenericStateLock: TypeAlias = SemLock | MockLock
 GenericEvent: TypeAlias = MPEvent | threading.Event
@@ -51,6 +48,7 @@ class AsyncAgentInjector:
         skip_truncated: bool = False,
         queue_put_timeout: float = 60.0,
         worker_join_timeout: float = 120.0,
+        mp_method: Optional[str] = "spawn",
         **kwargs,
     ):
         """
@@ -59,9 +57,12 @@ class AsyncAgentInjector:
         :param skip_truncated: Skip episodes with truncated signal
         :param queue_put_timeout: Timeout when putting an episode before dropping
         :param worker_join_timeout: Shutdown time before killing the process
+        :param mp_method: Method to create processes. None for OS default. See https://docs.python.org/3/library/multiprocessing.html#contexts-and-start-methods
         """
         self.max_episodes_in_buffer = max_episodes_in_buffer
         self.use_mp = use_mp
+
+        self.mp_ctx = multiprocessing.get_context(mp_method)
 
         self._skip_truncated = skip_truncated
         self._queue_put_timeout = queue_put_timeout
@@ -74,7 +75,9 @@ class AsyncAgentInjector:
         # shared object (!)
         self._manager: Optional[multiprocessing.Manager] = None
         self._state: GenericState | None = None
-        self._state_lock: GenericStateLock | None = mp_ctx.Lock() if use_mp else MockLock()
+        self._state_lock: GenericStateLock | None = (
+            self.mp_ctx.Lock() if use_mp else MockLock()
+        )
         self._version = 0
 
         self._stop: GenericEvent | None = None
@@ -163,20 +166,20 @@ class AsyncAgentInjector:
 
         # Environment queue
         self._episode_queue = (
-            mp_ctx.Queue(maxsize=self.max_episodes_in_buffer)
+            self.mp_ctx.Queue(maxsize=self.max_episodes_in_buffer)
             if self.use_mp
             else queue.Queue(maxsize=self.max_episodes_in_buffer)
         )
 
         # Shared state for policy and metrics
-        self._manager = mp_ctx.Manager() if self.use_mp else None
+        self._manager = self.mp_ctx.Manager() if self.use_mp else None
         self._state = self._manager.Namespace() if self.use_mp else SimpleNamespace()
 
         self._state.total_episodes = 0
         self._state.discarded_episodes = 0
 
         # Stop signal
-        self._stop = mp_ctx.Event() if self.use_mp else threading.Event()
+        self._stop = self.mp_ctx.Event() if self.use_mp else threading.Event()
 
         self._initialized = True
 
@@ -192,7 +195,7 @@ class AsyncAgentInjector:
         policy_data = policy._get_constructor_parameters()
 
         for env_func in self.get_indexable_env().env_fns:
-            worker = (mp_ctx.Process if self.use_mp else threading.Thread)(
+            worker = (self.mp_ctx.Process if self.use_mp else threading.Thread)(
                 target=AsyncAgentInjector._run_worker,
                 kwargs=dict(
                     worker_class=self.get_worker_class(),
@@ -204,7 +207,7 @@ class AsyncAgentInjector:
                     worker_kwargs=self.get_worker_kwargs(),
                     use_mp=self.use_mp,
                     policy_class=policy_class,
-                    policy_data=policy_data
+                    policy_data=policy_data,
                 ),
             )
             worker.start()
@@ -227,7 +230,7 @@ class AsyncAgentInjector:
             "_initialized",
             "_initialized_workers",
             "_workers",
-            "_logger"
+            "_logger",
         ]
 
     def _fetch_transitions(self) -> List[Transition]:
@@ -360,12 +363,18 @@ class InjectorWorkerBase:
             version = self._state.version
             if self._policy_version != version:
                 # load policy weights to CPU
-                weights = torch.load(io.BytesIO(self._state.weights), map_location="cpu", weights_only=True)
+                weights = torch.load(
+                    io.BytesIO(self._state.weights),
+                    map_location="cpu",
+                    weights_only=True,
+                )
                 self.policy.load_state_dict(weights)
                 # turn off the train mode
                 self.policy.set_training_mode(False)
                 self._policy_version = version
-                self._logger.debug(f"policy loaded from state: version={self._policy_version}")
+                self._logger.debug(
+                    f"policy loaded from state: version={self._policy_version}"
+                )
 
     def _put_episode_with_timeout(self, episode):
         deadline = time.time() + self._queue_put_timeout
@@ -399,7 +408,10 @@ class InjectorWorkerBase:
         for episode in self.generate():
             self._state.total_episodes += 1
 
-            if episode[-1].infos[0].get("TimeLimit.truncated", False) and self._skip_truncated:
+            if (
+                episode[-1].infos[0].get("TimeLimit.truncated", False)
+                and self._skip_truncated
+            ):
                 self._state.discarded_episodes += 1
                 continue
 
