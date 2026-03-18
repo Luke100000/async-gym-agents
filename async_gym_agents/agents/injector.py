@@ -32,6 +32,9 @@ class MockLock:
         return False
 
 
+# use spawn always
+mp_ctx = multiprocessing.get_context("spawn")
+
 GenericState: TypeAlias = Namespace | SimpleNamespace
 GenericStateLock: TypeAlias = SemLock | MockLock
 GenericEvent: TypeAlias = MPEvent | threading.Event
@@ -71,7 +74,7 @@ class AsyncAgentInjector:
         # shared object (!)
         self._manager: Optional[multiprocessing.Manager] = None
         self._state: GenericState | None = None
-        self._state_lock: GenericStateLock | None = multiprocessing.Lock() if use_mp else MockLock()
+        self._state_lock: GenericStateLock | None = mp_ctx.Lock() if use_mp else MockLock()
         self._version = 0
 
         self._stop: GenericEvent | None = None
@@ -160,20 +163,20 @@ class AsyncAgentInjector:
 
         # Environment queue
         self._episode_queue = (
-            multiprocessing.Queue(maxsize=self.max_episodes_in_buffer)
+            mp_ctx.Queue(maxsize=self.max_episodes_in_buffer)
             if self.use_mp
             else queue.Queue(maxsize=self.max_episodes_in_buffer)
         )
 
         # Shared state for policy and metrics
-        self._manager = multiprocessing.Manager() if self.use_mp else None
+        self._manager = mp_ctx.Manager() if self.use_mp else None
         self._state = self._manager.Namespace() if self.use_mp else SimpleNamespace()
 
         self._state.total_episodes = 0
         self._state.discarded_episodes = 0
 
         # Stop signal
-        self._stop = multiprocessing.Event() if self.use_mp else threading.Event()
+        self._stop = mp_ctx.Event() if self.use_mp else threading.Event()
 
         self._initialized = True
 
@@ -189,7 +192,7 @@ class AsyncAgentInjector:
         policy_data = policy._get_constructor_parameters()
 
         for env_func in self.get_indexable_env().env_fns:
-            worker = (multiprocessing.Process if self.use_mp else threading.Thread)(
+            worker = (mp_ctx.Process if self.use_mp else threading.Thread)(
                 target=AsyncAgentInjector._run_worker,
                 kwargs=dict(
                     worker_class=self.get_worker_class(),
