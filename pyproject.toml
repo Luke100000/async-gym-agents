@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "async-gym-agents"
-version = "0.2.6"
+version = "0.2.7"
 description = "Async agents for Stable Baselines 3"
 authors = ["Jonas Peche <jonas.peche@aon.at>"]
 license = "Unlicense"
