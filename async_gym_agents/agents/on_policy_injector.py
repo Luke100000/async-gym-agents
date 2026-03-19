@@ -136,7 +136,7 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
                     terminal_obs = self.policy.obs_to_tensor(
                         infos[idx]["terminal_observation"]
                     )[0]
-                    with torch.no_grad():
+                    with torch.inference_mode():
                         terminal_value = self.policy.predict_values(terminal_obs)[0]
                     rewards[idx] += self.gamma * terminal_value
 
@@ -150,7 +150,7 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
                 log_probs,
             )
 
-        with torch.no_grad():
+        with torch.inference_mode():
             # Compute value for the last timestep
             values = self.policy.predict_values(obs_as_tensor(new_obs, self.device))
 
@@ -195,7 +195,7 @@ class InjectorWorker(InjectorWorkerBase):
         episodes = {}
 
         while True:
-            with torch.no_grad():
+            with torch.inference_mode():
                 # Convert to pytorch tensor or to TensorDict
                 obs_tensor = obs_as_tensor(last_obs, self.device)
                 actions, values, log_probs = self.policy(obs_tensor)

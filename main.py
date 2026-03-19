@@ -1,6 +1,7 @@
 from functools import partial
 
 import gymnasium as gym
+import torch
 from stable_baselines3 import PPO, SAC
 
 from async_gym_agents.agents.async_agent import get_injected_agent
@@ -11,6 +12,10 @@ from test.test_agents import run_model_test
 
 N_ENV = 2
 PROCESSES = 1
+
+
+torch.set_num_threads(4)
+torch.set_num_interop_threads(4)
 
 
 def taxi_env():
