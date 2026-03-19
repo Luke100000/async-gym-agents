@@ -1,5 +1,4 @@
 from functools import partial
-from test.conftest import get_buggy_env
 from typing import Type
 
 from stable_baselines3 import PPO
@@ -9,6 +8,7 @@ from stable_baselines3.common.evaluation import evaluate_policy
 
 from async_gym_agents.agents.async_agent import get_injected_agent
 from async_gym_agents.envs.multi_env import IndexableMultiEnv
+from test.conftest import get_buggy_env
 
 
 def test_truncating(threads: int = 8, agent: Type[BaseAlgorithm] = PPO):

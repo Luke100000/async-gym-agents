@@ -237,7 +237,7 @@ class InjectorWorker(InjectorWorkerBase):
                         single_slice(dones, idx),
                         single_slice(last_dones, idx),
                         single_slice(infos, idx),
-                        single_slice(self.env.reset_infos, idx)
+                        single_slice(self.env.reset_infos, idx),
                     )
                 )
             last_obs = new_obs

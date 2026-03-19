@@ -138,9 +138,9 @@ class AsyncAgentInjector:
         """
         Asserts whether a correct environment is supplied
         """
-        assert isinstance(
-            self.env, IndexableMultiEnv
-        ), "You must pass a IndexableMultiEnv"
+        assert isinstance(self.env, IndexableMultiEnv), (
+            "You must pass a IndexableMultiEnv"
+        )
         return self.env
 
     def pre_collect_preparation(self, policy: BasePolicy):

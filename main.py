@@ -1,5 +1,4 @@
 from functools import partial
-from test.test_agents import run_model_test
 
 import gymnasium as gym
 from stable_baselines3 import PPO, SAC
@@ -8,6 +7,7 @@ from async_gym_agents.agents.async_agent import get_injected_agent
 from async_gym_agents.envs.multi_env import IndexableMultiEnv
 from async_gym_agents.envs.threaded_env import ThreadedVecEnv
 from async_gym_agents.types import Env
+from test.test_agents import run_model_test
 
 N_ENV = 2
 PROCESSES = 1
