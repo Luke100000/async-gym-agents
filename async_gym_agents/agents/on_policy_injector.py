@@ -40,6 +40,7 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
         skip_truncated: bool = False,
         queue_put_timeout: float = 60.0,
         worker_join_timeout: float = 120.0,
+        profiler_sync_interval: float = 1.0,
         **kwargs,
     ):
         super().__init__(
@@ -48,6 +49,7 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
             skip_truncated=skip_truncated,
             queue_put_timeout=queue_put_timeout,
             worker_join_timeout=worker_join_timeout,
+            profiler_sync_interval=profiler_sync_interval,
         )
         super(AsyncAgentInjector, self).__init__(*args, **kwargs)
 
@@ -103,60 +105,64 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
             # Fetch transitions from workers
             transition: Transition = self.fetch_transition()
 
-            # Make locals available for callbacks
-            new_obs = transition.new_obs
-            self._last_obs = transition.last_obs
-            actions = transition.actions
-            rewards = transition.rewards
-            self._last_episode_starts = transition.last_dones
-            values = transition.values
-            log_probs = transition.log_probs
-            dones = transition.dones
-            infos = transition.infos
-            reset_infos = transition.reset_infos
+            with self._profiler_main.track("processing"):
+                # Make locals available for callbacks
+                new_obs = transition.new_obs
+                self._last_obs = transition.last_obs
+                actions = transition.actions
+                rewards = transition.rewards
+                self._last_episode_starts = transition.last_dones
+                values = transition.values
+                log_probs = transition.log_probs
+                dones = transition.dones
+                infos = transition.infos
+                reset_infos = transition.reset_infos
 
-            self.num_timesteps += 1
+                self.num_timesteps += 1
 
-            # Give access to local variables
-            callback.update_locals(locals())
-            if not callback.on_step():
-                return False
+                # Give access to local variables
+                callback.update_locals(locals())
+                if not callback.on_step():
+                    return False
 
-            self._update_info_buffer(infos, dones)
-            n_steps += 1
+                self._update_info_buffer(infos, dones)
+                n_steps += 1
 
-            # Handle timeout by bootstrapping with value function
-            # see GitHub issue #633
-            for idx, done in enumerate(dones):
-                if (
-                    done
-                    and infos[idx].get("terminal_observation") is not None
-                    and infos[idx].get("TimeLimit.truncated", False)
-                ):
-                    terminal_obs = self.policy.obs_to_tensor(
-                        infos[idx]["terminal_observation"]
-                    )[0]
-                    with torch.no_grad():
-                        terminal_value = self.policy.predict_values(terminal_obs)[0]
-                    rewards[idx] += self.gamma * terminal_value
+                # Handle timeout by bootstrapping with value function
+                # see GitHub issue #633
+                for idx, done in enumerate(dones):
+                    if (
+                        done
+                        and infos[idx].get("terminal_observation") is not None
+                        and infos[idx].get("TimeLimit.truncated", False)
+                    ):
+                        terminal_obs = self.policy.obs_to_tensor(
+                            infos[idx]["terminal_observation"]
+                        )[0]
+                        with torch.no_grad():
+                            terminal_value = self.policy.predict_values(terminal_obs)[0]
+                        rewards[idx] += self.gamma * terminal_value
 
-            assert rollout_buffer.n_envs == 1
-            rollout_buffer.add(
-                self._last_obs,
-                actions,
-                rewards,
-                self._last_episode_starts,
-                values,
-                log_probs,
+                assert rollout_buffer.n_envs == 1
+                rollout_buffer.add(
+                    self._last_obs,
+                    actions,
+                    rewards,
+                    self._last_episode_starts,
+                    values,
+                    log_probs,
+                )
+
+        with self._profiler_main.track("processing"):
+            with torch.no_grad():
+                # Compute value for the last timestep
+                values = self.policy.predict_values(obs_as_tensor(new_obs, self.device))
+
+            rollout_buffer.compute_returns_and_advantage(
+                last_values=values, dones=dones
             )
 
-        with torch.no_grad():
-            # Compute value for the last timestep
-            values = self.policy.predict_values(obs_as_tensor(new_obs, self.device))
-
-        rollout_buffer.compute_returns_and_advantage(last_values=values, dones=dones)
-
-        callback.update_locals(locals())
+            callback.update_locals(locals())
 
         callback.on_rollout_end()
 
@@ -189,16 +195,18 @@ class InjectorWorker(InjectorWorkerBase):
         """
         Continuously plays the game and returns episodes of Transitions
         """
-        last_obs = self.env.reset()
+        with self._profiler.track("resetting"):
+            last_obs = self.env.reset()
         last_dones = np.ones((self.env.num_envs,), dtype=bool)
 
         episodes = {}
 
         while True:
-            with torch.no_grad():
-                # Convert to pytorch tensor or to TensorDict
-                obs_tensor = obs_as_tensor(last_obs, self.device)
-                actions, values, log_probs = self.policy(obs_tensor)
+            with self._profiler.track("inference"):
+                with torch.no_grad():
+                    # Convert to pytorch tensor or to TensorDict
+                    obs_tensor = obs_as_tensor(last_obs, self.device)
+                    actions, values, log_probs = self.policy(obs_tensor)
             actions = actions.cpu().numpy()
 
             # Rescale and perform action
@@ -216,30 +224,33 @@ class InjectorWorker(InjectorWorkerBase):
                         actions, self.action_space.low, self.action_space.high
                     )
 
-            new_obs, rewards, dones, infos = self.env.step(clipped_actions)
+            with self._profiler.track("stepping"):
+                new_obs, rewards, dones, infos = self.env.step(clipped_actions)
 
             if isinstance(self.action_space, spaces.Discrete):
                 # Reshape in case of discrete action
                 actions = actions.reshape(-1, 1)
 
             # Store transition
-            for idx in range(len(dones)):
-                if idx not in episodes:
-                    episodes[idx] = []
-                episodes[idx].append(
-                    Transition(
-                        single_slice(actions, idx),
-                        single_slice(values, idx),
-                        single_slice(log_probs, idx),
-                        deepcopy(single_slice(last_obs, idx)),
-                        deepcopy(single_slice(new_obs, idx)),
-                        single_slice(rewards, idx),
-                        single_slice(dones, idx),
-                        single_slice(last_dones, idx),
-                        single_slice(infos, idx),
-                        single_slice(self.env.reset_infos, idx),
+            with self._profiler.track("transition_building"):
+                for idx in range(len(dones)):
+                    if idx not in episodes:
+                        episodes[idx] = []
+                    episodes[idx].append(
+                        Transition(
+                            single_slice(actions, idx),
+                            single_slice(values, idx),
+                            single_slice(log_probs, idx),
+                            deepcopy(single_slice(last_obs, idx)),
+                            deepcopy(single_slice(new_obs, idx)),
+                            single_slice(rewards, idx),
+                            single_slice(dones, idx),
+                            single_slice(last_dones, idx),
+                            single_slice(infos, idx),
+                            single_slice(self.env.reset_infos, idx),
+                        )
                     )
-                )
+            self._flush_profiler()
             last_obs = new_obs
             last_dones = dones
 

@@ -9,6 +9,7 @@ from stable_baselines3.common.evaluation import evaluate_policy
 
 from async_gym_agents.agents.async_agent import get_injected_agent
 from async_gym_agents.agents.injector import AsyncAgentInjector
+from async_gym_agents.profiler import render_profiler_report
 
 logging.basicConfig(
     level=logging.DEBUG,
@@ -31,6 +32,10 @@ def run_model_test(model: Union[BaseAlgorithm, AsyncAgentInjector]):
 
     # Test continual learning
     model.learn(total_timesteps=100)
+
+    if hasattr(model, "get_profiler_report"):
+        report = model.get_profiler_report()
+        print(render_profiler_report(report))
 
     # Test saving and loading
     model_path = "test_model.zip"
