@@ -39,6 +39,21 @@ GenericQueue: TypeAlias = MPQueue | queue.Queue
 GenericWorker: TypeAlias = MPProcess | threading.Thread
 
 
+def _get_torch_thread_settings() -> Dict[str, int]:
+    return {
+        "num_threads": torch.get_num_threads(),
+        "num_interop_threads": torch.get_num_interop_threads(),
+    }
+
+
+def _apply_torch_thread_settings(thread_settings: Dict[str, int]) -> None:
+    try:
+        torch.set_num_threads(thread_settings["num_threads"])
+        torch.set_num_interop_threads(thread_settings["num_interop_threads"])
+    except RuntimeError:
+        pass
+
+
 class AsyncAgentInjector:
     def __init__(
         self,
@@ -104,8 +119,12 @@ class AsyncAgentInjector:
         worker_kwargs: Dict[str, Any],
         policy_class: BasePolicy,
         policy_data: Dict[str, Any],
+        torch_thread_settings: Dict[str, int],
         use_mp: bool = False,
     ):
+        if use_mp:
+            _apply_torch_thread_settings(torch_thread_settings)
+
         worker = worker_class(
             env_func=env_func,
             episode_queue=episode_queue,
@@ -190,6 +209,8 @@ class AsyncAgentInjector:
         # Start workers
         self._workers = []
 
+        torch_thread_settings = _get_torch_thread_settings()
+
         policy_class = type(policy)
         # noinspection PyProtectedMember
         policy_data = policy._get_constructor_parameters()
@@ -205,9 +226,10 @@ class AsyncAgentInjector:
                     state_lock=self._state_lock,
                     stop=self._stop,
                     worker_kwargs=self.get_worker_kwargs(),
-                    use_mp=self.use_mp,
                     policy_class=policy_class,
                     policy_data=policy_data,
+                    torch_thread_settings=torch_thread_settings,
+                    use_mp=self.use_mp,
                 ),
             )
             worker.start()
