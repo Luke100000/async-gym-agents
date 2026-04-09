@@ -9,7 +9,7 @@ from multiprocessing.managers import Namespace
 from multiprocessing.queues import Queue as MPQueue
 from multiprocessing.synchronize import Event as MPEvent
 from types import SimpleNamespace
-from typing import Any, Dict, Generator, List, Optional, Type, TypeAlias
+from typing import Any, Dict, Generator, List, Optional, Type, TypeAlias, cast
 
 import torch
 import torch as th
@@ -72,6 +72,7 @@ class AsyncAgentInjector:
         self.max_episodes_in_buffer = max_episodes_in_buffer
         self.use_mp = use_mp
 
+        # noinspection PyTypeChecker
         self.mp_ctx = multiprocessing.get_context(mp_method)
 
         self._skip_truncated = skip_truncated
@@ -81,12 +82,12 @@ class AsyncAgentInjector:
 
         # shared memory
         self._episode_queue: GenericQueue | None = None
-        self._transitions: Optional[List[Transition]] = []
+        self._transitions: List[Transition] = []
 
         # shared object (!)
         self._manager: Optional[multiprocessing.Manager] = None
         self._state: GenericState | None = None
-        self._state_lock: GenericStateLock | None = (
+        self._state_lock: GenericStateLock = (
             self.mp_ctx.Lock() if use_mp else threading.Lock()
         )
         self._version = 0
@@ -236,6 +237,7 @@ class AsyncAgentInjector:
             )
             worker.start()
 
+            # noinspection PyTypeChecker
             self._workers.append(worker)
 
         self._initialized_workers = True
@@ -305,7 +307,9 @@ class AsyncAgentInjector:
 
         # release a shared object: manager
         if self._manager is not None:
-            worker_profiler_stats = dict(self._state.worker_profiler_stats)
+            worker_profiler_stats = cast(
+                ProfileStats, dict(self._state.worker_profiler_stats)
+            )
             self._state = SimpleNamespace(
                 total_episodes=self._state.total_episodes,
                 discarded_episodes=self._state.discarded_episodes,
@@ -322,6 +326,7 @@ class AsyncAgentInjector:
 
     def train(self, *args, **kwargs):
         with self._profiler_main.track("training"):
+            # noinspection PyUnresolvedReferences
             return super().train(*args, **kwargs)
 
     def get_profiler_report(self) -> Dict[str, Any]:
@@ -342,10 +347,7 @@ class AsyncAgentInjector:
         if self._state is None or not hasattr(self._state, "worker_profiler_stats"):
             return {}
 
-        return {
-            phase: dict(values)
-            for phase, values in dict(self._state.worker_profiler_stats).items()
-        }
+        return cast(ProfileStats, dict(self._state.worker_profiler_stats))
 
     @property
     def buffer_utilization(self) -> float:
