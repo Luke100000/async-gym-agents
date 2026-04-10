@@ -263,4 +263,4 @@ class InjectorWorker(InjectorWorkerBase):
                     yield episodes[idx]
                     del episodes[idx]
 
-                    self.copy_policy_from_state()
+                    self.copy_policy_from_queue()
