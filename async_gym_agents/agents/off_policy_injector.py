@@ -1,6 +1,5 @@
-from copy import deepcopy
 from dataclasses import dataclass
-from typing import Any, Dict, Generator, List, Optional, Tuple, Type, Union
+from typing import Any, Dict, Generator, List, Optional, Tuple, Type
 
 import gymnasium as gym
 import numpy as np
@@ -16,7 +15,7 @@ from stable_baselines3.common.vec_env import VecEnv
 from stable_baselines3.common.vec_env.base_vec_env import VecEnvObs
 
 from async_gym_agents.agents.injector import AsyncAgentInjector, InjectorWorkerBase
-from async_gym_agents.utils import single_slice
+from async_gym_agents.utils import copy_obs, single_slice
 
 
 @dataclass
@@ -59,8 +58,8 @@ class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithm):
         self,
         replay_buffer: ReplayBuffer,
         buffer_action: np.ndarray,
-        last_obs: Union[np.ndarray, Dict[str, np.ndarray]],
-        new_obs: Union[np.ndarray, Dict[str, np.ndarray]],
+        last_obs: VecEnvObs,
+        new_obs: VecEnvObs,
         reward: np.ndarray,
         dones: np.ndarray,
         infos: List[Dict[str, Any]],
@@ -347,8 +346,8 @@ class InjectorWorker(InjectorWorkerBase):
                     episodes[idx].append(
                         Transition(
                             single_slice(buffer_actions, idx),
-                            deepcopy(single_slice(last_obs, idx)),
-                            deepcopy(single_slice(new_obs, idx)),
+                            copy_obs(single_slice(last_obs, idx)),
+                            copy_obs(single_slice(new_obs, idx)),
                             single_slice(rewards, idx),
                             single_slice(dones, idx),
                             single_slice(infos, idx),

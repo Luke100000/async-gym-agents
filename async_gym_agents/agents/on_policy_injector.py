@@ -1,4 +1,3 @@
-from copy import deepcopy
 from dataclasses import dataclass
 from typing import Dict, Generator, Type
 
@@ -14,14 +13,14 @@ from stable_baselines3.common.vec_env import VecEnv
 from stable_baselines3.common.vec_env.base_vec_env import VecEnvObs
 
 from async_gym_agents.agents.injector import AsyncAgentInjector, InjectorWorkerBase
-from async_gym_agents.utils import single_slice
+from async_gym_agents.utils import copy_obs, single_slice
 
 
 @dataclass
 class Transition:
     actions: np.ndarray
-    values: torch.Tensor
-    log_probs: torch.Tensor
+    values: np.ndarray
+    log_probs: np.ndarray
     last_obs: VecEnvObs
     new_obs: VecEnvObs
     rewards: np.ndarray
@@ -112,8 +111,8 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
                 actions = transition.actions
                 rewards = transition.rewards
                 self._last_episode_starts = transition.last_dones
-                values = transition.values
-                log_probs = transition.log_probs
+                values = torch.from_numpy(transition.values)
+                log_probs = torch.from_numpy(transition.log_probs)
                 dones = transition.dones
                 infos = transition.infos
                 reset_infos = transition.reset_infos
@@ -144,6 +143,7 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
                         rewards[idx] += self.gamma * terminal_value
 
                 assert rollout_buffer.n_envs == 1
+
                 rollout_buffer.add(
                     self._last_obs,
                     actions,
@@ -207,7 +207,10 @@ class InjectorWorker(InjectorWorkerBase):
                     # Convert to pytorch tensor or to TensorDict
                     obs_tensor = obs_as_tensor(last_obs, self.device)
                     actions, values, log_probs = self.policy(obs_tensor)
+
             actions = actions.cpu().numpy()
+            values = values.cpu().numpy()
+            log_probs = log_probs.cpu().numpy()
 
             # Rescale and perform action
             clipped_actions = actions
@@ -241,8 +244,8 @@ class InjectorWorker(InjectorWorkerBase):
                             single_slice(actions, idx),
                             single_slice(values, idx),
                             single_slice(log_probs, idx),
-                            deepcopy(single_slice(last_obs, idx)),
-                            deepcopy(single_slice(new_obs, idx)),
+                            copy_obs(single_slice(last_obs, idx)),
+                            copy_obs(single_slice(new_obs, idx)),
                             single_slice(rewards, idx),
                             single_slice(dones, idx),
                             single_slice(last_dones, idx),
