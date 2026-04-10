@@ -20,9 +20,12 @@ def merge_profile_stats(
     delta: Mapping[str, Mapping[str, int]],
 ) -> None:
     for phase, values in delta.items():
-        current = target.setdefault(phase, {"total_ns": 0, "count": 0})
-        current["total_ns"] += int(values.get("total_ns", 0))
-        current["count"] += int(values.get("count", 0))
+        current = target.get(phase, {"total_ns": 0, "count": 0})
+        target[phase] = {
+            "total_ns": int(current.get("total_ns", 0))
+            + int(values.get("total_ns", 0)),
+            "count": int(current.get("count", 0)) + int(values.get("count", 0)),
+        }
 
 
 class RuntimeProfiler:
