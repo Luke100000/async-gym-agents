@@ -1,9 +1,12 @@
+import contextlib
 import io
 import logging
 import multiprocessing
+import os
 import queue
 import threading
 import time
+from contextlib import contextmanager
 from multiprocessing.context import Process as MPProcess
 from multiprocessing.managers import Namespace
 from multiprocessing.queues import Queue as MPQueue
@@ -12,7 +15,6 @@ from types import SimpleNamespace
 from typing import Any, Dict, Generator, List, Optional, Type, TypeAlias, cast
 
 import torch
-import torch as th
 from stable_baselines3.common.base_class import BasePolicy
 
 from async_gym_agents.envs.multi_env import IndexableMultiEnv
@@ -33,19 +35,19 @@ GenericUpdateQueue: TypeAlias = MPQueue | queue.Queue
 GenericWorker: TypeAlias = MPProcess | threading.Thread
 
 
-def _get_torch_thread_settings() -> Dict[str, int]:
-    return {
-        "num_threads": torch.get_num_threads(),
-        "num_interop_threads": torch.get_num_interop_threads(),
-    }
-
-
-def _apply_torch_thread_settings(thread_settings: Dict[str, int]) -> None:
+@contextmanager
+def patched_env(**updates):
+    old = {k: os.environ.get(k) for k in updates}
     try:
-        torch.set_num_threads(thread_settings["num_threads"])
-        torch.set_num_interop_threads(thread_settings["num_interop_threads"])
-    except RuntimeError:
-        pass
+        for k, v in updates.items():
+            os.environ[k] = str(v)
+        yield
+    finally:
+        for k, v in old.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
 
 
 class AsyncAgentInjector:
@@ -58,6 +60,7 @@ class AsyncAgentInjector:
         queue_put_timeout: float = 60.0,
         worker_join_timeout: float = 120.0,
         profiler_sync_interval: float = 1.0,
+        mp_threads: int = 1,
         mp_method: Optional[str] = "spawn",
         **kwargs,
     ):
@@ -67,6 +70,7 @@ class AsyncAgentInjector:
         :param skip_truncated: Skip episodes with truncated signal
         :param queue_put_timeout: Timeout when putting an episode before dropping
         :param worker_join_timeout: Shutdown time before killing the process
+        :param mp_threads: Cores used for various torch multiprocessing, which for workers should be lowered
         :param profiler_sync_interval: Worker profiler flush interval in seconds
         :param mp_method: Method to create processes. None for OS default. See https://docs.python.org/3/library/multiprocessing.html#contexts-and-start-methods
         """
@@ -80,6 +84,7 @@ class AsyncAgentInjector:
         self._queue_put_timeout = queue_put_timeout
         self._worker_join_timeout = worker_join_timeout
         self._profiler_sync_interval = profiler_sync_interval
+        self.mp_threads = mp_threads
 
         # shared memory
         self._episode_queue: GenericQueue | None = None
@@ -120,11 +125,17 @@ class AsyncAgentInjector:
         worker_kwargs: Dict[str, Any],
         policy_class: BasePolicy,
         policy_data: Dict[str, Any],
-        torch_thread_settings: Dict[str, int],
         use_mp: bool = False,
+        mp_threads: int = 1,
     ):
         if use_mp:
-            _apply_torch_thread_settings(torch_thread_settings)
+            try:
+                torch.set_num_threads(mp_threads)
+                torch.set_num_interop_threads(mp_threads)
+            except RuntimeError:
+                print(
+                    "Failed to set torch threads, make sure to never call torch.set_num_threads() unconditional!"
+                )
 
         worker = worker_class(
             env_func=env_func,
@@ -137,6 +148,12 @@ class AsyncAgentInjector:
             policy_data=policy_data,
             **worker_kwargs,
         )
+
+        if use_mp:
+            print(
+                f"Worker has {torch.get_num_threads()} threads and {torch.get_num_interop_threads()} interop threads"
+            )
+
         worker.run()
 
         # Only close the queue in a child process; closing it in a thread
@@ -173,7 +190,7 @@ class AsyncAgentInjector:
         with self._profiler_main.track("syncing"):
             # weights -> bytes
             weights_buf = io.BytesIO()
-            th.save(policy.state_dict(), weights_buf)
+            torch.save(policy.state_dict(), weights_buf)
             weights_bytes = weights_buf.getvalue()
 
             self._version += 1
@@ -220,33 +237,41 @@ class AsyncAgentInjector:
         # Start workers
         self._workers = []
 
-        torch_thread_settings = _get_torch_thread_settings()
-
         policy_class = type(policy)
         # noinspection PyProtectedMember
         policy_data = policy._get_constructor_parameters()
 
+        worker_env = dict(
+            OMP_NUM_THREADS=self.mp_threads,
+            MKL_NUM_THREADS=self.mp_threads,
+            OPENBLAS_NUM_THREADS=self.mp_threads,
+            NUMEXPR_NUM_THREADS=self.mp_threads,
+            TORCH_NUM_THREADS=self.mp_threads,
+            TORCH_NUM_INTEROP_THREADS=self.mp_threads,
+        )
+
         for env_func, update_queue in zip(
             self.get_indexable_env().env_fns, self._update_queues, strict=True
         ):
-            worker = (self.mp_ctx.Process if self.use_mp else threading.Thread)(
-                target=AsyncAgentInjector._run_worker,
-                kwargs=dict(
-                    worker_class=self.get_worker_class(),
-                    env_func=env_func,
-                    episode_queue=self._episode_queue,
-                    update_queue=update_queue,
-                    state=self._state,
-                    state_lock=self._state_lock,
-                    stop=self._stop,
-                    worker_kwargs=self.get_worker_kwargs(),
-                    policy_class=policy_class,
-                    policy_data=policy_data,
-                    torch_thread_settings=torch_thread_settings,
-                    use_mp=self.use_mp,
-                ),
-            )
-            worker.start()
+            with patched_env(**worker_env) if self.use_mp else contextlib.nullcontext():
+                worker = (self.mp_ctx.Process if self.use_mp else threading.Thread)(
+                    target=AsyncAgentInjector._run_worker,
+                    kwargs=dict(
+                        worker_class=self.get_worker_class(),
+                        env_func=env_func,
+                        episode_queue=self._episode_queue,
+                        update_queue=update_queue,
+                        state=self._state,
+                        state_lock=self._state_lock,
+                        stop=self._stop,
+                        worker_kwargs=self.get_worker_kwargs(),
+                        policy_class=policy_class,
+                        policy_data=policy_data,
+                        use_mp=self.use_mp,
+                        mp_threads=self.mp_threads,
+                    ),
+                )
+                worker.start()
 
             # noinspection PyTypeChecker
             self._workers.append(worker)
