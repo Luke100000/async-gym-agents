@@ -63,8 +63,11 @@ def evaluate(
 
     if mode == Mode.ASYNC:
         model.shutdown()
+
         print(f"Buffer utilization: {model.buffer_utilization}")
         print(f"Buffer emptiness: {model.buffer_emptyness}")
+        print(f"Buffer full push fraction: {model.buffer_full_push_fraction}")
+        print(f"Buffer avg push time: {model.buffer_avg_push_time}")
         print(f"Discarded episodes: {model.discarded_episodes_fraction}")
 
     eval_env = get_env(False)

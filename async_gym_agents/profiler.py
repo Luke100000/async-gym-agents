@@ -62,6 +62,8 @@ def build_profiler_report(
     worker_last_sync_time: Optional[float],
     buffer_utilization: float,
     buffer_emptiness: float,
+    buffer_full_push_fraction: float,
+    buffer_avg_push_time: float,
     discarded_episodes_fraction: float,
 ) -> Dict[str, object]:
     return {
@@ -70,6 +72,8 @@ def build_profiler_report(
         "buffer": {
             "utilization": buffer_utilization,
             "emptiness": buffer_emptiness,
+            "full_push_fraction": buffer_full_push_fraction,
+            "avg_push_time_seconds": buffer_avg_push_time,
             "discarded_episodes_fraction": discarded_episodes_fraction,
         },
         "worker_sync": {
@@ -91,6 +95,8 @@ def render_profiler_report(report: Mapping[str, Any]) -> str:
         "Buffer: "
         f"util={buffer.get('utilization', 0.0):.2f}, "
         f"empty={buffer.get('emptiness', 0.0):.2f}, "
+        f"full_push={buffer.get('full_push_fraction', 0.0):.2f}, "
+        f"push_ms={buffer.get('avg_push_time_seconds', 0.0) * 1000:.2f}, "
         f"dropped={buffer.get('discarded_episodes_fraction', 0.0):.2f}"
     )
 

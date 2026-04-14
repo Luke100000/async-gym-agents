@@ -222,6 +222,9 @@ class AsyncAgentInjector:
 
         self._state.total_episodes = 0
         self._state.discarded_episodes = 0
+        self._state.queue_put_attempts = 0
+        self._state.full_queue_put_attempts = 0
+        self._state.total_queue_put_wait_ns = 0
         self._state.worker_profiler_stats = self._manager.dict() if self.use_mp else {}
         self._state.worker_profiler_last_sync = None
 
@@ -368,6 +371,9 @@ class AsyncAgentInjector:
             self._state = SimpleNamespace(
                 total_episodes=self._state.total_episodes,
                 discarded_episodes=self._state.discarded_episodes,
+                queue_put_attempts=self._state.queue_put_attempts,
+                full_queue_put_attempts=self._state.full_queue_put_attempts,
+                total_queue_put_wait_ns=self._state.total_queue_put_wait_ns,
                 worker_profiler_stats=worker_profiler_stats,
                 worker_profiler_last_sync=self._state.worker_profiler_last_sync,
             )
@@ -395,6 +401,8 @@ class AsyncAgentInjector:
             ),
             buffer_utilization=self.buffer_utilization,
             buffer_emptiness=self.buffer_emptyness,
+            buffer_full_push_fraction=self.buffer_full_push_fraction,
+            buffer_avg_push_time=self.buffer_avg_push_time,
             discarded_episodes_fraction=self.discarded_episodes_fraction,
         )
 
@@ -435,6 +443,30 @@ class AsyncAgentInjector:
             0
             if self._state is None or self._state.total_episodes == 0
             else self._state.discarded_episodes / self._state.total_episodes
+        )
+
+    @property
+    def buffer_full_push_fraction(self) -> float:
+        """
+        The fraction of episode push attempts that encountered a full buffer.
+        """
+        return (
+            0
+            if self._state is None or self._state.queue_put_attempts == 0
+            else self._state.full_queue_put_attempts / self._state.queue_put_attempts
+        )
+
+    @property
+    def buffer_avg_push_time(self) -> float:
+        """
+        The average time spent waiting to enqueue an episode, in seconds.
+        """
+        return (
+            0
+            if self._state is None or self._state.queue_put_attempts == 0
+            else self._state.total_queue_put_wait_ns
+            / self._state.queue_put_attempts
+            / 1_000_000_000
         )
 
 
@@ -513,19 +545,38 @@ class InjectorWorkerBase:
 
     def _put_episode_with_timeout(self, episode):
         start_ns = time.perf_counter_ns()
-        deadline = time.time() + self._queue_put_timeout
+        deadline_ns = start_ns + int(self._queue_put_timeout * 1_000_000_000)
+        queue_was_full = self._episode_queue.full()
 
-        while time.time() < deadline:
+        def record_push_wait() -> None:
+            with self._state_lock:
+                self._state.total_queue_put_wait_ns += max(
+                    0,
+                    min(time.perf_counter_ns(), deadline_ns) - start_ns,
+                )
+
+        with self._state_lock:
+            self._state.queue_put_attempts += 1
+            if queue_was_full:
+                self._state.full_queue_put_attempts += 1
+
+        while time.perf_counter_ns() < deadline_ns:
             if self._stop.is_set():
+                record_push_wait()
                 self._profiler.record("transport", time.perf_counter_ns() - start_ns)
                 return
 
             try:
+                remaining_timeout = min(
+                    0.1,
+                    max(0.0, (deadline_ns - time.perf_counter_ns()) / 1_000_000_000),
+                )
                 self._episode_queue.put(
                     episode,
                     block=True,
-                    timeout=min(0.1, deadline - time.time()),
+                    timeout=remaining_timeout,
                 )
+                record_push_wait()
                 self._profiler.record("transport", time.perf_counter_ns() - start_ns)
                 return
             except queue.Full:
@@ -539,6 +590,7 @@ class InjectorWorkerBase:
 
         with self._state_lock:
             self._state.discarded_episodes += 1
+        record_push_wait()
         self._profiler.record("transport", time.perf_counter_ns() - start_ns)
         self._logger.info("Dropped episode due to buffer full")
 

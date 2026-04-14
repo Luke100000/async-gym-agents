@@ -59,10 +59,7 @@ def run_model_test(model: Union[BaseAlgorithm, AsyncAgentInjector]):
     # Cleanup
     if hasattr(model, "shutdown"):
         model.shutdown()
-
-        print("Buffer utilization: ", model.buffer_utilization)
-        print("Buffer emptiness: ", model.buffer_emptyness)
-        print("Discarded episodes: ", model.discarded_episodes_fraction)
+        print(render_profiler_report(model.get_profiler_report()))
 
 
 def test_on_policy(taxi_multi_env):
