@@ -133,7 +133,7 @@ class AsyncAgentInjector:
                 torch.set_num_threads(mp_threads)
                 torch.set_num_interop_threads(mp_threads)
             except RuntimeError:
-                print(
+                logging.getLogger("async_gym_agents").warning(
                     "Failed to set torch threads, make sure to never call torch.set_num_threads() unconditional!"
                 )
 
@@ -150,7 +150,7 @@ class AsyncAgentInjector:
         )
 
         if use_mp:
-            print(
+            logging.getLogger("async_gym_agents").info(
                 f"Worker has {torch.get_num_threads()} threads and {torch.get_num_interop_threads()} interop threads"
             )
 
@@ -521,6 +521,8 @@ class InjectorWorkerBase:
                 else:
                     latest_update = self._update_queue.get_nowait()
             except queue.Empty:
+                if block and latest_update is None:
+                    continue
                 break
 
         if latest_update is None:
