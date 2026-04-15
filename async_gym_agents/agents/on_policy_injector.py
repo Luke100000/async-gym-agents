@@ -177,7 +177,6 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
         return dict(
             **super().get_worker_kwargs(),
             action_space=self.action_space,
-            device=self.device,
         )
 
 
@@ -185,13 +184,11 @@ class InjectorWorker(InjectorWorkerBase):
     def __init__(
         self,
         action_space: gym.Space,
-        device: torch.device,
         **kwargs,
     ):
         super().__init__(**kwargs)
 
         self.action_space = action_space
-        self.device = device
 
     def generate(self) -> Generator[list[Transition], None, None]:
         """

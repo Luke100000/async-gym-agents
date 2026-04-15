@@ -243,6 +243,9 @@ class AsyncAgentInjector:
         policy_class = type(policy)
         # noinspection PyProtectedMember
         policy_data = policy._get_constructor_parameters()
+        # Force workers to construct the policy on CPU so that no CUDA
+        # initialization happens even when the trainer runs on GPU.
+        policy_data["device"] = "cpu"
 
         worker_env = dict(
             OMP_NUM_THREADS=self.mp_threads,
@@ -540,7 +543,6 @@ class InjectorWorkerBase:
                 weights_only=True,
             )
             self.policy.load_state_dict(weights)
-            self.policy.to("cpu")
             self.policy.set_training_mode(False)
             self._policy_version = version
             self._logger.debug(
