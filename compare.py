@@ -4,6 +4,7 @@ from functools import partial
 from typing import List, Type
 
 import gymnasium as gym
+import torch
 from stable_baselines3 import PPO
 from stable_baselines3.common.base_class import BaseAlgorithm
 from stable_baselines3.common.evaluation import evaluate_policy
@@ -37,7 +38,7 @@ def evaluate(
     mode: Mode = Mode.ASYNC,
     use_mp: bool = False,
     n_envs: int = 1,
-    n_workers: int = 10,
+    n_workers: int = 8,
     agent: Type[BaseAlgorithm] = PPO,
 ):
     if mode == Mode.ASYNC:
@@ -62,8 +63,11 @@ def evaluate(
 
     if mode == Mode.ASYNC:
         model.shutdown()
+
         print(f"Buffer utilization: {model.buffer_utilization}")
         print(f"Buffer emptiness: {model.buffer_emptyness}")
+        print(f"Buffer full push fraction: {model.buffer_full_push_fraction}")
+        print(f"Buffer avg push time: {model.buffer_avg_push_time}")
         print(f"Discarded episodes: {model.discarded_episodes_fraction}")
 
     eval_env = get_env(False)
@@ -80,6 +84,9 @@ def benchmark(mode: Mode, use_mp: bool = False):
 
 
 if __name__ == "__main__":
+    torch.set_num_threads(8)
+    torch.set_num_interop_threads(8)
+
     benchmark(Mode.ASYNC, True)
     benchmark(Mode.ASYNC, False)
     benchmark(Mode.PARALLEL)

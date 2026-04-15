@@ -1,6 +1,5 @@
-from copy import deepcopy
 from dataclasses import dataclass
-from typing import Any, Dict, Generator, List, Optional, Tuple, Type, Union
+from typing import Any, Dict, Generator, List, Optional, Tuple, Type
 
 import gymnasium as gym
 import numpy as np
@@ -16,7 +15,7 @@ from stable_baselines3.common.vec_env import VecEnv
 from stable_baselines3.common.vec_env.base_vec_env import VecEnvObs
 
 from async_gym_agents.agents.injector import AsyncAgentInjector, InjectorWorkerBase
-from async_gym_agents.utils import single_slice
+from async_gym_agents.utils import copy_obs, single_slice
 
 
 @dataclass
@@ -39,6 +38,7 @@ class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithm):
         skip_truncated: bool = False,
         queue_put_timeout: float = 60.0,
         worker_join_timeout: float = 120.0,
+        profiler_sync_interval: float = 1.0,
         **kwargs,
     ):
         super().__init__(
@@ -47,6 +47,7 @@ class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithm):
             skip_truncated=skip_truncated,
             queue_put_timeout=queue_put_timeout,
             worker_join_timeout=worker_join_timeout,
+            profiler_sync_interval=profiler_sync_interval,
         )
         super(AsyncAgentInjector, self).__init__(*args, **kwargs)
 
@@ -57,8 +58,8 @@ class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithm):
         self,
         replay_buffer: ReplayBuffer,
         buffer_action: np.ndarray,
-        last_obs: Union[np.ndarray, Dict[str, np.ndarray]],
-        new_obs: Union[np.ndarray, Dict[str, np.ndarray]],
+        last_obs: VecEnvObs,
+        new_obs: VecEnvObs,
         reward: np.ndarray,
         dones: np.ndarray,
         infos: List[Dict[str, Any]],
@@ -167,69 +168,70 @@ class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithm):
             # Fetch transition (Also the only significant change to super)
             transition: Transition = self.fetch_transition()
 
-            # Make locals available for callbacks
-            buffer_actions = transition.buffer_actions
-            self._last_obs = transition.last_obs
-            new_obs = transition.new_obs
-            rewards = transition.rewards
-            dones = transition.dones
-            infos = transition.infos
-            reset_infos = transition.reset_infos
+            with self._profiler_main.track("processing"):
+                # Make locals available for callbacks
+                buffer_actions = transition.buffer_actions
+                self._last_obs = transition.last_obs
+                new_obs = transition.new_obs
+                rewards = transition.rewards
+                dones = transition.dones
+                infos = transition.infos
+                reset_infos = transition.reset_infos
 
-            # Update stats
-            self.num_timesteps += 1
-            num_collected_steps += 1
+                # Update stats
+                self.num_timesteps += 1
+                num_collected_steps += 1
 
-            # Give access to local variables
-            callback.update_locals(locals())
+                # Give access to local variables
+                callback.update_locals(locals())
 
-            # Only stop training if the return value is False, not when it is None.
-            if not callback.on_step():
-                return RolloutReturn(
-                    num_collected_steps,
-                    num_collected_episodes,
-                    continue_training=False,
+                # Only stop training if the return value is False, not when it is None.
+                if not callback.on_step():
+                    return RolloutReturn(
+                        num_collected_steps,
+                        num_collected_episodes,
+                        continue_training=False,
+                    )
+
+                # Retrieve reward and episode length if using Monitor wrapper
+                self._update_info_buffer(infos, dones)
+
+                # Store data in replay buffer (normalized action and unnormalized observation)
+                self._custom_store_transition(
+                    replay_buffer,
+                    buffer_actions,
+                    self._last_obs,
+                    new_obs,
+                    rewards,
+                    dones,
+                    infos,
                 )
 
-            # Retrieve reward and episode length if using Monitor wrapper
-            self._update_info_buffer(infos, dones)
+                self._update_current_progress_remaining(
+                    self.num_timesteps, self._total_timesteps
+                )
 
-            # Store data in replay buffer (normalized action and unnormalized observation)
-            self._custom_store_transition(
-                replay_buffer,
-                buffer_actions,
-                self._last_obs,
-                new_obs,
-                rewards,
-                dones,
-                infos,
-            )
+                # For DQN, check if the target network should be updated
+                # and update the exploration schedule
+                # For SAC/TD3, the update is dones as the same time as the gradient update
+                # see https://github.com/hill-a/stable-baselines/issues/900
+                self._on_step()
 
-            self._update_current_progress_remaining(
-                self.num_timesteps, self._total_timesteps
-            )
+                for idx, done in enumerate(dones):
+                    if done:
+                        # Update stats
+                        num_collected_episodes += 1
+                        self._episode_num += 1
 
-            # For DQN, check if the target network should be updated
-            # and update the exploration schedule
-            # For SAC/TD3, the update is dones as the same time as the gradient update
-            # see https://github.com/hill-a/stable-baselines/issues/900
-            self._on_step()
+                        if action_noise is not None:
+                            action_noise.reset()
 
-            for idx, done in enumerate(dones):
-                if done:
-                    # Update stats
-                    num_collected_episodes += 1
-                    self._episode_num += 1
-
-                    if action_noise is not None:
-                        action_noise.reset()
-
-                    # Log training infos
-                    if (
-                        log_interval is not None
-                        and self._episode_num % log_interval == 0
-                    ):
-                        self._dump_logs()
+                        # Log training infos
+                        if (
+                            log_interval is not None
+                            and self._episode_num % log_interval == 0
+                        ):
+                            self._dump_logs()
 
         callback.on_rollout_end()
 
@@ -317,37 +319,42 @@ class InjectorWorker(InjectorWorkerBase):
         """
         Continuously plays the game and returns episodes of Transitions
         """
-        last_obs = self.env.reset()
+        with self._profiler.track("resetting"):
+            last_obs = self.env.reset()
 
         episodes = {}
 
         while True:
             # Select action randomly or according to policy
-            actions, buffer_actions = self.sample_action(
-                self.policy,
-                self.learning_starts,
-                last_obs,
-                self.action_noise,
-            )
+            with self._profiler.track("inference"):
+                actions, buffer_actions = self.sample_action(
+                    self.policy,
+                    self.learning_starts,
+                    last_obs,
+                    self.action_noise,
+                )
 
             # Rescale and perform action
-            new_obs, rewards, dones, infos = self.env.step(actions)
+            with self._profiler.track("stepping"):
+                new_obs, rewards, dones, infos = self.env.step(actions)
 
             # Store transition
-            for idx in range(len(dones)):
-                if idx not in episodes:
-                    episodes[idx] = []
-                episodes[idx].append(
-                    Transition(
-                        single_slice(buffer_actions, idx),
-                        deepcopy(single_slice(last_obs, idx)),
-                        deepcopy(single_slice(new_obs, idx)),
-                        single_slice(rewards, idx),
-                        single_slice(dones, idx),
-                        single_slice(infos, idx),
-                        single_slice(self.env.reset_infos, idx),
+            with self._profiler.track("transition_building"):
+                for idx in range(len(dones)):
+                    if idx not in episodes:
+                        episodes[idx] = []
+                    episodes[idx].append(
+                        Transition(
+                            single_slice(buffer_actions, idx),
+                            copy_obs(single_slice(last_obs, idx)),
+                            copy_obs(single_slice(new_obs, idx)),
+                            single_slice(rewards, idx),
+                            single_slice(dones, idx),
+                            single_slice(infos, idx),
+                            single_slice(self.env.reset_infos, idx),
+                        )
                     )
-                )
+            self._flush_profiler()
             last_obs = new_obs
 
             # Start a new episode
@@ -356,4 +363,4 @@ class InjectorWorker(InjectorWorkerBase):
                     yield episodes[idx]
                     del episodes[idx]
 
-                    self.copy_policy_from_state()
+                    self.copy_policy_from_queue()
