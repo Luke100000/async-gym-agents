@@ -40,6 +40,7 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
         queue_put_timeout: float = 60.0,
         worker_join_timeout: float = 120.0,
         profiler_sync_interval: float = 1.0,
+        mp_threads: int = 1,
         **kwargs,
     ):
         super().__init__(
@@ -49,6 +50,7 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
             queue_put_timeout=queue_put_timeout,
             worker_join_timeout=worker_join_timeout,
             profiler_sync_interval=profiler_sync_interval,
+            mp_threads=mp_threads,
         )
         super(AsyncAgentInjector, self).__init__(*args, **kwargs)
 
@@ -205,7 +207,7 @@ class InjectorWorker(InjectorWorkerBase):
             with self._profiler.track("inference"):
                 with torch.inference_mode():
                     # Convert to pytorch tensor or to TensorDict
-                    obs_tensor = obs_as_tensor(last_obs, self.device)
+                    obs_tensor = obs_as_tensor(last_obs, self.policy.device)
                     actions, values, log_probs = self.policy(obs_tensor)
 
             actions = actions.cpu().numpy()
