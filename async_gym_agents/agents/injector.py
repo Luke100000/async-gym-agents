@@ -251,6 +251,7 @@ class AsyncAgentInjector:
             NUMEXPR_NUM_THREADS=self.mp_threads,
             TORCH_NUM_THREADS=self.mp_threads,
             TORCH_NUM_INTEROP_THREADS=self.mp_threads,
+            CUDA_VISIBLE_DEVICES="",
         )
 
         for env_func, update_queue in zip(
@@ -539,6 +540,7 @@ class InjectorWorkerBase:
                 weights_only=True,
             )
             self.policy.load_state_dict(weights)
+            self.policy.to("cpu")
             self.policy.set_training_mode(False)
             self._policy_version = version
             self._logger.debug(

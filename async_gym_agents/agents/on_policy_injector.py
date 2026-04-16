@@ -40,6 +40,7 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
         queue_put_timeout: float = 60.0,
         worker_join_timeout: float = 120.0,
         profiler_sync_interval: float = 1.0,
+        mp_threads: int = 1,
         **kwargs,
     ):
         super().__init__(
@@ -49,6 +50,7 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
             queue_put_timeout=queue_put_timeout,
             worker_join_timeout=worker_join_timeout,
             profiler_sync_interval=profiler_sync_interval,
+            mp_threads=mp_threads,
         )
         super(AsyncAgentInjector, self).__init__(*args, **kwargs)
 
@@ -175,7 +177,6 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
         return dict(
             **super().get_worker_kwargs(),
             action_space=self.action_space,
-            device=self.device,
         )
 
 
@@ -183,13 +184,11 @@ class InjectorWorker(InjectorWorkerBase):
     def __init__(
         self,
         action_space: gym.Space,
-        device: torch.device,
         **kwargs,
     ):
         super().__init__(**kwargs)
 
         self.action_space = action_space
-        self.device = device
 
     def generate(self) -> Generator[list[Transition], None, None]:
         """
@@ -205,7 +204,7 @@ class InjectorWorker(InjectorWorkerBase):
             with self._profiler.track("inference"):
                 with torch.inference_mode():
                     # Convert to pytorch tensor or to TensorDict
-                    obs_tensor = obs_as_tensor(last_obs, self.device)
+                    obs_tensor = obs_as_tensor(last_obs, self.policy.device)
                     actions, values, log_probs = self.policy(obs_tensor)
 
             actions = actions.cpu().numpy()

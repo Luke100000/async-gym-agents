@@ -39,6 +39,7 @@ class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithm):
         queue_put_timeout: float = 60.0,
         worker_join_timeout: float = 120.0,
         profiler_sync_interval: float = 1.0,
+        mp_threads: int = 1,
         **kwargs,
     ):
         super().__init__(
@@ -48,6 +49,7 @@ class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithm):
             queue_put_timeout=queue_put_timeout,
             worker_join_timeout=worker_join_timeout,
             profiler_sync_interval=profiler_sync_interval,
+            mp_threads=mp_threads,
         )
         super(AsyncAgentInjector, self).__init__(*args, **kwargs)
 
