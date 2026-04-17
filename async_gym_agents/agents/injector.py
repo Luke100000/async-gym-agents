@@ -94,9 +94,7 @@ class AsyncAgentInjector:
         # shared object (!)
         self._manager: Optional[multiprocessing.Manager] = None
         self._state: GenericState | None = None
-        self._state_lock: GenericStateLock = (
-            self.mp_ctx.Lock() if use_mp else threading.Lock()
-        )
+        self._state_lock: GenericStateLock | None = None
         self._version = 0
 
         self._stop: GenericEvent | None = None
@@ -204,6 +202,8 @@ class AsyncAgentInjector:
     def _init_collect_state(self):
         if self._initialized:
             return
+
+        self._state_lock = self.mp_ctx.Lock() if self.use_mp else threading.Lock()
 
         # Environment queue
         self._episode_queue = (
