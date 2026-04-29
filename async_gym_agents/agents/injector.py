@@ -56,6 +56,7 @@ class AsyncAgentInjector:
         *args,
         max_episodes_in_buffer: int = 8,
         use_mp: bool = False,
+        worker_start_interval_seconds: float = 0.0,
         skip_truncated: bool = False,
         queue_put_timeout: float = 60.0,
         worker_join_timeout: float = 120.0,
@@ -67,6 +68,7 @@ class AsyncAgentInjector:
         """
         :param max_episodes_in_buffer: Max episodes in the buffer before blocking
         :param use_mp: Use processes instead of threads
+        :param worker_start_interval_seconds: Delay between parent-side worker starts
         :param skip_truncated: Skip episodes with truncated signal
         :param queue_put_timeout: Timeout when putting an episode before dropping
         :param worker_join_timeout: Shutdown time before killing the process
@@ -76,6 +78,7 @@ class AsyncAgentInjector:
         """
         self.max_episodes_in_buffer = max_episodes_in_buffer
         self.use_mp = use_mp
+        self.worker_start_interval_seconds = worker_start_interval_seconds
 
         # noinspection PyTypeChecker
         self.mp_ctx = multiprocessing.get_context(mp_method)
@@ -203,6 +206,8 @@ class AsyncAgentInjector:
         if self._initialized:
             return
 
+        # SB3 load restores `use_mp` after __init__, so rebuild runtime sync
+        # primitives from the current mode before creating worker state.
         self._state_lock = self.mp_ctx.Lock() if self.use_mp else threading.Lock()
 
         # Environment queue
@@ -254,8 +259,10 @@ class AsyncAgentInjector:
             CUDA_VISIBLE_DEVICES="",
         )
 
-        for env_func, update_queue in zip(
-            self.get_indexable_env().env_fns, self._update_queues, strict=True
+        worker_env_fns = self.get_indexable_env().env_fns
+        worker_count = len(worker_env_fns)
+        for worker_index, (env_func, update_queue) in enumerate(
+            zip(worker_env_fns, self._update_queues, strict=True)
         ):
             with patched_env(**worker_env) if self.use_mp else contextlib.nullcontext():
                 worker = (self.mp_ctx.Process if self.use_mp else threading.Thread)(
@@ -279,6 +286,12 @@ class AsyncAgentInjector:
 
             # noinspection PyTypeChecker
             self._workers.append(worker)
+
+            if (
+                self.worker_start_interval_seconds > 0
+                and worker_index < worker_count - 1
+            ):
+                time.sleep(self.worker_start_interval_seconds)
 
         self._initialized_workers = True
 

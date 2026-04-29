@@ -35,6 +35,7 @@ class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithm):
         *args,
         max_episodes_in_buffer: int = 8,
         use_mp: bool = False,
+        worker_start_interval_seconds: float = 0.0,
         skip_truncated: bool = False,
         queue_put_timeout: float = 60.0,
         worker_join_timeout: float = 120.0,
@@ -45,6 +46,7 @@ class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithm):
         super().__init__(
             max_episodes_in_buffer=max_episodes_in_buffer,
             use_mp=use_mp,
+            worker_start_interval_seconds=worker_start_interval_seconds,
             skip_truncated=skip_truncated,
             queue_put_timeout=queue_put_timeout,
             worker_join_timeout=worker_join_timeout,
