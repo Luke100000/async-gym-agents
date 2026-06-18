@@ -34,11 +34,6 @@ class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithm):
         self,
         *args,
         max_episodes_in_buffer: int = 8,
-        full_speed_training_mode: bool = False,
-        full_speed_collect_steps: int = 32,
-        full_speed_train_steps: int = 1,
-        full_speed_max_train_bursts: int = 8,
-        full_speed_min_replay_size: Optional[int] = None,
         use_mp: bool = False,
         worker_start_interval_seconds: float = 0.0,
         skip_truncated: bool = False,
@@ -59,12 +54,6 @@ class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithm):
             mp_threads=mp_threads,
         )
         super(AsyncAgentInjector, self).__init__(*args, **kwargs)
-
-        self.full_speed_training_mode = full_speed_training_mode
-        self.full_speed_collect_steps = max(1, full_speed_collect_steps)
-        self.full_speed_train_steps = max(1, full_speed_train_steps)
-        self.full_speed_max_train_bursts = max(1, full_speed_max_train_bursts)
-        self.full_speed_min_replay_size = full_speed_min_replay_size
 
     def _store_transition(*args):
         raise NotImplementedError()
@@ -269,107 +258,6 @@ class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithm):
             num_collected_episodes,
             continue_training,
         )
-
-    def learn(
-        self,
-        total_timesteps: int,
-        callback=None,
-        log_interval: int = 4,
-        tb_log_name: str = "run",
-        reset_num_timesteps: bool = True,
-        progress_bar: bool = False,
-    ):
-        if not self.full_speed_training_mode:
-            return super().learn(
-                total_timesteps=total_timesteps,
-                callback=callback,
-                log_interval=log_interval,
-                tb_log_name=tb_log_name,
-                reset_num_timesteps=reset_num_timesteps,
-                progress_bar=progress_bar,
-            )
-
-        total_timesteps, callback = self._setup_learn(
-            total_timesteps,
-            callback,
-            reset_num_timesteps,
-            tb_log_name,
-            progress_bar,
-        )
-
-        callback.on_training_start(locals(), globals())
-
-        assert self.env is not None, (
-            "You must set the environment before calling learn()"
-        )
-        assert isinstance(self.train_freq, TrainFreq)
-        assert self.replay_buffer is not None
-
-        if self.replay_buffer.n_envs != 1:
-            self.replay_buffer.n_envs = 1
-            self.replay_buffer.reset()
-
-        self.policy.set_training_mode(False)
-        self.pre_collect_preparation(self.policy)
-        callback.on_rollout_start()
-
-        idle_train_bursts = 0
-        continue_training = True
-        min_replay_size = self.full_speed_min_replay_size or max(
-            self.batch_size,
-            self.learning_starts,
-        )
-
-        while self.num_timesteps < total_timesteps and continue_training:
-            collected_steps = 0
-            while (
-                collected_steps < self.full_speed_collect_steps
-                and self.num_timesteps < total_timesteps
-            ):
-                transition = self.try_fetch_transition()
-                if transition is None:
-                    break
-
-                continue_training, _ = self._process_worker_transition(
-                    self.replay_buffer,
-                    callback,
-                    transition,
-                    self.action_noise,
-                    log_interval,
-                )
-                if not continue_training:
-                    break
-                collected_steps += 1
-
-            can_train = (
-                self.replay_buffer.size() >= min_replay_size
-                and self.num_timesteps > self.learning_starts
-            )
-            if continue_training and can_train:
-                self.train(
-                    batch_size=self.batch_size,
-                    gradient_steps=self.full_speed_train_steps,
-                )
-                self.pre_collect_preparation(self.policy)
-                idle_train_bursts = 0 if collected_steps else idle_train_bursts + 1
-                if idle_train_bursts < self.full_speed_max_train_bursts:
-                    continue
-
-            if continue_training and self.num_timesteps < total_timesteps:
-                transition = self.fetch_transition()
-                continue_training, _ = self._process_worker_transition(
-                    self.replay_buffer,
-                    callback,
-                    transition,
-                    self.action_noise,
-                    log_interval,
-                )
-                idle_train_bursts = 0
-
-        callback.on_rollout_end()
-        callback.on_training_end()
-
-        return self
 
     def get_worker_class(self) -> Type[InjectorWorkerBase]:
         return InjectorWorker

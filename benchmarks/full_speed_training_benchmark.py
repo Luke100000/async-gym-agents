@@ -13,7 +13,10 @@ import torch
 from stable_baselines3 import DQN
 from stable_baselines3.common.callbacks import BaseCallback
 
-from async_gym_agents.agents.async_agent import get_injected_agent
+from async_gym_agents.agents.async_agent import (
+    get_fast_injected_agent,
+    get_injected_agent,
+)
 from async_gym_agents.envs.multi_env import IndexableMultiEnv
 
 matplotlib.use("Agg")
@@ -77,7 +80,17 @@ def build_model(mode: str, env_id: str, seed: int, workers: int, total_timesteps
     torch.manual_seed(seed)
     env_fns = [partial(make_env, env_id, seed * 1000 + i) for i in range(workers)]
     env = IndexableMultiEnv(env_fns, env_fns[0]())
-    Agent = get_injected_agent(DQN)
+    is_full_speed = mode == "full_speed"
+    Agent = get_fast_injected_agent(DQN) if is_full_speed else get_injected_agent(DQN)
+    speed_kwargs = (
+        dict(
+            full_speed_collect_steps=32,
+            full_speed_train_steps=2,
+            full_speed_max_train_bursts=8,
+        )
+        if is_full_speed
+        else {}
+    )
 
     return Agent(
         "MlpPolicy",
@@ -93,11 +106,8 @@ def build_model(mode: str, env_id: str, seed: int, workers: int, total_timesteps
         target_update_interval=500,
         exploration_fraction=0.35,
         exploration_final_eps=0.05,
-        full_speed_training_mode=mode == "full_speed",
-        full_speed_collect_steps=32,
-        full_speed_train_steps=2,
-        full_speed_max_train_bursts=8,
         verbose=0,
+        **speed_kwargs,
     )
 
 
