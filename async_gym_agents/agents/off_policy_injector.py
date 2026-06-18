@@ -34,6 +34,11 @@ class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithm):
         self,
         *args,
         max_episodes_in_buffer: int = 8,
+        full_speed_training_mode: bool = False,
+        full_speed_collect_steps: int = 32,
+        full_speed_train_steps: int = 1,
+        full_speed_max_train_bursts: int = 8,
+        full_speed_min_replay_size: Optional[int] = None,
         use_mp: bool = False,
         worker_start_interval_seconds: float = 0.0,
         skip_truncated: bool = False,
@@ -54,6 +59,12 @@ class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithm):
             mp_threads=mp_threads,
         )
         super(AsyncAgentInjector, self).__init__(*args, **kwargs)
+
+        self.full_speed_training_mode = full_speed_training_mode
+        self.full_speed_collect_steps = max(1, full_speed_collect_steps)
+        self.full_speed_train_steps = max(1, full_speed_train_steps)
+        self.full_speed_max_train_bursts = max(1, full_speed_max_train_bursts)
+        self.full_speed_min_replay_size = full_speed_min_replay_size
 
     def _store_transition(*args):
         raise NotImplementedError()
@@ -104,6 +115,74 @@ class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithm):
             dones,
             infos,
         )
+
+    def _process_worker_transition(
+        self,
+        replay_buffer: ReplayBuffer,
+        callback: BaseCallback,
+        transition: Transition,
+        action_noise: Optional[ActionNoise],
+        log_interval: Optional[int],
+    ) -> tuple[bool, int]:
+        with self._profiler_main.track("processing"):
+            # Make locals available for callbacks
+            buffer_actions = transition.buffer_actions
+            self._last_obs = transition.last_obs
+            new_obs = transition.new_obs
+            rewards = transition.rewards
+            dones = transition.dones
+            infos = transition.infos
+            reset_infos = transition.reset_infos
+
+            # Update stats
+            self.num_timesteps += 1
+
+            # Give access to local variables
+            callback.update_locals(locals())
+
+            # Only stop training if the return value is False, not when it is None.
+            if not callback.on_step():
+                return False, 0
+
+            # Retrieve reward and episode length if using Monitor wrapper
+            self._update_info_buffer(infos, dones)
+
+            # Store data in replay buffer (normalized action and unnormalized observation)
+            self._custom_store_transition(
+                replay_buffer,
+                buffer_actions,
+                self._last_obs,
+                new_obs,
+                rewards,
+                dones,
+                infos,
+            )
+            self._update_current_progress_remaining(
+                self.num_timesteps, self._total_timesteps
+            )
+
+            # For DQN, check if the target network should be updated
+            # and update the exploration schedule
+            # For SAC/TD3, the update is dones as the same time as the gradient update
+            # see https://github.com/hill-a/stable-baselines/issues/900
+            self._on_step()
+
+            num_episodes = 0
+            for done in dones:
+                if done:
+                    # Update stats
+                    num_episodes += 1
+                    self._episode_num += 1
+                    if action_noise is not None:
+                        action_noise.reset()
+                    if (
+                        log_interval is not None
+                        and self._episode_num % log_interval == 0
+                    ):
+                        # Log training infos
+                        self._dump_logs()
+
+            return True, num_episodes
 
     # must be updated from SB3 (!)
     def collect_rollouts(
@@ -158,7 +237,7 @@ class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithm):
 
         callback.on_rollout_start()
         continue_training = True
-        while should_collect_more_steps(
+        while continue_training and should_collect_more_steps(
             train_freq, num_collected_steps, num_collected_episodes
         ):
             if (
@@ -172,78 +251,125 @@ class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithm):
             # Fetch transition (Also the only significant change to super)
             transition: Transition = self.fetch_transition()
 
-            with self._profiler_main.track("processing"):
-                # Make locals available for callbacks
-                buffer_actions = transition.buffer_actions
-                self._last_obs = transition.last_obs
-                new_obs = transition.new_obs
-                rewards = transition.rewards
-                dones = transition.dones
-                infos = transition.infos
-                reset_infos = transition.reset_infos
+            continue_training, episodes = self._process_worker_transition(
+                replay_buffer,
+                callback,
+                transition,
+                action_noise,
+                log_interval,
+            )
+            num_collected_steps += 1
+            num_collected_episodes += episodes
 
-                # Update stats
-                self.num_timesteps += 1
-                num_collected_steps += 1
-
-                # Give access to local variables
-                callback.update_locals(locals())
-
-                # Only stop training if the return value is False, not when it is None.
-                if not callback.on_step():
-                    return RolloutReturn(
-                        num_collected_steps,
-                        num_collected_episodes,
-                        continue_training=False,
-                    )
-
-                # Retrieve reward and episode length if using Monitor wrapper
-                self._update_info_buffer(infos, dones)
-
-                # Store data in replay buffer (normalized action and unnormalized observation)
-                self._custom_store_transition(
-                    replay_buffer,
-                    buffer_actions,
-                    self._last_obs,
-                    new_obs,
-                    rewards,
-                    dones,
-                    infos,
-                )
-
-                self._update_current_progress_remaining(
-                    self.num_timesteps, self._total_timesteps
-                )
-
-                # For DQN, check if the target network should be updated
-                # and update the exploration schedule
-                # For SAC/TD3, the update is dones as the same time as the gradient update
-                # see https://github.com/hill-a/stable-baselines/issues/900
-                self._on_step()
-
-                for idx, done in enumerate(dones):
-                    if done:
-                        # Update stats
-                        num_collected_episodes += 1
-                        self._episode_num += 1
-
-                        if action_noise is not None:
-                            action_noise.reset()
-
-                        # Log training infos
-                        if (
-                            log_interval is not None
-                            and self._episode_num % log_interval == 0
-                        ):
-                            self._dump_logs()
-
-        callback.on_rollout_end()
+        if continue_training:
+            callback.on_rollout_end()
 
         return RolloutReturn(
             num_collected_steps,
             num_collected_episodes,
             continue_training,
         )
+
+    def learn(
+        self,
+        total_timesteps: int,
+        callback=None,
+        log_interval: int = 4,
+        tb_log_name: str = "run",
+        reset_num_timesteps: bool = True,
+        progress_bar: bool = False,
+    ):
+        if not self.full_speed_training_mode:
+            return super().learn(
+                total_timesteps=total_timesteps,
+                callback=callback,
+                log_interval=log_interval,
+                tb_log_name=tb_log_name,
+                reset_num_timesteps=reset_num_timesteps,
+                progress_bar=progress_bar,
+            )
+
+        total_timesteps, callback = self._setup_learn(
+            total_timesteps,
+            callback,
+            reset_num_timesteps,
+            tb_log_name,
+            progress_bar,
+        )
+
+        callback.on_training_start(locals(), globals())
+
+        assert self.env is not None, (
+            "You must set the environment before calling learn()"
+        )
+        assert isinstance(self.train_freq, TrainFreq)
+        assert self.replay_buffer is not None
+
+        if self.replay_buffer.n_envs != 1:
+            self.replay_buffer.n_envs = 1
+            self.replay_buffer.reset()
+
+        self.policy.set_training_mode(False)
+        self.pre_collect_preparation(self.policy)
+        callback.on_rollout_start()
+
+        idle_train_bursts = 0
+        continue_training = True
+        min_replay_size = self.full_speed_min_replay_size or max(
+            self.batch_size,
+            self.learning_starts,
+        )
+
+        while self.num_timesteps < total_timesteps and continue_training:
+            collected_steps = 0
+            while (
+                collected_steps < self.full_speed_collect_steps
+                and self.num_timesteps < total_timesteps
+            ):
+                transition = self.try_fetch_transition()
+                if transition is None:
+                    break
+
+                continue_training, _ = self._process_worker_transition(
+                    self.replay_buffer,
+                    callback,
+                    transition,
+                    self.action_noise,
+                    log_interval,
+                )
+                if not continue_training:
+                    break
+                collected_steps += 1
+
+            can_train = (
+                self.replay_buffer.size() >= min_replay_size
+                and self.num_timesteps > self.learning_starts
+            )
+            if continue_training and can_train:
+                self.train(
+                    batch_size=self.batch_size,
+                    gradient_steps=self.full_speed_train_steps,
+                )
+                self.pre_collect_preparation(self.policy)
+                idle_train_bursts = 0 if collected_steps else idle_train_bursts + 1
+                if idle_train_bursts < self.full_speed_max_train_bursts:
+                    continue
+
+            if continue_training and self.num_timesteps < total_timesteps:
+                transition = self.fetch_transition()
+                continue_training, _ = self._process_worker_transition(
+                    self.replay_buffer,
+                    callback,
+                    transition,
+                    self.action_noise,
+                    log_interval,
+                )
+                idle_train_bursts = 0
+
+        callback.on_rollout_end()
+        callback.on_training_end()
+
+        return self
 
     def get_worker_class(self) -> Type[InjectorWorkerBase]:
         return InjectorWorker

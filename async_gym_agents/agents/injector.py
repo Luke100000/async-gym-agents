@@ -327,9 +327,9 @@ class AsyncAgentInjector:
             self._clear_queue(update_queue)
             update_queue.put((version, weights))
 
-    def _fetch_transitions(self) -> List[Transition]:
+    def _fetch_transitions(self, block: bool = True) -> List[Transition]:
         with self._profiler_main.track("transport"):
-            return self._episode_queue.get()
+            return self._episode_queue.get(block=block)
 
     def fetch_transition(self) -> Transition:
         """
@@ -342,6 +342,23 @@ class AsyncAgentInjector:
             self._buffer_stat_count += 1
 
             self._transitions = self._fetch_transitions()
+
+        return self._transitions.pop(0)
+
+    def try_fetch_transition(self) -> Transition | None:
+        """
+        Non-blocking variant of fetch_transition for trainers that can keep
+        updating from an already-populated replay buffer.
+        """
+        if len(self._transitions) == 0:
+            self._buffer_utilization += self._episode_queue.qsize()
+            self._buffer_emptiness += 1 if self._episode_queue.empty() else 0
+            self._buffer_stat_count += 1
+
+            try:
+                self._transitions = self._fetch_transitions(block=False)
+            except queue.Empty:
+                return None
 
         return self._transitions.pop(0)
 
