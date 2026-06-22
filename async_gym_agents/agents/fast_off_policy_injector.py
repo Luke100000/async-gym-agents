@@ -116,14 +116,14 @@ class FastOffPolicyAlgorithmInjector(OffPolicyAlgorithmInjector):
 
             # Prefer replay training over waiting, but periodically block for
             # fresh collector data to avoid spinning forever on stale samples.
+            block_for_data = (
+                not can_train or idle_train_bursts >= self.full_speed_max_train_bursts
+            )
             rollout = self._collect_full_speed_rollout(
                 callback,
                 log_interval,
                 total_timesteps,
-                block_for_data=(
-                    not can_train
-                    or idle_train_bursts >= self.full_speed_max_train_bursts
-                ),
+                block_for_data=block_for_data,
             )
             continue_training = rollout.continue_training
             if not continue_training:

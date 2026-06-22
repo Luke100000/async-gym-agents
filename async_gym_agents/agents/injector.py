@@ -331,16 +331,19 @@ class AsyncAgentInjector:
         with self._profiler_main.track("transport"):
             return self._episode_queue.get(block=block)
 
+    def _record_buffer_stats(self) -> None:
+        queue_size = self._episode_queue.qsize()
+        self._buffer_utilization += queue_size
+        self._buffer_emptiness += 1 if queue_size == 0 else 0
+        self._buffer_stat_count += 1
+
     def fetch_transition(self) -> Transition:
         """
         Each episode is returned as a sequence of transitions, in order, complete,
         and not interleaved with episodes from other workers.
         """
         while len(self._transitions) == 0:
-            self._buffer_utilization += self._episode_queue.qsize()
-            self._buffer_emptiness += 1 if self._episode_queue.empty() else 0
-            self._buffer_stat_count += 1
-
+            self._record_buffer_stats()
             self._transitions = self._fetch_transitions()
 
         return self._transitions.pop(0)
@@ -351,10 +354,7 @@ class AsyncAgentInjector:
         updating from an already-populated replay buffer.
         """
         if len(self._transitions) == 0:
-            self._buffer_utilization += self._episode_queue.qsize()
-            self._buffer_emptiness += 1 if self._episode_queue.empty() else 0
-            self._buffer_stat_count += 1
-
+            self._record_buffer_stats()
             try:
                 self._transitions = self._fetch_transitions(block=False)
             except queue.Empty:

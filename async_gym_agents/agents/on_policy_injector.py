@@ -35,7 +35,6 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
         self,
         *args,
         max_episodes_in_buffer: int = 8,
-        full_speed_training_mode: bool = False,
         use_mp: bool = False,
         worker_start_interval_seconds: float = 0.0,
         skip_truncated: bool = False,
@@ -45,11 +44,6 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
         mp_threads: int = 1,
         **kwargs,
     ):
-        if full_speed_training_mode:
-            raise ValueError(
-                "full_speed_training_mode is only implemented for off-policy agents"
-            )
-
         super().__init__(
             max_episodes_in_buffer=max_episodes_in_buffer,
             use_mp=use_mp,
