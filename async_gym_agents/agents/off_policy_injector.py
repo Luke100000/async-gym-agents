@@ -355,6 +355,8 @@ class InjectorWorker(InjectorWorkerBase):
             # Rescale and perform action
             with self._profiler.track("stepping"):
                 new_obs, rewards, dones, infos = self.env.step(actions)
+            # Workers choose random actions until learning_starts has elapsed.
+            self.num_timesteps += self.env.num_envs
 
             # Store transition
             with self._profiler.track("transition_building"):
