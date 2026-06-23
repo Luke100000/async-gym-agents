@@ -44,6 +44,7 @@ def build_worker() -> InjectorWorkerBase:
         queue_put_attempts=0,
         full_queue_put_attempts=0,
         total_queue_put_wait_ns=0,
+        policy_sync_count=0,
     )
     worker._state_lock = threading.Lock()
     worker._stop = threading.Event()

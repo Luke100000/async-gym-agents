@@ -7,42 +7,52 @@ from async_gym_agents.agents.off_policy_injector import OffPolicyAlgorithmInject
 
 
 class FastOffPolicyAlgorithmInjector(OffPolicyAlgorithmInjector):
+    """
+    Off-policy trainer that drains all available worker transitions, trains, and
+    pushes the new policy each round. Batch size is the only runtime-tuned knob,
+    adjusted to hit a target worker-sync freshness.
+    """
+
     def __init__(
         self,
         *args,
-        full_speed_collect_steps: int = 32,
         full_speed_train_steps: int = 1,
-        full_speed_max_train_bursts: int = 8,
+        full_speed_target_freshness: float = 1.0,
+        full_speed_min_batch_size: Optional[int] = None,
+        full_speed_max_batch_size: Optional[int] = None,
         full_speed_min_replay_size: Optional[int] = None,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
-        self.full_speed_collect_steps = max(1, full_speed_collect_steps)
         self.full_speed_train_steps = max(1, full_speed_train_steps)
-        self.full_speed_max_train_bursts = max(1, full_speed_max_train_bursts)
+        # Target worker-syncs per update, per worker.
+        self.full_speed_target_freshness = max(0.0, full_speed_target_freshness)
+        self.full_speed_min_batch_size = full_speed_min_batch_size
+        self.full_speed_max_batch_size = full_speed_max_batch_size
         self.full_speed_min_replay_size = full_speed_min_replay_size
 
-    def _collect_full_speed_rollout(
+        self._full_speed_batch = float(self.batch_size)
+
+    def _drain_available_transitions(
         self,
         callback: BaseCallback,
         log_interval: Optional[int],
         total_timesteps: int,
-        block_for_data: bool,
+        block_for_first: bool,
     ) -> RolloutReturn:
+        """
+        Drain all available worker transitions into the replay buffer, blocking
+        for the first only when ``block_for_first`` is set.
+        """
         assert self.replay_buffer is not None
 
         num_collected_steps, num_collected_episodes = 0, 0
         continue_training = True
 
-        while (
-            num_collected_steps < self.full_speed_collect_steps
-            and self.num_timesteps < total_timesteps
-            and continue_training
-        ):
-            # Block only when replay cannot keep the trainer busy anymore.
+        while self.num_timesteps < total_timesteps and continue_training:
             transition = (
                 self.fetch_transition()
-                if block_for_data and num_collected_steps == 0
+                if block_for_first and num_collected_steps == 0
                 else self.try_fetch_transition()
             )
             if transition is None:
@@ -69,6 +79,16 @@ class FastOffPolicyAlgorithmInjector(OffPolicyAlgorithmInjector):
         return (
             self.replay_buffer.size() >= min_replay_size
             and self.num_timesteps > self.learning_starts
+        )
+
+    def _adjust_batch_size(
+        self, synced: int, target: float, min_batch: int, max_batch: int
+    ) -> None:
+        # Grow when workers under-consumed (synced < target), shrink otherwise.
+        factor = (target + 1.0) / (synced + 1.0)
+        self._full_speed_batch = min(
+            float(max_batch),
+            max(float(min_batch), self._full_speed_batch * factor),
         )
 
     def learn(
@@ -104,44 +124,41 @@ class FastOffPolicyAlgorithmInjector(OffPolicyAlgorithmInjector):
         self.pre_collect_preparation(self.policy)
         callback.on_rollout_start()
 
-        idle_train_bursts = 0
         continue_training = True
         min_replay_size = self.full_speed_min_replay_size or max(
             self.batch_size,
             self.learning_starts,
         )
 
-        while self.num_timesteps < total_timesteps and continue_training:
-            can_train = self._can_full_speed_train(min_replay_size)
+        self._full_speed_batch = float(self.batch_size)
+        min_batch = self.full_speed_min_batch_size or max(1, self.batch_size // 16)
+        max_batch = self.full_speed_max_batch_size or self.batch_size * 16
+        target = self.full_speed_target_freshness * len(self._update_queues)
 
-            # Prefer replay training over waiting, but periodically block for
-            # fresh collector data to avoid spinning forever on stale samples.
-            block_for_data = (
-                not can_train or idle_train_bursts >= self.full_speed_max_train_bursts
-            )
-            rollout = self._collect_full_speed_rollout(
+        while self.num_timesteps < total_timesteps and continue_training:
+            # Only wait for data when we cannot train yet.
+            can_train = self._can_full_speed_train(min_replay_size)
+            rollout = self._drain_available_transitions(
                 callback,
                 log_interval,
                 total_timesteps,
-                block_for_data=block_for_data,
+                block_for_first=not can_train,
             )
             continue_training = rollout.continue_training
             if not continue_training:
                 break
 
-            can_train = self._can_full_speed_train(min_replay_size)
-            if can_train:
+            if self._can_full_speed_train(min_replay_size):
+                batch_size = int(round(self._full_speed_batch))
                 self.train(
-                    batch_size=self.batch_size,
+                    batch_size=batch_size,
                     gradient_steps=self.full_speed_train_steps,
                 )
-                # Workers collect on CPU copies; push each trained policy version.
+
+                # Adapt to the previous policy's consumption, then push the new one.
+                synced = self.take_policy_sync_count()
+                self._adjust_batch_size(synced, target, min_batch, max_batch)
                 self.pre_collect_preparation(self.policy)
-                idle_train_bursts = (
-                    0 if rollout.episode_timesteps else idle_train_bursts + 1
-                )
-            else:
-                idle_train_bursts = 0
 
         if continue_training:
             callback.on_rollout_end()

@@ -230,6 +230,8 @@ class AsyncAgentInjector:
         self._state.queue_put_attempts = 0
         self._state.full_queue_put_attempts = 0
         self._state.total_queue_put_wait_ns = 0
+        # Worker policy-accepts, read and reset by the trainer.
+        self._state.policy_sync_count = 0
         self._state.worker_profiler_stats = self._manager.dict() if self.use_mp else {}
         self._state.worker_profiler_last_sync = None
 
@@ -327,6 +329,13 @@ class AsyncAgentInjector:
             self._clear_queue(update_queue)
             update_queue.put((version, weights))
 
+    def take_policy_sync_count(self) -> int:
+        """Worker policy-accepts since the previous call, resetting the counter."""
+        with self._state_lock:
+            count = self._state.policy_sync_count
+            self._state.policy_sync_count = 0
+            return count
+
     def _fetch_transitions(self, block: bool = True) -> List[Transition]:
         with self._profiler_main.track("transport"):
             return self._episode_queue.get(block=block)
@@ -405,6 +414,7 @@ class AsyncAgentInjector:
                 queue_put_attempts=self._state.queue_put_attempts,
                 full_queue_put_attempts=self._state.full_queue_put_attempts,
                 total_queue_put_wait_ns=self._state.total_queue_put_wait_ns,
+                policy_sync_count=self._state.policy_sync_count,
                 worker_profiler_stats=worker_profiler_stats,
                 worker_profiler_last_sync=self._state.worker_profiler_last_sync,
             )
@@ -573,6 +583,8 @@ class InjectorWorkerBase:
             self.policy.to("cpu")
             self.policy.set_training_mode(False)
             self._policy_version = version
+            with self._state_lock:
+                self._state.policy_sync_count += 1
             self._logger.debug(
                 f"policy loaded from queue: version={self._policy_version}"
             )

@@ -104,9 +104,8 @@ def build_model(mode: str, env_id: str, seed: int, workers: int, device: str):
     Agent = get_fast_injected_agent(SAC) if is_full_speed else get_injected_agent(SAC)
     speed_kwargs = (
         dict(
-            full_speed_collect_steps=32,
-            full_speed_train_steps=32,
-            full_speed_max_train_bursts=8,
+            full_speed_train_steps=1,
+            full_speed_target_freshness=1.0,
         )
         if is_full_speed
         else {}
