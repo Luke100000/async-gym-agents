@@ -230,7 +230,7 @@ class AsyncAgentInjector:
         self._state.queue_put_attempts = 0
         self._state.full_queue_put_attempts = 0
         self._state.total_queue_put_wait_ns = 0
-        # Worker policy-accepts, read and reset by the trainer.
+        # Worker sync attempts (finished episodes), read and reset by the trainer.
         self._state.policy_sync_count = 0
         self._state.worker_profiler_stats = self._manager.dict() if self.use_mp else {}
         self._state.worker_profiler_last_sync = None
@@ -330,7 +330,7 @@ class AsyncAgentInjector:
             update_queue.put((version, weights))
 
     def take_policy_sync_count(self) -> int:
-        """Worker policy-accepts since the previous call, resetting the counter."""
+        """Worker sync attempts (finished episodes) since the previous call, resetting the counter."""
         with self._state_lock:
             count = self._state.policy_sync_count
             self._state.policy_sync_count = 0
@@ -554,6 +554,12 @@ class InjectorWorkerBase:
             # noinspection PyArgumentList
             self.policy = self.policy_class(**self.policy_data)
 
+        # Count every sync attempt (one per finished episode); the blocking
+        # bootstrap call at worker start is not a finished episode.
+        if not block:
+            with self._state_lock:
+                self._state.policy_sync_count += 1
+
         latest_update = None
         while not self._stop.is_set():
             try:
@@ -583,8 +589,6 @@ class InjectorWorkerBase:
             self.policy.to("cpu")
             self.policy.set_training_mode(False)
             self._policy_version = version
-            with self._state_lock:
-                self._state.policy_sync_count += 1
             self._logger.debug(
                 f"policy loaded from queue: version={self._policy_version}"
             )

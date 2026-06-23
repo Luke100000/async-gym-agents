@@ -1,3 +1,4 @@
+from math import ceil
 from typing import Optional
 
 from stable_baselines3.common.callbacks import BaseCallback
@@ -9,29 +10,31 @@ from async_gym_agents.agents.off_policy_injector import OffPolicyAlgorithmInject
 class FastOffPolicyAlgorithmInjector(OffPolicyAlgorithmInjector):
     """
     Off-policy trainer that drains all available worker transitions, trains, and
-    pushes the new policy each round. Batch size is the only runtime-tuned knob,
-    adjusted to hit a target worker-sync freshness.
+    pushes the new policy each round. Training amount is tuned at runtime toward a
+    target worker-sync freshness, realized as more gradient steps over capped-size
+    minibatches rather than one large batch (so it scales without OOM).
     """
 
     def __init__(
         self,
         *args,
-        full_speed_train_steps: int = 1,
         full_speed_target_freshness: float = 1.0,
+        full_speed_smoothing: float = 0.3,
         full_speed_min_batch_size: Optional[int] = None,
         full_speed_max_batch_size: Optional[int] = None,
         full_speed_min_replay_size: Optional[int] = None,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
-        self.full_speed_train_steps = max(1, full_speed_train_steps)
-        # Target worker-syncs per update, per worker.
+
         self.full_speed_target_freshness = max(0.0, full_speed_target_freshness)
+        self.full_speed_smoothing = min(1.0, max(0.0, full_speed_smoothing))
         self.full_speed_min_batch_size = full_speed_min_batch_size
         self.full_speed_max_batch_size = full_speed_max_batch_size
         self.full_speed_min_replay_size = full_speed_min_replay_size
 
-        self._full_speed_batch = float(self.batch_size)
+        self._full_speed_target_batch = float(self.batch_size)
+        self._synced_ema: Optional[float] = None
 
     def _drain_available_transitions(
         self,
@@ -40,10 +43,7 @@ class FastOffPolicyAlgorithmInjector(OffPolicyAlgorithmInjector):
         total_timesteps: int,
         block_for_first: bool,
     ) -> RolloutReturn:
-        """
-        Drain all available worker transitions into the replay buffer, blocking
-        for the first only when ``block_for_first`` is set.
-        """
+        """Drain all available transitions; block for the first if block_for_first."""
         assert self.replay_buffer is not None
 
         num_collected_steps, num_collected_episodes = 0, 0
@@ -84,11 +84,17 @@ class FastOffPolicyAlgorithmInjector(OffPolicyAlgorithmInjector):
     def _adjust_batch_size(
         self, synced: int, target: float, min_batch: int, max_batch: int
     ) -> None:
-        # Grow when workers under-consumed (synced < target), shrink otherwise.
-        factor = (target + 1.0) / (synced + 1.0)
-        self._full_speed_batch = min(
+        # EMA-smooth synced, then grow if under target, shrink if over.
+        if self._synced_ema is None:
+            self._synced_ema = float(synced)
+        else:
+            a = self.full_speed_smoothing
+            self._synced_ema = a * synced + (1.0 - a) * self._synced_ema
+
+        factor = (target + 1.0) / (self._synced_ema + 1.0)
+        self._full_speed_target_batch = min(
             float(max_batch),
-            max(float(min_batch), self._full_speed_batch * factor),
+            max(float(min_batch), self._full_speed_target_batch * factor),
         )
 
     def learn(
@@ -130,7 +136,8 @@ class FastOffPolicyAlgorithmInjector(OffPolicyAlgorithmInjector):
             self.learning_starts,
         )
 
-        self._full_speed_batch = float(self.batch_size)
+        self._full_speed_target_batch = float(self.batch_size)
+        self._synced_ema = None
         min_batch = self.full_speed_min_batch_size or max(1, self.batch_size // 16)
         max_batch = self.full_speed_max_batch_size or self.batch_size * 16
         target = self.full_speed_target_freshness * len(self._update_queues)
@@ -149,16 +156,28 @@ class FastOffPolicyAlgorithmInjector(OffPolicyAlgorithmInjector):
                 break
 
             if self._can_full_speed_train(min_replay_size):
-                batch_size = int(round(self._full_speed_batch))
-                self.train(
-                    batch_size=batch_size,
-                    gradient_steps=self.full_speed_train_steps,
+                # -1 follows SB3: one grad step per transition drained this round.
+                base_steps = (
+                    self.gradient_steps
+                    if self.gradient_steps > 0
+                    else rollout.episode_timesteps
                 )
+                if base_steps > 0:
+                    # Realize the target batch as more steps over capped minibatches.
+                    splits = max(
+                        1, ceil(self._full_speed_target_batch / self.batch_size)
+                    )
+                    self.train(
+                        batch_size=max(
+                            1, round(self._full_speed_target_batch / splits)
+                        ),
+                        gradient_steps=base_steps * splits,
+                    )
 
-                # Adapt to the previous policy's consumption, then push the new one.
-                synced = self.take_policy_sync_count()
-                self._adjust_batch_size(synced, target, min_batch, max_batch)
-                self.pre_collect_preparation(self.policy)
+                    # Adapt to the previous policy's consumption, then push it.
+                    synced = self.take_policy_sync_count()
+                    self._adjust_batch_size(synced, target, min_batch, max_batch)
+                    self.pre_collect_preparation(self.policy)
 
         if continue_training:
             callback.on_rollout_end()

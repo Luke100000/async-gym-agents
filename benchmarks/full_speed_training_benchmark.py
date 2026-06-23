@@ -104,7 +104,6 @@ def build_model(mode: str, env_id: str, seed: int, workers: int, device: str):
     Agent = get_fast_injected_agent(SAC) if is_full_speed else get_injected_agent(SAC)
     speed_kwargs = (
         dict(
-            full_speed_train_steps=1,
             full_speed_target_freshness=1.0,
         )
         if is_full_speed
@@ -314,7 +313,7 @@ def main() -> None:
     parser.add_argument("--env-id", default="LunarLander-v3")
     parser.add_argument("--seeds", type=int, default=1)
     parser.add_argument("--total-timesteps", type=int, default=100_000)
-    parser.add_argument("--workers", type=int, default=1)
+    parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--no-progress-bar", action="store_true")
     parser.add_argument("--device", default="cuda")
     parser.add_argument(
@@ -325,7 +324,7 @@ def main() -> None:
     rows: list[EpisodeRow] = []
     runs: list[RunRow] = []
     for seed in range(args.seeds):
-        for mode in ("baseline_async", "full_speed"):
+        for mode in ("full_speed", "baseline_async"):
             print(f"running mode={mode} seed={seed}")
             episode_rows, run_row = run_one(
                 mode,
