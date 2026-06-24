@@ -10,14 +10,17 @@ import matplotlib
 import numpy as np
 import pandas as pd
 import torch
-from stable_baselines3 import SAC
+from stable_baselines3 import A2C, DDPG, PPO, SAC, TD3
 from stable_baselines3.common.callbacks import BaseCallback
+from stable_baselines3.common.on_policy_algorithm import OnPolicyAlgorithm
 
 from async_gym_agents.agents.async_agent import (
     get_fast_injected_agent,
     get_injected_agent,
 )
 from async_gym_agents.envs.multi_env import IndexableMultiEnv
+
+AGENTS = {"PPO": PPO, "A2C": A2C, "SAC": SAC, "TD3": TD3, "DDPG": DDPG}
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
@@ -96,19 +99,25 @@ def make_env(env_id: str, seed: int):
     return env
 
 
-def build_model(mode: str, env_id: str, seed: int, workers: int, device: str):
+def build_model(
+    mode: str, env_id: str, seed: int, workers: int, device: str, agent_cls
+):
     torch.manual_seed(seed)
     env_fns = [partial(make_env, env_id, seed * 1000 + i) for i in range(workers)]
     env = IndexableMultiEnv(env_fns, env_fns[0]())
     is_full_speed = mode == "full_speed"
-    Agent = get_fast_injected_agent(SAC) if is_full_speed else get_injected_agent(SAC)
-    speed_kwargs = (
-        dict(
-            full_speed_target_freshness=1.0,
-        )
+    Agent = (
+        get_fast_injected_agent(agent_cls)
         if is_full_speed
-        else {}
+        else get_injected_agent(agent_cls)
     )
+    speed_kwargs = {}
+    if is_full_speed:
+        speed_kwargs = (
+            dict(full_speed_min_rollout=16)
+            if issubclass(agent_cls, OnPolicyAlgorithm)
+            else dict(full_speed_target_freshness=1.0)
+        )
 
     return Agent(
         "MlpPolicy",
@@ -130,9 +139,10 @@ def run_one(
     total_timesteps: int,
     progress_bar: bool,
     device: str,
+    agent_cls,
 ) -> tuple[list[EpisodeRow], RunRow]:
     callback = EpisodeMetricsCallback(mode, seed)
-    model = build_model(mode, env_id, seed, workers, device)
+    model = build_model(mode, env_id, seed, workers, device, agent_cls)
     try:
         model.learn(
             total_timesteps=total_timesteps,
@@ -311,21 +321,23 @@ def write_summary(rows_path: Path, runs_path: Path, summary_path: Path) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--env-id", default="LunarLander-v3")
+    parser.add_argument("--agent", default="PPO", choices=sorted(AGENTS))
     parser.add_argument("--seeds", type=int, default=1)
     parser.add_argument("--total-timesteps", type=int, default=100_000)
-    parser.add_argument("--workers", type=int, default=4)
+    parser.add_argument("--workers", type=int, default=1)
     parser.add_argument("--no-progress-bar", action="store_true")
     parser.add_argument("--device", default="cuda")
     parser.add_argument(
         "--out-dir", type=Path, default=Path("dist/full_speed_benchmark")
     )
     args = parser.parse_args()
+    agent_cls = AGENTS[args.agent]
 
     rows: list[EpisodeRow] = []
     runs: list[RunRow] = []
     for seed in range(args.seeds):
         for mode in ("full_speed", "baseline_async"):
-            print(f"running mode={mode} seed={seed}")
+            print(f"running agent={args.agent} mode={mode} seed={seed}")
             episode_rows, run_row = run_one(
                 mode,
                 args.env_id,
@@ -334,6 +346,7 @@ def main() -> None:
                 args.total_timesteps,
                 not args.no_progress_bar,
                 args.device,
+                agent_cls,
             )
             rows.extend(episode_rows)
             runs.append(run_row)

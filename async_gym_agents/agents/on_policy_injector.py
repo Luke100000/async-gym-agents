@@ -56,6 +56,61 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
         )
         super(AsyncAgentInjector, self).__init__(*args, **kwargs)
 
+    def _process_worker_transition(
+        self,
+        rollout_buffer: RolloutBuffer,
+        callback: BaseCallback,
+        transition: "Transition",
+    ) -> tuple[bool, VecEnvObs, np.ndarray]:
+        with self._profiler_main.track("processing"):
+            # Make locals available for callbacks
+            new_obs = transition.new_obs
+            self._last_obs = transition.last_obs
+            actions = transition.actions
+            rewards = transition.rewards
+            self._last_episode_starts = transition.last_dones
+            values = torch.from_numpy(transition.values)
+            log_probs = torch.from_numpy(transition.log_probs)
+            dones = transition.dones
+            infos = transition.infos
+            reset_infos = transition.reset_infos
+
+            self.num_timesteps += 1
+
+            # Give access to local variables
+            callback.update_locals(locals())
+            if not callback.on_step():
+                return False, new_obs, dones
+
+            self._update_info_buffer(infos, dones)
+
+            # Handle timeout by bootstrapping with value function
+            # see GitHub issue #633
+            for idx, done in enumerate(dones):
+                if (
+                    done
+                    and infos[idx].get("terminal_observation") is not None
+                    and infos[idx].get("TimeLimit.truncated", False)
+                ):
+                    terminal_obs = self.policy.obs_to_tensor(
+                        infos[idx]["terminal_observation"]
+                    )[0]
+                    with torch.inference_mode():
+                        terminal_value = self.policy.predict_values(terminal_obs)[0]
+                    rewards[idx] += self.gamma * terminal_value
+
+            assert rollout_buffer.n_envs == 1
+            rollout_buffer.add(
+                self._last_obs,
+                actions,
+                rewards,
+                self._last_episode_starts,
+                values,
+                log_probs,
+            )
+
+        return True, new_obs, dones
+
     # must be updated from SB3 (!)
     def collect_rollouts(
         self,
@@ -107,55 +162,12 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
 
             # Fetch transitions from workers
             transition: Transition = self.fetch_transition()
-
-            with self._profiler_main.track("processing"):
-                # Make locals available for callbacks
-                new_obs = transition.new_obs
-                self._last_obs = transition.last_obs
-                actions = transition.actions
-                rewards = transition.rewards
-                self._last_episode_starts = transition.last_dones
-                values = torch.from_numpy(transition.values)
-                log_probs = torch.from_numpy(transition.log_probs)
-                dones = transition.dones
-                infos = transition.infos
-                reset_infos = transition.reset_infos
-
-                self.num_timesteps += 1
-
-                # Give access to local variables
-                callback.update_locals(locals())
-                if not callback.on_step():
-                    return False
-
-                self._update_info_buffer(infos, dones)
-                n_steps += 1
-
-                # Handle timeout by bootstrapping with value function
-                # see GitHub issue #633
-                for idx, done in enumerate(dones):
-                    if (
-                        done
-                        and infos[idx].get("terminal_observation") is not None
-                        and infos[idx].get("TimeLimit.truncated", False)
-                    ):
-                        terminal_obs = self.policy.obs_to_tensor(
-                            infos[idx]["terminal_observation"]
-                        )[0]
-                        with torch.inference_mode():
-                            terminal_value = self.policy.predict_values(terminal_obs)[0]
-                        rewards[idx] += self.gamma * terminal_value
-
-                assert rollout_buffer.n_envs == 1
-
-                rollout_buffer.add(
-                    self._last_obs,
-                    actions,
-                    rewards,
-                    self._last_episode_starts,
-                    values,
-                    log_probs,
-                )
+            continue_training, new_obs, dones = self._process_worker_transition(
+                rollout_buffer, callback, transition
+            )
+            if not continue_training:
+                return False
+            n_steps += 1
 
         with self._profiler_main.track("processing"):
             with torch.inference_mode():
