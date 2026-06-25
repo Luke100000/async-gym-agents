@@ -2,7 +2,7 @@ from typing import Optional
 
 import torch
 from stable_baselines3.common.callbacks import BaseCallback
-from stable_baselines3.common.utils import obs_as_tensor, safe_mean
+from stable_baselines3.common.utils import obs_as_tensor
 
 from async_gym_agents.agents.on_policy_injector import OnPolicyAlgorithmInjector
 
@@ -28,7 +28,7 @@ class FastOnPolicyAlgorithmInjector(OnPolicyAlgorithmInjector):
         # EMA weight on the newest production count (1.0 = no smoothing).
         self.full_speed_smoothing = min(1.0, max(0.0, full_speed_smoothing))
         self.full_speed_min_epochs = max(1, full_speed_min_epochs)
-        self.full_speed_max_epochs = full_speed_max_epochs or self.n_epochs * 8
+        self.full_speed_max_epochs = full_speed_max_epochs or self.n_epochs * 100
 
         self._fs_epochs = float(self.n_epochs)
         self._produced_ema: Optional[float] = None
@@ -139,22 +139,10 @@ class FastOnPolicyAlgorithmInjector(OnPolicyAlgorithmInjector):
             self._update_current_progress_remaining(self.num_timesteps, total_timesteps)
 
             if log_interval is not None and iteration % log_interval == 0:
-                assert self.ep_info_buffer is not None
-                self.logger.record("time/iterations", iteration)
-                if len(self.ep_info_buffer) > 0 and len(self.ep_info_buffer[0]) > 0:
-                    self.logger.record(
-                        "rollout/ep_rew_mean",
-                        safe_mean([ep["r"] for ep in self.ep_info_buffer]),
-                    )
-                    self.logger.record(
-                        "rollout/ep_len_mean",
-                        safe_mean([ep["l"] for ep in self.ep_info_buffer]),
-                    )
                 self.logger.record("rollout/collected", collected)
                 self.logger.record("rollout/produced", produced)
                 self.logger.record("train/n_epochs", self.n_epochs)
-                self.logger.record("time/total_timesteps", self.num_timesteps)
-                self.logger.dump(step=self.num_timesteps)
+                self._dump_logs(iteration)
 
             self.train()
 
