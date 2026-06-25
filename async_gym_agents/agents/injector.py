@@ -232,6 +232,8 @@ class AsyncAgentInjector:
         self._state.total_queue_put_wait_ns = 0
         # Worker sync attempts (finished episodes), read and reset by the trainer.
         self._state.policy_sync_count = 0
+        # Transitions produced by workers, read and reset by the trainer.
+        self._state.produced_samples = 0
         self._state.worker_profiler_stats = self._manager.dict() if self.use_mp else {}
         self._state.worker_profiler_last_sync = None
 
@@ -336,6 +338,13 @@ class AsyncAgentInjector:
             self._state.policy_sync_count = 0
             return count
 
+    def take_produced_samples(self) -> int:
+        """Transitions produced by workers since the previous call, resetting the counter."""
+        with self._state_lock:
+            count = self._state.produced_samples
+            self._state.produced_samples = 0
+            return count
+
     def _fetch_transitions(self, block: bool = True) -> List[Transition]:
         with self._profiler_main.track("transport"):
             return self._episode_queue.get(block=block)
@@ -415,6 +424,7 @@ class AsyncAgentInjector:
                 full_queue_put_attempts=self._state.full_queue_put_attempts,
                 total_queue_put_wait_ns=self._state.total_queue_put_wait_ns,
                 policy_sync_count=self._state.policy_sync_count,
+                produced_samples=self._state.produced_samples,
                 worker_profiler_stats=worker_profiler_stats,
                 worker_profiler_last_sync=self._state.worker_profiler_last_sync,
             )
@@ -667,6 +677,7 @@ class InjectorWorkerBase:
             for episode in self.generate():
                 with self._state_lock:
                     self._state.total_episodes += 1
+                    self._state.produced_samples += len(episode)
 
                 if (
                     episode[-1].infos[0].get("TimeLimit.truncated", False)

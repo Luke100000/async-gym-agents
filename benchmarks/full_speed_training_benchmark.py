@@ -123,7 +123,7 @@ def build_model(
         "MlpPolicy",
         env,
         seed=seed,
-        use_mp=False,
+        use_mp=True,
         max_episodes_in_buffer=workers * 2,
         verbose=0,
         device=device,
@@ -323,8 +323,8 @@ def main() -> None:
     parser.add_argument("--env-id", default="LunarLander-v3")
     parser.add_argument("--agent", default="PPO", choices=sorted(AGENTS))
     parser.add_argument("--seeds", type=int, default=1)
-    parser.add_argument("--total-timesteps", type=int, default=100_000)
-    parser.add_argument("--workers", type=int, default=1)
+    parser.add_argument("--total-timesteps", type=int, default=500_000)
+    parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--no-progress-bar", action="store_true")
     parser.add_argument("--device", default="cuda")
     parser.add_argument(
