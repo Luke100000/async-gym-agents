@@ -17,6 +17,15 @@ from typing import Any, Dict, Generator, List, Optional, Type, TypeAlias, cast
 import torch
 from stable_baselines3.common.base_class import BasePolicy
 
+from async_gym_agents.constants import (
+    NANOSECONDS_PER_SECOND,
+    PROFILE_PHASE_POLICY_BROADCAST,
+    PROFILE_PHASE_POLICY_LOADING,
+    PROFILE_PHASE_POLICY_SERIALIZATION,
+    PROFILE_PHASE_TRANSPORT,
+    PROFILE_PHASE_WAITING,
+    QUEUE_PUT_RETRY_TIMEOUT_SECONDS,
+)
 from async_gym_agents.envs.multi_env import IndexableMultiEnv
 from async_gym_agents.profiler import (
     ProfileStats,
@@ -188,16 +197,16 @@ class AsyncAgentInjector:
     def pre_collect_preparation(self, policy: BasePolicy):
         self._init_collect_state()
 
-        with self._profiler_main.track("syncing"):
-            # weights -> bytes
+        with self._profiler_main.track(PROFILE_PHASE_POLICY_SERIALIZATION):
             weights_buf = io.BytesIO()
             torch.save(policy.state_dict(), weights_buf)
             weights_bytes = weights_buf.getvalue()
 
-            self._version += 1
+        self._version += 1
+        with self._profiler_main.track(PROFILE_PHASE_POLICY_BROADCAST):
             self._push_policy_update(self._version, weights_bytes)
 
-            self._logger.debug(f"update policy to the version: {self._version}")
+        self._logger.debug(f"update policy to the version: {self._version}")
 
         with self._profiler_main.track("worker_bootstrap"):
             self._init_collect_processes(policy)
@@ -327,8 +336,9 @@ class AsyncAgentInjector:
             self._clear_queue(update_queue)
             update_queue.put((version, weights))
 
-    def _fetch_transitions(self) -> List[Transition]:
-        with self._profiler_main.track("transport"):
+    def _fetch_transitions(self, buffer_was_empty: bool) -> List[Transition]:
+        phase = PROFILE_PHASE_WAITING if buffer_was_empty else PROFILE_PHASE_TRANSPORT
+        with self._profiler_main.track(phase):
             return self._episode_queue.get()
 
     def fetch_transition(self) -> Transition:
@@ -338,10 +348,11 @@ class AsyncAgentInjector:
         """
         while len(self._transitions) == 0:
             self._buffer_utilization += self._episode_queue.qsize()
-            self._buffer_emptiness += 1 if self._episode_queue.empty() else 0
+            buffer_was_empty = self._episode_queue.empty()
+            self._buffer_emptiness += 1 if buffer_was_empty else 0
             self._buffer_stat_count += 1
 
-            self._transitions = self._fetch_transitions()
+            self._transitions = self._fetch_transitions(buffer_was_empty)
 
         return self._transitions.pop(0)
 
@@ -416,7 +427,7 @@ class AsyncAgentInjector:
             buffer_utilization=self.buffer_utilization,
             buffer_emptiness=self.buffer_emptyness,
             buffer_full_push_fraction=self.buffer_full_push_fraction,
-            buffer_avg_push_time=self.buffer_avg_push_time,
+            buffer_avg_push_wait_time=self.buffer_avg_push_wait_time,
             discarded_episodes_fraction=self.discarded_episodes_fraction,
         )
 
@@ -473,6 +484,13 @@ class AsyncAgentInjector:
     @property
     def buffer_avg_push_time(self) -> float:
         """
+        Backwards-compatible alias for the average enqueue wait time.
+        """
+        return self.buffer_avg_push_wait_time
+
+    @property
+    def buffer_avg_push_wait_time(self) -> float:
+        """
         The average time spent waiting to enqueue an episode, in seconds.
         """
         return (
@@ -480,7 +498,7 @@ class AsyncAgentInjector:
             if self._state is None or self._state.queue_put_attempts == 0
             else self._state.total_queue_put_wait_ns
             / self._state.queue_put_attempts
-            / 1_000_000_000
+            / NANOSECONDS_PER_SECOND
         )
 
 
@@ -546,7 +564,7 @@ class InjectorWorkerBase:
         if self._policy_version == version:
             return
 
-        with self._profiler.track("syncing"):
+        with self._profiler.track(PROFILE_PHASE_POLICY_LOADING):
             weights = torch.load(
                 io.BytesIO(weights_bytes),
                 map_location="cpu",
@@ -561,16 +579,20 @@ class InjectorWorkerBase:
             )
 
     def _put_episode_with_timeout(self, episode):
-        start_ns = time.perf_counter_ns()
-        deadline_ns = start_ns + int(self._queue_put_timeout * 1_000_000_000)
+        deadline_ns = time.perf_counter_ns() + int(
+            self._queue_put_timeout * NANOSECONDS_PER_SECOND
+        )
         queue_was_full = self._episode_queue.full()
+        waiting_ns = 0
+        transport_ns = 0
 
-        def record_push_wait() -> None:
-            with self._state_lock:
-                self._state.total_queue_put_wait_ns += max(
-                    0,
-                    min(time.perf_counter_ns(), deadline_ns) - start_ns,
-                )
+        def record_queue_profile() -> None:
+            if waiting_ns > 0:
+                with self._state_lock:
+                    self._state.total_queue_put_wait_ns += waiting_ns
+                self._profiler.record(PROFILE_PHASE_WAITING, waiting_ns)
+            if transport_ns > 0:
+                self._profiler.record(PROFILE_PHASE_TRANSPORT, transport_ns)
 
         with self._state_lock:
             self._state.queue_put_attempts += 1
@@ -579,36 +601,46 @@ class InjectorWorkerBase:
 
         while time.perf_counter_ns() < deadline_ns:
             if self._stop.is_set():
-                record_push_wait()
-                self._profiler.record("transport", time.perf_counter_ns() - start_ns)
+                record_queue_profile()
                 return
 
             try:
                 remaining_timeout = min(
-                    0.1,
-                    max(0.0, (deadline_ns - time.perf_counter_ns()) / 1_000_000_000),
+                    QUEUE_PUT_RETRY_TIMEOUT_SECONDS,
+                    max(
+                        0.0,
+                        (deadline_ns - time.perf_counter_ns()) / NANOSECONDS_PER_SECOND,
+                    ),
                 )
+                put_start_ns = time.perf_counter_ns()
+                queue_is_full = self._episode_queue.full()
                 self._episode_queue.put(
                     episode,
                     block=True,
                     timeout=remaining_timeout,
                 )
-                record_push_wait()
-                self._profiler.record("transport", time.perf_counter_ns() - start_ns)
+                elapsed_ns = time.perf_counter_ns() - put_start_ns
+                if queue_is_full:
+                    waiting_ns += elapsed_ns
+                else:
+                    transport_ns += elapsed_ns
+                record_queue_profile()
                 return
             except queue.Full:
-                pass
+                waiting_ns += time.perf_counter_ns() - put_start_ns
 
+        replacement_start_ns = time.perf_counter_ns()
         try:
             self._episode_queue.get(block=False)
             self._episode_queue.put(episode, block=False)
         except (queue.Full, queue.Empty):
             pass
+        finally:
+            transport_ns += time.perf_counter_ns() - replacement_start_ns
 
         with self._state_lock:
             self._state.discarded_episodes += 1
-        record_push_wait()
-        self._profiler.record("transport", time.perf_counter_ns() - start_ns)
+        record_queue_profile()
         self._logger.info("Dropped episode due to buffer full")
 
     def _flush_profiler(self, force: bool = False):
