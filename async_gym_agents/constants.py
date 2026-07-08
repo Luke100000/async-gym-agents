@@ -11,3 +11,5 @@ PROFILE_PHASE_WAITING = "waiting"
 
 BUFFER_AVG_PUSH_TIME_SECONDS_KEY = "avg_push_time_seconds"
 BUFFER_AVG_PUSH_WAIT_SECONDS_KEY = "avg_push_wait_seconds"
+BUFFER_AVG_POLICY_LAG_KEY = "avg_policy_lag"
+BUFFER_MAX_POLICY_LAG_KEY = "max_policy_lag"

@@ -12,7 +12,7 @@ from multiprocessing.managers import Namespace
 from multiprocessing.queues import Queue as MPQueue
 from multiprocessing.synchronize import Event as MPEvent
 from types import SimpleNamespace
-from typing import Any, Dict, Generator, List, Optional, Type, TypeAlias, cast
+from typing import Any, Dict, Generator, List, Optional, Tuple, Type, TypeAlias, cast
 
 import torch
 from stable_baselines3.common.base_class import BasePolicy
@@ -42,6 +42,7 @@ GenericEvent: TypeAlias = MPEvent | threading.Event
 GenericQueue: TypeAlias = MPQueue | queue.Queue
 GenericUpdateQueue: TypeAlias = MPQueue | queue.Queue
 GenericWorker: TypeAlias = MPProcess | threading.Thread
+EpisodePayload: TypeAlias = Tuple[Optional[int], List[Transition]]
 
 
 @contextmanager
@@ -119,6 +120,9 @@ class AsyncAgentInjector:
         self._buffer_utilization = 0.0
         self._buffer_emptiness = 0.0
         self._buffer_stat_count = 0
+        self._policy_lag_total = 0
+        self._policy_lag_count = 0
+        self._policy_lag_max = 0
 
         self._profiler_main = RuntimeProfiler()
         self._logger = logging.getLogger("async_gym_agents")
@@ -321,6 +325,9 @@ class AsyncAgentInjector:
             "_workers",
             "_profiler_main",
             "_logger",
+            "_policy_lag_total",
+            "_policy_lag_count",
+            "_policy_lag_max",
         ]
 
     @staticmethod
@@ -339,7 +346,31 @@ class AsyncAgentInjector:
     def _fetch_transitions(self, buffer_was_empty: bool) -> List[Transition]:
         phase = PROFILE_PHASE_WAITING if buffer_was_empty else PROFILE_PHASE_TRANSPORT
         with self._profiler_main.track(phase):
-            return self._episode_queue.get()
+            payload = self._episode_queue.get()
+
+        policy_version, transitions = self._decode_episode_payload(payload)
+        self._record_policy_lag(policy_version, len(transitions))
+        return transitions
+
+    @staticmethod
+    def _decode_episode_payload(payload) -> EpisodePayload:
+        if isinstance(payload, tuple) and len(payload) == 2:
+            return payload
+
+        return None, payload
+
+    def _record_policy_lag(
+        self,
+        policy_version: Optional[int],
+        transition_count: int,
+    ) -> None:
+        if policy_version is None or transition_count == 0:
+            return
+
+        lag = max(0, self._version - policy_version)
+        self._policy_lag_total += lag * transition_count
+        self._policy_lag_count += transition_count
+        self._policy_lag_max = max(self._policy_lag_max, lag)
 
     def fetch_transition(self) -> Transition:
         """
@@ -429,6 +460,8 @@ class AsyncAgentInjector:
             buffer_full_push_fraction=self.buffer_full_push_fraction,
             buffer_avg_push_wait_time=self.buffer_avg_push_wait_time,
             discarded_episodes_fraction=self.discarded_episodes_fraction,
+            avg_policy_lag=self.avg_policy_lag,
+            max_policy_lag=self.max_policy_lag,
         )
 
     def _get_worker_profiler_stats(self) -> ProfileStats:
@@ -500,6 +533,24 @@ class AsyncAgentInjector:
             / self._state.queue_put_attempts
             / NANOSECONDS_PER_SECOND
         )
+
+    @property
+    def avg_policy_lag(self) -> float:
+        """
+        The average number of policy updates between production and consumption.
+        """
+        return (
+            0
+            if self._policy_lag_count == 0
+            else self._policy_lag_total / self._policy_lag_count
+        )
+
+    @property
+    def max_policy_lag(self) -> int:
+        """
+        The maximum number of policy updates between production and consumption.
+        """
+        return self._policy_lag_max
 
 
 class InjectorWorkerBase:
@@ -579,6 +630,7 @@ class InjectorWorkerBase:
             )
 
     def _put_episode_with_timeout(self, episode):
+        payload = (self._policy_version, episode)
         deadline_ns = time.perf_counter_ns() + int(
             self._queue_put_timeout * NANOSECONDS_PER_SECOND
         )
@@ -615,7 +667,7 @@ class InjectorWorkerBase:
                 put_start_ns = time.perf_counter_ns()
                 queue_is_full = self._episode_queue.full()
                 self._episode_queue.put(
-                    episode,
+                    payload,
                     block=True,
                     timeout=remaining_timeout,
                 )
@@ -632,7 +684,7 @@ class InjectorWorkerBase:
         replacement_start_ns = time.perf_counter_ns()
         try:
             self._episode_queue.get(block=False)
-            self._episode_queue.put(episode, block=False)
+            self._episode_queue.put(payload, block=False)
         except (queue.Full, queue.Empty):
             pass
         finally:
