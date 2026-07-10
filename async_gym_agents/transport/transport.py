@@ -107,12 +107,22 @@ class Transport:
         fields = {name: array[:offset] for name, array in self._train_arrays.items()}
         return AssembledRollout(fields=fields, n_rows=offset, segments=segments)
 
-    def stats(self) -> TransportStats:
+    def collect_stats(self) -> TransportStats:
         return TransportStats(
             produced=[ring.produced_count for ring in self.rings],
             consumed=[ring.consumed_count for ring in self.rings],
             dropped=[ring.dropped_count for ring in self.rings],
         )
+
+    def calculate_ring_allocated_bytes(self) -> int:
+        """Return bytes reserved by all worker ring arrays."""
+        return sum(
+            array.nbytes for ring in self.rings for array in ring.arrays.values()
+        )
+
+    def calculate_train_allocated_bytes(self) -> int:
+        """Return bytes reserved by the assembled training arrays."""
+        return sum(array.nbytes for array in self._train_arrays.values())
 
     def shutdown(self) -> None:
         """Release every shared segment; idempotent, owner unlinks."""

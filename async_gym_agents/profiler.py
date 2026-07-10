@@ -10,6 +10,17 @@ from async_gym_agents.constants import (
     MILLISECONDS_PER_SECOND,
     NANOSECONDS_PER_SECOND,
 )
+from async_gym_agents.transport.constants import (
+    TRANSPORT_CONSUMED_ROWS_KEY,
+    TRANSPORT_CONSUMER_BUFFERED_ROWS_KEY,
+    TRANSPORT_CONSUMER_MAX_BUFFERED_ROWS_KEY,
+    TRANSPORT_DROPPED_ROWS_KEY,
+    TRANSPORT_PENDING_ROWS_KEY,
+    TRANSPORT_PRODUCED_ROWS_KEY,
+    TRANSPORT_RING_ALLOCATED_BYTES_KEY,
+    TRANSPORT_RING_UTILIZATION_KEY,
+    TRANSPORT_TRAIN_ALLOCATED_BYTES_KEY,
+)
 
 ProfileStats = Dict[str, Dict[str, int]]
 
@@ -76,6 +87,7 @@ def build_profiler_report(
     discarded_episodes_fraction: float,
     avg_policy_lag: float,
     max_policy_lag: int,
+    transport_stats: Optional[Mapping[str, float | int]] = None,
 ) -> Dict[str, object]:
     return {
         "main": _summarize_stats(main_stats),
@@ -96,6 +108,7 @@ def build_profiler_report(
             if worker_last_sync_time is None
             else max(0.0, time() - worker_last_sync_time),
         },
+        "transport": dict(transport_stats or {}),
     }
 
 
@@ -119,6 +132,21 @@ def render_profiler_report(report: Mapping[str, Any]) -> str:
         f"policy_lag_avg={buffer.get(BUFFER_AVG_POLICY_LAG_KEY, 0.0):.2f}, "
         f"policy_lag_max={int(buffer.get(BUFFER_MAX_POLICY_LAG_KEY, 0))}"
     )
+
+    transport = report.get("transport", {})
+    if transport:
+        lines.append(
+            "Transport: "
+            f"produced={int(transport.get(TRANSPORT_PRODUCED_ROWS_KEY, 0))}, "
+            f"consumed={int(transport.get(TRANSPORT_CONSUMED_ROWS_KEY, 0))}, "
+            f"pending={int(transport.get(TRANSPORT_PENDING_ROWS_KEY, 0))}, "
+            f"dropped={int(transport.get(TRANSPORT_DROPPED_ROWS_KEY, 0))}, "
+            f"ring_util={transport.get(TRANSPORT_RING_UTILIZATION_KEY, 0.0):.1%}, "
+            f"consumer_pending={int(transport.get(TRANSPORT_CONSUMER_BUFFERED_ROWS_KEY, 0))}, "
+            f"consumer_max={int(transport.get(TRANSPORT_CONSUMER_MAX_BUFFERED_ROWS_KEY, 0))}, "
+            f"ring_bytes={int(transport.get(TRANSPORT_RING_ALLOCATED_BYTES_KEY, 0))}, "
+            f"train_bytes={int(transport.get(TRANSPORT_TRAIN_ALLOCATED_BYTES_KEY, 0))}"
+        )
 
     worker_sync = report.get("worker_sync", {})
     seconds_since_last_sync = worker_sync.get("seconds_since_last_sync")

@@ -1,13 +1,23 @@
+from collections import deque
 from functools import partial
 
 import gymnasium as gym
 import pytest
 from stable_baselines3.common.monitor import Monitor
 
+from async_gym_agents.agents.injector import AsyncAgentInjector
 from async_gym_agents.envs.buggy_lunar_lander import BuggyLunarLander
 from async_gym_agents.envs.multi_env import IndexableMultiEnv
 
 PROCESSES = 8
+
+
+@pytest.fixture
+def injector_with_buffered_transitions():
+    """Provide an injector with two transitions ready for FIFO consumption."""
+    injector = AsyncAgentInjector()
+    injector._transitions = deque(["first transition", "second transition"])
+    return injector
 
 
 @pytest.fixture

@@ -7,6 +7,8 @@ PROFILE_PHASE_POLICY_BROADCAST = "policy_broadcast"
 PROFILE_PHASE_POLICY_LOADING = "policy_loading"
 PROFILE_PHASE_POLICY_SERIALIZATION = "policy_serialization"
 PROFILE_PHASE_TRANSPORT = "transport"
+PROFILE_PHASE_TRANSITION_CONSUMPTION = "transition_consumption"
+PROFILE_PHASE_TRANSITION_RECONSTRUCTION = "transition_reconstruction"
 PROFILE_PHASE_WAITING = "waiting"
 
 BUFFER_AVG_PUSH_TIME_SECONDS_KEY = "avg_push_time_seconds"

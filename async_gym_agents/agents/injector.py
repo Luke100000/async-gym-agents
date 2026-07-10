@@ -6,13 +6,25 @@ import os
 import queue
 import threading
 import time
+from collections import deque
 from contextlib import contextmanager
 from multiprocessing.context import Process as MPProcess
 from multiprocessing.managers import Namespace
 from multiprocessing.queues import Queue as MPQueue
 from multiprocessing.synchronize import Event as MPEvent
 from types import SimpleNamespace
-from typing import Any, Dict, Generator, List, Optional, Tuple, Type, TypeAlias, cast
+from typing import (
+    Any,
+    Deque,
+    Dict,
+    Generator,
+    List,
+    Optional,
+    Tuple,
+    Type,
+    TypeAlias,
+    cast,
+)
 
 import torch
 from stable_baselines3.common.base_class import BasePolicy
@@ -22,6 +34,8 @@ from async_gym_agents.constants import (
     PROFILE_PHASE_POLICY_BROADCAST,
     PROFILE_PHASE_POLICY_LOADING,
     PROFILE_PHASE_POLICY_SERIALIZATION,
+    PROFILE_PHASE_TRANSITION_CONSUMPTION,
+    PROFILE_PHASE_TRANSITION_RECONSTRUCTION,
     PROFILE_PHASE_TRANSPORT,
     PROFILE_PHASE_WAITING,
     QUEUE_PUT_RETRY_TIMEOUT_SECONDS,
@@ -38,6 +52,16 @@ from async_gym_agents.transport.constants import (
     DEFAULT_RING_CAPACITY_MULTIPLIER,
     MIN_RING_CAPACITY,
     RING_FULL_POLL_SECONDS,
+    TRANSPORT_CONSUMED_ROWS_KEY,
+    TRANSPORT_CONSUMER_BUFFERED_ROWS_KEY,
+    TRANSPORT_CONSUMER_MAX_BUFFERED_ROWS_KEY,
+    TRANSPORT_DROPPED_ROWS_KEY,
+    TRANSPORT_PENDING_ROWS_KEY,
+    TRANSPORT_PRODUCED_ROWS_KEY,
+    TRANSPORT_RING_ALLOCATED_BYTES_KEY,
+    TRANSPORT_RING_CAPACITY_ROWS_KEY,
+    TRANSPORT_RING_UTILIZATION_KEY,
+    TRANSPORT_TRAIN_ALLOCATED_BYTES_KEY,
 )
 from async_gym_agents.transport.spsc_ring import resolve_ring
 from async_gym_agents.types import EnvFactory, Transition
@@ -110,7 +134,7 @@ class AsyncAgentInjector:
         self._episode_queue: GenericQueue | None = None
         self._transport: Optional[Transport] = None
         self._update_queues: List[GenericUpdateQueue] = []
-        self._transitions: List[Transition] = []
+        self._transitions: Deque[Transition] = deque()
 
         # shared object (!)
         self._manager: Optional[multiprocessing.Manager] = None
@@ -131,6 +155,9 @@ class AsyncAgentInjector:
         self._policy_lag_total = 0
         self._policy_lag_count = 0
         self._policy_lag_max = 0
+        self._transition_consumption_total_ns = 0
+        self._transition_consumption_count = 0
+        self._consumer_max_buffered_rows = 0
 
         self._profiler_main = RuntimeProfiler()
         self._logger = logging.getLogger("async_gym_agents")
@@ -373,6 +400,9 @@ class AsyncAgentInjector:
             "_policy_lag_total",
             "_policy_lag_count",
             "_policy_lag_max",
+            "_transition_consumption_total_ns",
+            "_transition_consumption_count",
+            "_consumer_max_buffered_rows",
         ]
 
     @staticmethod
@@ -426,7 +456,7 @@ class AsyncAgentInjector:
         if self._transport is not None:
             while len(self._transitions) == 0:
                 self._refill_from_transport()
-            return self._transitions.pop(0)
+            return self._consume_buffered_transition()
 
         while len(self._transitions) == 0:
             self._buffer_utilization += self._episode_queue.qsize()
@@ -434,22 +464,41 @@ class AsyncAgentInjector:
             self._buffer_emptiness += 1 if buffer_was_empty else 0
             self._buffer_stat_count += 1
 
-            self._transitions = self._fetch_transitions(buffer_was_empty)
+            self._transitions.extend(self._fetch_transitions(buffer_was_empty))
 
-        return self._transitions.pop(0)
+        return self._consume_buffered_transition()
+
+    def _consume_buffered_transition(self) -> Transition:
+        start_ns = time.perf_counter_ns()
+        transition = self._transitions.popleft()
+        self._transition_consumption_total_ns += time.perf_counter_ns() - start_ns
+        self._transition_consumption_count += 1
+        return transition
 
     def _refill_from_transport(self) -> None:
         with self._profiler_main.track(PROFILE_PHASE_TRANSPORT):
             rollout = self._transport.assemble_available()
         if rollout.n_rows == 0:
-            time.sleep(0.0005)  # nothing ready yet; avoid a busy spin
+            with self._profiler_main.track(PROFILE_PHASE_WAITING):
+                time.sleep(0.0005)
             return
+
+        reconstruction_start_ns = time.perf_counter_ns()
         fields = rollout.fields
         has_version = "policy_version" in fields
         for index in range(rollout.n_rows):
             self._transitions.append(self._row_to_transition(fields, index))
             if has_version:
                 self._record_policy_lag(int(fields["policy_version"][index]), 1)
+        self._profiler_main.record(
+            PROFILE_PHASE_TRANSITION_RECONSTRUCTION,
+            time.perf_counter_ns() - reconstruction_start_ns,
+            count=rollout.n_rows,
+        )
+        self._consumer_max_buffered_rows = max(
+            self._consumer_max_buffered_rows,
+            len(self._transitions),
+        )
 
     def shutdown(self):
         if self._stop is None:
@@ -515,8 +564,18 @@ class AsyncAgentInjector:
             return super().train(*args, **kwargs)
 
     def get_profiler_report(self) -> Dict[str, Any]:
+        main_stats = self._profiler_main.snapshot()
+        merge_profile_stats(
+            main_stats,
+            {
+                PROFILE_PHASE_TRANSITION_CONSUMPTION: {
+                    "total_ns": self._transition_consumption_total_ns,
+                    "count": self._transition_consumption_count,
+                }
+            },
+        )
         return build_profiler_report(
-            self._profiler_main.snapshot(),
+            main_stats,
             self._get_worker_profiler_stats(),
             worker_last_sync_time=(
                 None
@@ -530,7 +589,35 @@ class AsyncAgentInjector:
             discarded_episodes_fraction=self.discarded_episodes_fraction,
             avg_policy_lag=self.avg_policy_lag,
             max_policy_lag=self.max_policy_lag,
+            transport_stats=self._build_transport_report(),
         )
+
+    def _build_transport_report(self) -> Dict[str, float | int]:
+        if self._transport is None:
+            return {}
+
+        stats = self._transport.collect_stats()
+        produced_rows = sum(stats.produced)
+        consumed_rows = sum(stats.consumed)
+        dropped_rows = sum(stats.dropped)
+        pending_rows = produced_rows - consumed_rows
+        capacity_rows = self._transport.n_workers * self._transport.ring_capacity
+        return {
+            TRANSPORT_PRODUCED_ROWS_KEY: produced_rows,
+            TRANSPORT_CONSUMED_ROWS_KEY: consumed_rows,
+            TRANSPORT_PENDING_ROWS_KEY: pending_rows,
+            TRANSPORT_DROPPED_ROWS_KEY: dropped_rows,
+            TRANSPORT_RING_CAPACITY_ROWS_KEY: capacity_rows,
+            TRANSPORT_RING_UTILIZATION_KEY: pending_rows / capacity_rows,
+            TRANSPORT_CONSUMER_BUFFERED_ROWS_KEY: len(self._transitions),
+            TRANSPORT_CONSUMER_MAX_BUFFERED_ROWS_KEY: self._consumer_max_buffered_rows,
+            TRANSPORT_RING_ALLOCATED_BYTES_KEY: (
+                self._transport.calculate_ring_allocated_bytes()
+            ),
+            TRANSPORT_TRAIN_ALLOCATED_BYTES_KEY: (
+                self._transport.calculate_train_allocated_bytes()
+            ),
+        }
 
     def _get_worker_profiler_stats(self) -> ProfileStats:
         if self._state is None or not hasattr(self._state, "worker_profiler_stats"):
