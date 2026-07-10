@@ -15,6 +15,14 @@ from stable_baselines3.common.vec_env import VecEnv
 from stable_baselines3.common.vec_env.base_vec_env import VecEnvObs
 
 from async_gym_agents.agents.injector import AsyncAgentInjector, InjectorWorkerBase
+from async_gym_agents.transport import (
+    FieldSpec,
+    build_info_fields,
+    build_numeric_layout,
+    read_info,
+    write_info,
+)
+from async_gym_agents.transport.constants import INFO_BLOB_CAPACITY
 from async_gym_agents.utils import copy_obs, single_slice
 
 
@@ -27,6 +35,47 @@ class Transition:
     dones: np.ndarray
     infos: list[Dict]
     reset_infos: list[Dict]
+
+
+def build_off_policy_layout(
+    observation_space: spaces.Space, action_space: spaces.Space
+) -> List[FieldSpec]:
+    return build_numeric_layout(
+        observation_space,
+        action_space,
+        extra_fields=[
+            *build_info_fields(),
+            FieldSpec("policy_version", (), np.dtype(np.int64)),
+        ],
+    )
+
+
+def transition_to_ring_fields(transition: Transition) -> Dict[str, np.ndarray]:
+    """Map a worker Transition (batch dim of 1) to per-slot ring fields."""
+    fields = {
+        "obs": transition.last_obs[0],
+        "next_obs": transition.new_obs[0],
+        "action": transition.buffer_actions[0],
+        "reward": np.float32(transition.rewards[0]),
+        "done": np.float32(transition.dones[0]),
+        "info_len": np.zeros(1, dtype=np.int32),
+        "info": np.zeros(INFO_BLOB_CAPACITY, dtype=np.uint8),
+    }
+    write_info(fields, transition.infos[0])
+    return fields
+
+
+def ring_row_to_transition(fields: Dict[str, np.ndarray], i: int) -> Transition:
+    """Reconstruct a Transition from assembled row ``i`` (restores batch dim)."""
+    return Transition(
+        buffer_actions=fields["action"][i : i + 1],
+        last_obs=fields["obs"][i : i + 1],
+        new_obs=fields["next_obs"][i : i + 1],
+        rewards=fields["reward"][i : i + 1],
+        dones=fields["done"][i : i + 1],
+        infos=[read_info(fields["info_len"][i], fields["info"][i])],
+        reset_infos=[{}],
+    )
 
 
 class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithm):
@@ -248,6 +297,12 @@ class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithm):
     def get_worker_class(self) -> Type[InjectorWorkerBase]:
         return InjectorWorker
 
+    def _transport_layout(self) -> List[FieldSpec]:
+        return build_off_policy_layout(self.observation_space, self.action_space)
+
+    def _row_to_transition(self, fields: Dict[str, Any], index: int) -> Transition:
+        return ring_row_to_transition(fields, index)
+
     def get_worker_kwargs(self):
         return dict(
             **super().get_worker_kwargs(),
@@ -279,6 +334,13 @@ class InjectorWorker(InjectorWorkerBase):
         self.use_sde_at_warmup = use_sde_at_warmup
         self.action_space = action_space
         self.action_noise = action_noise
+
+    def _transition_to_fields(self, transition: Transition) -> Dict[str, Any]:
+        fields = transition_to_ring_fields(transition)
+        fields["policy_version"] = np.int64(
+            self._policy_version if self._policy_version is not None else 0
+        )
+        return fields
 
     def sample_action(
         self,

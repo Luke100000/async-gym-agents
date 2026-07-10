@@ -33,6 +33,13 @@ from async_gym_agents.profiler import (
     build_profiler_report,
     merge_profile_stats,
 )
+from async_gym_agents.transport import Transport
+from async_gym_agents.transport.constants import (
+    DEFAULT_RING_CAPACITY_MULTIPLIER,
+    MIN_RING_CAPACITY,
+    RING_FULL_POLL_SECONDS,
+)
+from async_gym_agents.transport.spsc_ring import resolve_ring
 from async_gym_agents.types import EnvFactory, Transition
 from async_gym_agents.utils import make_venv
 
@@ -101,6 +108,7 @@ class AsyncAgentInjector:
 
         # shared memory
         self._episode_queue: GenericQueue | None = None
+        self._transport: Optional[Transport] = None
         self._update_queues: List[GenericUpdateQueue] = []
         self._transitions: List[Transition] = []
 
@@ -141,6 +149,7 @@ class AsyncAgentInjector:
         policy_data: Dict[str, Any],
         use_mp: bool = False,
         mp_threads: int = 1,
+        ring_handle=None,
     ):
         if use_mp:
             try:
@@ -160,6 +169,7 @@ class AsyncAgentInjector:
             stop=stop,
             policy_class=policy_class,
             policy_data=policy_data,
+            ring_handle=ring_handle,
             **worker_kwargs,
         )
 
@@ -179,6 +189,14 @@ class AsyncAgentInjector:
             update_queue.cancel_join_thread()
 
     def get_worker_class(self) -> Type["InjectorWorkerBase"]:
+        raise NotImplementedError()
+
+    def _transport_layout(self) -> Optional[List]:
+        """Fixed ring layout for shared-memory transport, or None to use the queue."""
+        return None
+
+    def _row_to_transition(self, fields: Dict[str, Any], index: int) -> Transition:
+        """Reconstruct a Transition from an assembled ring row. Off-policy only."""
         raise NotImplementedError()
 
     def get_worker_kwargs(self) -> Dict[str, Any]:
@@ -233,6 +251,27 @@ class AsyncAgentInjector:
             self.mp_ctx.Queue() if self.use_mp else queue.Queue()
             for _ in self.get_indexable_env().env_fns
         ]
+
+        # Shared-memory transport for experience (falls back to the queue above
+        # when the injector does not provide a fixed layout).
+        layout = self._transport_layout()
+        if layout is not None:
+            n_workers = len(self.get_indexable_env().env_fns)
+            ring_capacity = max(
+                MIN_RING_CAPACITY,
+                self.max_episodes_in_buffer
+                * 512
+                * DEFAULT_RING_CAPACITY_MULTIPLIER
+                // 4,
+            )
+            self._transport = Transport(
+                layout,
+                n_workers=n_workers,
+                ring_capacity=ring_capacity,
+                train_capacity=n_workers * ring_capacity,
+                use_mp=self.use_mp,
+                mp_ctx=self.mp_ctx,
+            )
 
         # Shared state for metrics
         self._manager = self.mp_ctx.Manager() if self.use_mp else None
@@ -293,6 +332,11 @@ class AsyncAgentInjector:
                         policy_data=policy_data,
                         use_mp=self.use_mp,
                         mp_threads=self.mp_threads,
+                        ring_handle=(
+                            self._transport.worker_ring_handle(worker_index)
+                            if self._transport
+                            else None
+                        ),
                     ),
                 )
                 worker.start()
@@ -313,6 +357,7 @@ class AsyncAgentInjector:
         return super()._excluded_save_params() + [
             "_envs",
             "_episode_queue",
+            "_transport",
             "_update_queues",
             "_transitions",
             "_manager",
@@ -374,9 +419,15 @@ class AsyncAgentInjector:
 
     def fetch_transition(self) -> Transition:
         """
-        Each episode is returned as a sequence of transitions, in order, complete,
-        and not interleaved with episodes from other workers.
+        Each transition is returned in per-worker production order. With the
+        shared-memory transport the trainer assembles available rows and
+        reconstructs Transitions; otherwise it drains the episode queue.
         """
+        if self._transport is not None:
+            while len(self._transitions) == 0:
+                self._refill_from_transport()
+            return self._transitions.pop(0)
+
         while len(self._transitions) == 0:
             self._buffer_utilization += self._episode_queue.qsize()
             buffer_was_empty = self._episode_queue.empty()
@@ -386,6 +437,19 @@ class AsyncAgentInjector:
             self._transitions = self._fetch_transitions(buffer_was_empty)
 
         return self._transitions.pop(0)
+
+    def _refill_from_transport(self) -> None:
+        with self._profiler_main.track(PROFILE_PHASE_TRANSPORT):
+            rollout = self._transport.assemble_available()
+        if rollout.n_rows == 0:
+            time.sleep(0.0005)  # nothing ready yet; avoid a busy spin
+            return
+        fields = rollout.fields
+        has_version = "policy_version" in fields
+        for index in range(rollout.n_rows):
+            self._transitions.append(self._row_to_transition(fields, index))
+            if has_version:
+                self._record_policy_lag(int(fields["policy_version"][index]), 1)
 
     def shutdown(self):
         if self._stop is None:
@@ -406,6 +470,10 @@ class AsyncAgentInjector:
                     worker.kill()
                 except PermissionError:
                     self._logger.warning("cannot kill process due to permission error")
+
+        if self._transport is not None:
+            self._transport.shutdown()
+            self._transport = None
 
         # close the queue (multiprocessing.Queue needs explicit cleanup)
         if self._episode_queue is not None:
@@ -567,9 +635,11 @@ class InjectorWorkerBase:
         profiler_sync_interval: float,
         policy_class: BasePolicy,
         policy_data: Dict[str, Any],
+        ring_handle=None,
         **kwargs,
     ):
         self.env = make_venv(env_func())
+        self._ring = resolve_ring(ring_handle) if ring_handle is not None else None
 
         self.policy: BasePolicy | None = None
         self.policy_class = policy_class
@@ -728,7 +798,11 @@ class InjectorWorkerBase:
                     self._flush_profiler()
                     continue
 
-                self._put_episode_with_timeout(episode)
+                if self._ring is not None:
+                    for transition in episode:
+                        self._write_to_ring(self._transition_to_fields(transition))
+                else:
+                    self._put_episode_with_timeout(episode)
                 self._flush_profiler()
 
                 if self._stop.is_set():
@@ -737,6 +811,21 @@ class InjectorWorkerBase:
             self._flush_profiler(force=True)
             self.env.close()
             self._logger.info("Generator cycle is completed")
+
+    def _transition_to_fields(self, transition: Transition) -> Dict[str, Any]:
+        """Map a transition to ring fields. Implemented by ring-enabled workers."""
+        raise NotImplementedError()
+
+    def _write_to_ring(self, fields: Dict[str, Any]) -> None:
+        """Backpressure like the queue: block up to queue_put_timeout, then drop."""
+        deadline = time.perf_counter() + self._queue_put_timeout
+        while not self._stop.is_set():
+            if self._ring.try_write(fields):
+                return
+            if time.perf_counter() >= deadline:
+                self._ring.note_drop()
+                return
+            time.sleep(RING_FULL_POLL_SECONDS)
 
     def generate(self) -> Generator[list[Transition], None, None]:
         raise NotImplementedError()

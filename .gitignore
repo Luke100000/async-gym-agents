@@ -3,3 +3,8 @@
 dist
 notebooks
 __pycache__
+
+.specify
+.serena
+.claude
+.codex

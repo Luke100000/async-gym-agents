@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Dict, Generator, Type
+from typing import Any, Dict, Generator, List, Optional, Type
 
 import gymnasium as gym
 import numpy as np
@@ -13,6 +13,14 @@ from stable_baselines3.common.vec_env import VecEnv
 from stable_baselines3.common.vec_env.base_vec_env import VecEnvObs
 
 from async_gym_agents.agents.injector import AsyncAgentInjector, InjectorWorkerBase
+from async_gym_agents.transport import (
+    FieldSpec,
+    build_info_fields,
+    build_numeric_layout,
+    read_info,
+    write_info,
+)
+from async_gym_agents.transport.constants import INFO_BLOB_CAPACITY
 from async_gym_agents.utils import copy_obs, single_slice
 
 
@@ -28,6 +36,59 @@ class Transition:
     last_dones: np.ndarray
     infos: list[Dict]
     reset_infos: list[Dict]
+
+
+def build_on_policy_layout(
+    observation_space: spaces.Space, action_space: spaces.Space
+) -> List[FieldSpec]:
+    f32 = np.dtype(np.float32)
+    return build_numeric_layout(
+        observation_space,
+        action_space,
+        extra_fields=[
+            FieldSpec("value", (), f32),
+            FieldSpec("log_prob", (), f32),
+            FieldSpec("last_done", (), f32),
+            *build_info_fields(),
+            FieldSpec("policy_version", (), np.dtype(np.int64)),
+        ],
+    )
+
+
+def _scalar_f32(x) -> np.float32:
+    return np.float32(np.asarray(x).reshape(-1)[0])
+
+
+def transition_to_ring_fields(transition: Transition) -> Dict[str, np.ndarray]:
+    fields = {
+        "obs": np.asarray(transition.last_obs)[0],
+        "next_obs": np.asarray(transition.new_obs)[0],
+        "action": np.asarray(transition.actions)[0],
+        "reward": _scalar_f32(transition.rewards),
+        "done": _scalar_f32(transition.dones),
+        "value": _scalar_f32(transition.values),
+        "log_prob": _scalar_f32(transition.log_probs),
+        "last_done": _scalar_f32(transition.last_dones),
+        "info_len": np.zeros(1, dtype=np.int32),
+        "info": np.zeros(INFO_BLOB_CAPACITY, dtype=np.uint8),
+    }
+    write_info(fields, transition.infos[0])
+    return fields
+
+
+def ring_row_to_transition(fields: Dict[str, np.ndarray], i: int) -> Transition:
+    return Transition(
+        actions=fields["action"][i : i + 1],
+        values=fields["value"][i : i + 1],
+        log_probs=fields["log_prob"][i : i + 1],
+        last_obs=fields["obs"][i : i + 1],
+        new_obs=fields["next_obs"][i : i + 1],
+        rewards=fields["reward"][i : i + 1],
+        dones=fields["done"][i : i + 1],
+        last_dones=fields["last_done"][i : i + 1],
+        infos=[read_info(fields["info_len"][i], fields["info"][i])],
+        reset_infos=[{}],
+    )
 
 
 class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
@@ -175,6 +236,12 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
     def get_worker_class(self) -> Type[InjectorWorkerBase]:
         return InjectorWorker
 
+    def _transport_layout(self) -> Optional[List[FieldSpec]]:
+        return build_on_policy_layout(self.observation_space, self.action_space)
+
+    def _row_to_transition(self, fields: Dict[str, Any], index: int) -> Transition:
+        return ring_row_to_transition(fields, index)
+
     def get_worker_kwargs(self):
         return dict(
             **super().get_worker_kwargs(),
@@ -191,6 +258,13 @@ class InjectorWorker(InjectorWorkerBase):
         super().__init__(**kwargs)
 
         self.action_space = action_space
+
+    def _transition_to_fields(self, transition: Transition) -> Dict[str, Any]:
+        fields = transition_to_ring_fields(transition)
+        fields["policy_version"] = np.int64(
+            self._policy_version if self._policy_version is not None else 0
+        )
+        return fields
 
     def generate(self) -> Generator[list[Transition], None, None]:
         """
