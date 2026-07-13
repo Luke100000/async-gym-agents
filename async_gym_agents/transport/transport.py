@@ -1,9 +1,14 @@
 import multiprocessing
+import queue
 from multiprocessing import shared_memory
-from typing import List, Optional
+from typing import Iterable, List, Optional
 
 import numpy as np
 
+from async_gym_agents.transport.constants import (
+    MP_COUNTER_TYPE_CODE,
+    MP_READINESS_FLAG_TYPE_CODE,
+)
 from async_gym_agents.transport.data_classes import (
     AssembledRollout,
     FieldSpec,
@@ -13,6 +18,7 @@ from async_gym_agents.transport.spsc_ring import (
     MpMarker,
     RingBuffer,
     RingHandle,
+    RingReadiness,
     create_thread_ring,
 )
 
@@ -35,11 +41,12 @@ class Transport:
         self.use_mp = use_mp
         self._mp_ctx = mp_ctx or multiprocessing.get_context()
         self._segments: list[shared_memory.SharedMemory] = []
+        self._ready_workers = self._mp_ctx.Queue() if self.use_mp else queue.Queue()
 
         self.rings: List[RingBuffer] = []
         self._handles: list = []
-        for _ in range(n_workers):
-            ring, handle = self._make_ring()
+        for worker_index in range(n_workers):
+            ring, handle = self._make_ring(worker_index)
             self.rings.append(ring)
             self._handles.append(handle)
 
@@ -49,9 +56,14 @@ class Transport:
             for field in layout
         }
 
-    def _make_ring(self) -> tuple[RingBuffer, object]:
+    def _make_ring(self, worker_index: int) -> tuple[RingBuffer, object]:
         if not self.use_mp:
-            ring = create_thread_ring(self.ring_capacity, self.layout)
+            ring = create_thread_ring(
+                self.ring_capacity,
+                self.layout,
+                worker_index=worker_index,
+                ready_queue=self._ready_workers,
+            )
             return ring, ring  # thread workers use the ring object directly
 
         arrays = {}
@@ -67,11 +79,29 @@ class Transport:
                 dtype=field.dtype,
                 buffer=segment.buf,
             )
-        values = [self._mp_ctx.Value("q", 0) for _ in range(3)]
-        ring = RingBuffer(
-            self.ring_capacity, self.layout, arrays, *(MpMarker(v) for v in values)
+        values = [self._mp_ctx.Value(MP_COUNTER_TYPE_CODE, 0) for _ in range(3)]
+        ready_value = self._mp_ctx.RawValue(MP_READINESS_FLAG_TYPE_CODE, 0)
+        readiness = RingReadiness(
+            worker_index,
+            self._ready_workers,
+            ready_value,
         )
-        handle = RingHandle(self.ring_capacity, self.layout, segment_names, *values)
+        ring = RingBuffer(
+            self.ring_capacity,
+            self.layout,
+            arrays,
+            *(MpMarker(value) for value in values),
+            readiness=readiness,
+        )
+        handle = RingHandle(
+            self.ring_capacity,
+            self.layout,
+            segment_names,
+            *values,
+            ready_value,
+            self._ready_workers,
+            worker_index,
+        )
         return ring, handle
 
     def worker_ring(self, worker_index: int) -> RingBuffer:
@@ -87,11 +117,44 @@ class Transport:
         Never waits for any worker. Releases each ring's consumed slots as it
         copies them, so workers can refill during the caller's train cycle.
         """
+        return self._assemble_workers(range(self.n_workers))
+
+    def wait_for_ready_workers(self, timeout: Optional[float] = None) -> List[int]:
+        """Block until a worker has rows, then include other queued workers."""
+        first_worker = self._ready_workers.get(block=True, timeout=timeout)
+        ready_workers = [first_worker]
+        observed_workers = {first_worker}
+
+        while True:
+            try:
+                worker_index = self._ready_workers.get_nowait()
+            except queue.Empty:
+                return ready_workers
+            if worker_index not in observed_workers:
+                observed_workers.add(worker_index)
+                ready_workers.append(worker_index)
+
+    def assemble_ready_workers(self, worker_indices: Iterable[int]) -> AssembledRollout:
+        """Move rows only from workers that notified the trainer."""
+        return self._assemble_workers(worker_indices, requeue_unassembled=True)
+
+    def _assemble_workers(
+        self,
+        worker_indices: Iterable[int],
+        requeue_unassembled: bool = False,
+    ) -> AssembledRollout:
+        """Copy selected worker rows into the preallocated training buffer."""
+        selected_workers = (
+            list(worker_indices) if requeue_unassembled else worker_indices
+        )
         offset = 0
         segments: list[tuple[int, int]] = []
-        for worker_index, ring in enumerate(self.rings):
+        for selected_index, worker_index in enumerate(selected_workers):
             if offset >= self.train_capacity:
+                if requeue_unassembled:
+                    self._requeue_ready_workers(selected_workers[selected_index:])
                 break
+            ring = self.rings[worker_index]
             consumed, produced = ring.snapshot()
             available = produced - consumed
             if available <= 0:
@@ -106,6 +169,11 @@ class Transport:
 
         fields = {name: array[:offset] for name, array in self._train_arrays.items()}
         return AssembledRollout(fields=fields, n_rows=offset, segments=segments)
+
+    def _requeue_ready_workers(self, worker_indices: Iterable[int]) -> None:
+        """Preserve notifications that did not fit in this assembled rollout."""
+        for worker_index in worker_indices:
+            self._ready_workers.put(worker_index)
 
     def collect_stats(self) -> TransportStats:
         return TransportStats(
@@ -133,3 +201,7 @@ class Transport:
             except FileNotFoundError:
                 pass
         self._segments = []
+        if self.use_mp and self._ready_workers is not None:
+            self._ready_workers.close()
+            self._ready_workers.join_thread()
+            self._ready_workers = None

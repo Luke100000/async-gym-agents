@@ -9,6 +9,10 @@ MIN_RING_CAPACITY = 64
 # it; non-empty infos (episode boundaries) must serialize within this cap.
 INFO_BLOB_CAPACITY = 4096
 
+# ``multiprocessing`` shared-value type codes used by ring metadata.
+MP_COUNTER_TYPE_CODE = "q"
+MP_READINESS_FLAG_TYPE_CODE = "b"
+
 # How long a worker waits between retries while its ring is full (backpressure).
 RING_FULL_POLL_SECONDS = 0.001
 

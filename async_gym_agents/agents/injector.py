@@ -476,11 +476,11 @@ class AsyncAgentInjector:
         return transition
 
     def _refill_from_transport(self) -> None:
+        with self._profiler_main.track(PROFILE_PHASE_WAITING):
+            ready_workers = self._transport.wait_for_ready_workers()
         with self._profiler_main.track(PROFILE_PHASE_TRANSPORT):
-            rollout = self._transport.assemble_available()
+            rollout = self._transport.assemble_ready_workers(ready_workers)
         if rollout.n_rows == 0:
-            with self._profiler_main.track(PROFILE_PHASE_WAITING):
-                time.sleep(0.0005)
             return
 
         reconstruction_start_ns = time.perf_counter_ns()
