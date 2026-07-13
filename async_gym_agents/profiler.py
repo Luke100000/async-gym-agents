@@ -89,7 +89,7 @@ def build_profiler_report(
     discarded_episodes_fraction: float,
     avg_policy_lag: float,
     max_policy_lag: int,
-    transport_stats: Optional[Mapping[str, float | int]] = None,
+    transport_stats: Optional[Mapping[str, Any]] = None,
     assembly_stats: Optional[Mapping[str, float | int]] = None,
 ) -> Dict[str, object]:
     return {
@@ -179,6 +179,17 @@ def iterate_profiler_metrics(
             yield metric_name, value
 
 
+def summarize_duration(total_ns: int, count: int) -> Dict[str, float | int]:
+    """Convert cumulative nanoseconds into standard profiler report fields."""
+    return {
+        "total_seconds": total_ns / NANOSECONDS_PER_SECOND,
+        "count": count,
+        "avg_milliseconds": 0.0
+        if count == 0
+        else total_ns / count / (NANOSECONDS_PER_SECOND / MILLISECONDS_PER_SECOND),
+    }
+
+
 def _summarize_stats(
     stats: Mapping[str, Mapping[str, int]],
 ) -> Dict[str, Dict[str, float | int]]:
@@ -188,16 +199,9 @@ def _summarize_stats(
     for phase, values in sorted(stats.items()):
         phase_total_ns = int(values.get("total_ns", 0))
         count = int(values.get("count", 0))
-        summarized[phase] = {
-            "total_seconds": phase_total_ns / NANOSECONDS_PER_SECOND,
-            "count": count,
-            "avg_milliseconds": 0.0
-            if count == 0
-            else phase_total_ns
-            / count
-            / (NANOSECONDS_PER_SECOND / MILLISECONDS_PER_SECOND),
-            "share": 0.0 if total_ns == 0 else phase_total_ns / total_ns,
-        }
+        duration = summarize_duration(phase_total_ns, count)
+        duration["share"] = 0.0 if total_ns == 0 else phase_total_ns / total_ns
+        summarized[phase] = duration
 
     return summarized
 

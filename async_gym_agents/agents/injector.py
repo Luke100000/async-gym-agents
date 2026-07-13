@@ -19,6 +19,7 @@ import torch
 from stable_baselines3.common.base_class import BasePolicy
 
 from async_gym_agents.constants import (
+    BYTES_PER_MEBIBYTE,
     NANOSECONDS_PER_SECOND,
     PROFILE_PHASE_EPISODE_DESERIALIZATION,
     PROFILE_PHASE_EPISODE_PACKING,
@@ -33,8 +34,20 @@ from async_gym_agents.constants import (
     TRANSPORT_CAPACITY_EPISODES_KEY,
     TRANSPORT_MAX_PENDING_BYTES_KEY,
     TRANSPORT_MAX_PENDING_EPISODES_KEY,
+    TRANSPORT_PAYLOAD_MEBIBYTES_PER_SECOND_KEY,
+    TRANSPORT_PAYLOAD_RECEIVE_PROFILE_KEY,
+    TRANSPORT_PAYLOAD_RECEIVE_TIMEOUT_PROFILE_KEY,
     TRANSPORT_PENDING_BYTES_KEY,
     TRANSPORT_PENDING_EPISODES_KEY,
+    TRANSPORT_QUEUE_LATENCY_PROFILE_KEY,
+    TRANSPORT_READY_NOTIFICATION_PROFILE_KEY,
+    TRANSPORT_READY_NOTIFICATION_TIMEOUT_PROFILE_KEY,
+    TRANSPORT_RECEIVE_ATTEMPTS_KEY,
+    TRANSPORT_RECEIVE_TIMEOUT_FRACTION_KEY,
+    TRANSPORT_RECEIVE_TIMEOUTS_KEY,
+    TRANSPORT_RECEIVE_TIMEOUTS_WITH_PENDING_FRACTION_KEY,
+    TRANSPORT_RECEIVE_TIMEOUTS_WITH_PENDING_KEY,
+    TRANSPORT_RECEIVED_BYTES_KEY,
     TRANSPORT_RECEIVED_EPISODES_KEY,
     TRANSPORT_SENT_BYTES_KEY,
     TRANSPORT_SENT_EPISODES_KEY,
@@ -55,6 +68,7 @@ from async_gym_agents.profiler import (
     build_profiler_report,
     iterate_profiler_metrics,
     merge_profile_stats,
+    summarize_duration,
 )
 from async_gym_agents.types import EnvFactory, Transition
 from async_gym_agents.utils import make_venv
@@ -498,12 +512,19 @@ class AsyncAgentInjector:
         for metric_name, value in iterate_profiler_metrics(self.get_profiler_report()):
             self.logger.record(f"{PROFILER_LOG_PREFIX}/{metric_name}", value)
 
-    def _build_transport_report(self) -> Dict[str, float | int]:
+    def _build_transport_report(self) -> Dict[str, Any]:
         if self._episode_transport is None:
             return dict(self._final_transport_report)
 
         stats = self._episode_transport.get_stats()
         capacity = self._episode_transport.max_pending_episodes
+        successful_payload_count = (
+            stats.payload_receive_count - stats.payload_receive_timeouts
+        )
+        successful_payload_ns = (
+            stats.payload_receive_ns - stats.payload_receive_timeout_ns
+        )
+        payload_seconds = successful_payload_ns / NANOSECONDS_PER_SECOND
         return {
             TRANSPORT_PENDING_EPISODES_KEY: stats.pending_episodes,
             TRANSPORT_MAX_PENDING_EPISODES_KEY: stats.max_pending_episodes,
@@ -514,6 +535,47 @@ class AsyncAgentInjector:
             TRANSPORT_SENT_EPISODES_KEY: stats.sent_episodes,
             TRANSPORT_SENT_BYTES_KEY: stats.sent_bytes,
             TRANSPORT_RECEIVED_EPISODES_KEY: stats.received_episodes,
+            TRANSPORT_RECEIVED_BYTES_KEY: stats.received_bytes,
+            TRANSPORT_RECEIVE_ATTEMPTS_KEY: stats.receive_attempts,
+            TRANSPORT_RECEIVE_TIMEOUTS_KEY: stats.receive_timeouts,
+            TRANSPORT_RECEIVE_TIMEOUT_FRACTION_KEY: (
+                0.0
+                if stats.receive_attempts == 0
+                else stats.receive_timeouts / stats.receive_attempts
+            ),
+            TRANSPORT_RECEIVE_TIMEOUTS_WITH_PENDING_KEY: (
+                stats.receive_timeouts_with_pending
+            ),
+            TRANSPORT_RECEIVE_TIMEOUTS_WITH_PENDING_FRACTION_KEY: (
+                0.0
+                if stats.receive_timeouts == 0
+                else stats.receive_timeouts_with_pending / stats.receive_timeouts
+            ),
+            TRANSPORT_READY_NOTIFICATION_PROFILE_KEY: summarize_duration(
+                stats.ready_notification_ns,
+                stats.ready_notification_count,
+            ),
+            TRANSPORT_READY_NOTIFICATION_TIMEOUT_PROFILE_KEY: summarize_duration(
+                stats.ready_notification_timeout_ns,
+                stats.ready_notification_timeouts,
+            ),
+            TRANSPORT_PAYLOAD_RECEIVE_PROFILE_KEY: summarize_duration(
+                successful_payload_ns,
+                successful_payload_count,
+            ),
+            TRANSPORT_PAYLOAD_RECEIVE_TIMEOUT_PROFILE_KEY: summarize_duration(
+                stats.payload_receive_timeout_ns,
+                stats.payload_receive_timeouts,
+            ),
+            TRANSPORT_PAYLOAD_MEBIBYTES_PER_SECOND_KEY: (
+                0.0
+                if payload_seconds == 0.0
+                else stats.received_bytes / BYTES_PER_MEBIBYTE / payload_seconds
+            ),
+            TRANSPORT_QUEUE_LATENCY_PROFILE_KEY: summarize_duration(
+                stats.queue_latency_ns,
+                stats.queue_latency_count,
+            ),
         }
 
     def _build_assembly_report(self) -> Dict[str, float | int]:

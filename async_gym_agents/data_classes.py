@@ -49,6 +49,7 @@ class EpisodePacket:
     episode_kind: EpisodeKind
     transition_count: int
     payload: bytes
+    transport_enqueue_ns: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -60,6 +61,20 @@ class EpisodeTransportStats:
     sent_episodes: int
     sent_bytes: int
     received_episodes: int
+    received_bytes: int
+    receive_attempts: int
+    receive_timeouts: int
+    receive_timeouts_with_pending: int
+    ready_notification_ns: int
+    ready_notification_count: int
+    ready_notification_timeout_ns: int
+    ready_notification_timeouts: int
+    payload_receive_ns: int
+    payload_receive_count: int
+    payload_receive_timeout_ns: int
+    payload_receive_timeouts: int
+    queue_latency_ns: int
+    queue_latency_count: int
 
 
 @dataclass(frozen=True)

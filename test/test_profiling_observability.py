@@ -4,7 +4,11 @@ from async_gym_agents.constants import (
     PROFILE_PHASE_TRANSPORT,
     PROFILER_LOG_PREFIX,
     TRANSPORT_MAX_PENDING_BYTES_KEY,
+    TRANSPORT_PAYLOAD_RECEIVE_PROFILE_KEY,
     TRANSPORT_PENDING_BYTES_KEY,
+    TRANSPORT_QUEUE_LATENCY_PROFILE_KEY,
+    TRANSPORT_RECEIVE_ATTEMPTS_KEY,
+    TRANSPORT_RECEIVED_BYTES_KEY,
 )
 from async_gym_agents.episode_codec import encode_episode_batch, pack_episode
 from async_gym_agents.profiler import iterate_profiler_metrics
@@ -76,6 +80,23 @@ class TestPolicyLagProfiling:
         assert transport[TRANSPORT_PENDING_BYTES_KEY] == len(packet.payload)
         assert transport[TRANSPORT_MAX_PENDING_BYTES_KEY] == len(packet.payload)
 
+    def test_reports_receive_delivery_timings(
+        self,
+        initialized_on_policy_agent,
+        on_policy_packet,
+        enqueue_episode_packet,
+    ):
+        """Delivered episodes expose payload timing, bytes, and queue latency."""
+        enqueue_episode_packet(initialized_on_policy_agent, on_policy_packet)
+
+        initialized_on_policy_agent.fetch_transition()
+
+        transport = initialized_on_policy_agent.get_profiler_report()["transport"]
+        assert transport[TRANSPORT_RECEIVE_ATTEMPTS_KEY] == 1
+        assert transport[TRANSPORT_RECEIVED_BYTES_KEY] == len(on_policy_packet.payload)
+        assert transport[TRANSPORT_PAYLOAD_RECEIVE_PROFILE_KEY]["count"] == 1
+        assert transport[TRANSPORT_QUEUE_LATENCY_PROFILE_KEY]["count"] == 1
+
     def test_flattens_report_into_stable_scalar_names(
         self,
         logged_on_policy_agent,
@@ -99,3 +120,7 @@ class TestPolicyLagProfiling:
             iterate_profiler_metrics(logged_on_policy_agent.get_profiler_report())
         )
         assert f"transport/{TRANSPORT_MAX_PENDING_BYTES_KEY}" in flattened_metrics
+        assert (
+            f"transport/{TRANSPORT_PAYLOAD_RECEIVE_PROFILE_KEY}/avg_milliseconds"
+            in flattened_metrics
+        )

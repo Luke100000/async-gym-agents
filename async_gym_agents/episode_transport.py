@@ -1,7 +1,8 @@
 import multiprocessing
 import queue
 import time
-from typing import Any, Optional, TypeAlias
+from dataclasses import replace
+from typing import Any, Callable, Optional, TypeAlias
 
 from async_gym_agents.constants import (
     PER_WORKER_PENDING_EPISODE_CAPACITY,
@@ -34,6 +35,7 @@ class EpisodeSender:
         sent_episodes: GenericSharedCounter,
         sent_bytes: GenericSharedCounter,
         use_mp: bool,
+        clock: Callable[[], int],
     ) -> None:
         self.worker_index = worker_index
         self._episode_queue = episode_queue
@@ -46,6 +48,7 @@ class EpisodeSender:
         self._sent_episodes = sent_episodes
         self._sent_bytes = sent_bytes
         self._use_mp = use_mp
+        self._clock = clock
 
     def send(
         self,
@@ -57,23 +60,24 @@ class EpisodeSender:
         if packet.worker_index != self.worker_index:
             raise ValueError("Episode packet was sent through the wrong worker channel")
 
-        start_ns = time.perf_counter_ns()
+        start_ns = self._clock()
         deadline = None if timeout is None else time.monotonic() + timeout
         waiting_ns = 0
         if not self._capacity.acquire(block=False):
-            waiting_start_ns = time.perf_counter_ns()
+            waiting_start_ns = self._clock()
             capacity_acquired = self._acquire_capacity(stop, deadline)
-            waiting_ns += time.perf_counter_ns() - waiting_start_ns
+            waiting_ns += self._clock() - waiting_start_ns
             if not capacity_acquired:
                 return self._build_result(False, waiting_ns, start_ns)
 
+        packet = replace(packet, transport_enqueue_ns=self._clock())
         try:
             try:
                 self._episode_queue.put_nowait(packet)
             except queue.Full:
-                waiting_start_ns = time.perf_counter_ns()
+                waiting_start_ns = self._clock()
                 packet_sent = self._put_packet(packet, stop, deadline)
-                waiting_ns += time.perf_counter_ns() - waiting_start_ns
+                waiting_ns += self._clock() - waiting_start_ns
                 if not packet_sent:
                     self._capacity.release()
                     return self._build_result(False, waiting_ns, start_ns)
@@ -157,13 +161,13 @@ class EpisodeSender:
         with self._sent_bytes.get_lock():
             self._sent_bytes.value += payload_size
 
-    @staticmethod
     def _build_result(
+        self,
         sent: bool,
         waiting_ns: int,
         start_ns: int,
     ) -> EpisodeSendResult:
-        total_ns = time.perf_counter_ns() - start_ns
+        total_ns = self._clock() - start_ns
         return EpisodeSendResult(
             sent=sent,
             waiting_ns=waiting_ns,
@@ -178,6 +182,7 @@ class EpisodeTransport:
         max_pending_episodes: int,
         use_mp: bool,
         mp_ctx: Optional[multiprocessing.context.BaseContext] = None,
+        clock: Callable[[], int] = time.monotonic_ns,
     ) -> None:
         if worker_count <= 0:
             raise ValueError("Episode transport requires at least one worker")
@@ -188,6 +193,7 @@ class EpisodeTransport:
         self.max_pending_episodes = max_pending_episodes
         self.use_mp = use_mp
         self._mp_ctx = mp_ctx or multiprocessing.get_context()
+        self._clock = clock
         self._ready_queue = self._create_queue()
         self._episode_queues = [
             self._create_queue(maxsize=PER_WORKER_PENDING_EPISODE_CAPACITY)
@@ -213,12 +219,27 @@ class EpisodeTransport:
                 sent_episodes=self._sent_episodes,
                 sent_bytes=self._sent_bytes,
                 use_mp=use_mp,
+                clock=clock,
             )
             for worker_index in range(worker_count)
         ]
         self._ready_workers = set()
         self._next_worker_index = 0
         self._received_episodes = 0
+        self._received_bytes = 0
+        self._receive_attempts = 0
+        self._receive_timeouts = 0
+        self._receive_timeouts_with_pending = 0
+        self._ready_notification_ns = 0
+        self._ready_notification_count = 0
+        self._ready_notification_timeout_ns = 0
+        self._ready_notification_timeouts = 0
+        self._payload_receive_ns = 0
+        self._payload_receive_count = 0
+        self._payload_receive_timeout_ns = 0
+        self._payload_receive_timeouts = 0
+        self._queue_latency_ns = 0
+        self._queue_latency_count = 0
         self._shutdown = False
 
     def get_sender(self, worker_index: int) -> EpisodeSender:
@@ -227,21 +248,37 @@ class EpisodeTransport:
 
     def receive(self, timeout: Optional[float] = None) -> EpisodePacket:
         """Receive one complete episode, selecting ready workers round-robin."""
+        self._receive_attempts += 1
         deadline = None if timeout is None else time.monotonic() + timeout
-        while True:
-            self._collect_ready_workers(deadline)
-            worker_index = self._select_ready_worker()
-            remaining = self._calculate_remaining_timeout(deadline)
-            try:
-                packet = self._episode_queues[worker_index].get(timeout=remaining)
-            except queue.Empty:
-                self._ready_workers.add(worker_index)
-                continue
+        try:
+            while True:
+                self._collect_ready_workers(deadline)
+                worker_index = self._select_ready_worker()
+                remaining = self._calculate_remaining_timeout(deadline)
+                payload_receive_start_ns = self._clock()
+                try:
+                    packet = self._episode_queues[worker_index].get(timeout=remaining)
+                except queue.Empty:
+                    self._record_payload_receive(
+                        self._clock() - payload_receive_start_ns,
+                        timed_out=True,
+                    )
+                    self._ready_workers.add(worker_index)
+                    continue
 
-            self._capacity.release()
-            self._record_receive(len(packet.payload))
-            self._next_worker_index = (worker_index + 1) % self.worker_count
-            return packet
+                self._record_payload_receive(
+                    self._clock() - payload_receive_start_ns,
+                    timed_out=False,
+                )
+                self._capacity.release()
+                self._record_receive(packet)
+                self._next_worker_index = (worker_index + 1) % self.worker_count
+                return packet
+        except queue.Empty:
+            self._receive_timeouts += 1
+            if self._pending_episodes.value > 0:
+                self._receive_timeouts_with_pending += 1
+            raise
 
     def get_stats(self) -> EpisodeTransportStats:
         """Return current and peak dynamic transport memory usage."""
@@ -253,6 +290,20 @@ class EpisodeTransport:
             sent_episodes=self._sent_episodes.value,
             sent_bytes=self._sent_bytes.value,
             received_episodes=self._received_episodes,
+            received_bytes=self._received_bytes,
+            receive_attempts=self._receive_attempts,
+            receive_timeouts=self._receive_timeouts,
+            receive_timeouts_with_pending=self._receive_timeouts_with_pending,
+            ready_notification_ns=self._ready_notification_ns,
+            ready_notification_count=self._ready_notification_count,
+            ready_notification_timeout_ns=self._ready_notification_timeout_ns,
+            ready_notification_timeouts=self._ready_notification_timeouts,
+            payload_receive_ns=self._payload_receive_ns,
+            payload_receive_count=self._payload_receive_count,
+            payload_receive_timeout_ns=self._payload_receive_timeout_ns,
+            payload_receive_timeouts=self._payload_receive_timeouts,
+            queue_latency_ns=self._queue_latency_ns,
+            queue_latency_count=self._queue_latency_count,
         )
 
     def shutdown(self) -> None:
@@ -274,7 +325,20 @@ class EpisodeTransport:
     def _collect_ready_workers(self, deadline: Optional[float]) -> None:
         if not self._ready_workers:
             timeout = self._calculate_remaining_timeout(deadline)
-            self._ready_workers.add(self._ready_queue.get(timeout=timeout))
+            notification_start_ns = self._clock()
+            try:
+                worker_index = self._ready_queue.get(timeout=timeout)
+            except queue.Empty:
+                self._record_ready_notification(
+                    self._clock() - notification_start_ns,
+                    timed_out=True,
+                )
+                raise
+            self._record_ready_notification(
+                self._clock() - notification_start_ns,
+                timed_out=False,
+            )
+            self._ready_workers.add(worker_index)
 
         while True:
             try:
@@ -300,9 +364,31 @@ class EpisodeTransport:
             raise queue.Empty
         return remaining
 
-    def _record_receive(self, payload_size: int) -> None:
+    def _record_ready_notification(self, duration_ns: int, timed_out: bool) -> None:
+        self._ready_notification_ns += max(0, duration_ns)
+        self._ready_notification_count += 1
+        if timed_out:
+            self._ready_notification_timeout_ns += max(0, duration_ns)
+            self._ready_notification_timeouts += 1
+
+    def _record_payload_receive(self, duration_ns: int, timed_out: bool) -> None:
+        self._payload_receive_ns += max(0, duration_ns)
+        self._payload_receive_count += 1
+        if timed_out:
+            self._payload_receive_timeout_ns += max(0, duration_ns)
+            self._payload_receive_timeouts += 1
+
+    def _record_receive(self, packet: EpisodePacket) -> None:
+        payload_size = len(packet.payload)
         with self._pending_episodes.get_lock():
             self._pending_episodes.value -= 1
         with self._pending_bytes.get_lock():
             self._pending_bytes.value -= payload_size
         self._received_episodes += 1
+        self._received_bytes += payload_size
+        if packet.transport_enqueue_ns is not None:
+            self._queue_latency_ns += max(
+                0,
+                self._clock() - packet.transport_enqueue_ns,
+            )
+            self._queue_latency_count += 1

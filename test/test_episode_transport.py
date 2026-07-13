@@ -1,5 +1,8 @@
+import queue
 import threading
 from dataclasses import replace
+
+import pytest
 
 from async_gym_agents.episode_transport import EpisodeTransport
 
@@ -123,4 +126,82 @@ class TestEpisodeTransport:
 
         assert not sender_thread.is_alive()
         assert not results[0]
+        transport.shutdown()
+
+
+class TestEpisodeTransportProfiling:
+    """Receive metrics distinguish delivery from notification and timeout waits."""
+
+    def test_records_successful_payload_delivery(self, on_policy_packet):
+        """A delivered packet records payload bytes, latency, and receive time."""
+        transport = EpisodeTransport(
+            worker_count=1,
+            max_pending_episodes=1,
+            use_mp=False,
+        )
+        stop = threading.Event()
+        assert transport.get_sender(0).send(
+            on_policy_packet,
+            stop,
+            TRANSPORT_TEST_TIMEOUT_SECONDS,
+        )
+
+        transport.receive(TRANSPORT_TEST_TIMEOUT_SECONDS)
+
+        stats = transport.get_stats()
+        assert stats.receive_attempts == 1
+        assert stats.receive_timeouts == 0
+        assert stats.received_bytes == len(on_policy_packet.payload)
+        assert stats.payload_receive_count == 1
+        assert stats.payload_receive_timeouts == 0
+        assert stats.payload_receive_ns >= 0
+        assert stats.queue_latency_count == 1
+        assert stats.queue_latency_ns >= 0
+        transport.shutdown()
+
+    def test_attributes_empty_transport_timeout_to_notification_wait(self):
+        """An empty transport times out before any worker notification arrives."""
+        transport = EpisodeTransport(
+            worker_count=1,
+            max_pending_episodes=1,
+            use_mp=False,
+        )
+
+        with pytest.raises(queue.Empty):
+            transport.receive(TRANSPORT_TEST_TIMEOUT_SECONDS)
+
+        stats = transport.get_stats()
+        assert stats.receive_attempts == 1
+        assert stats.receive_timeouts == 1
+        assert stats.receive_timeouts_with_pending == 0
+        assert stats.ready_notification_count == 1
+        assert stats.ready_notification_timeouts == 1
+        assert stats.ready_notification_ns > 0
+        assert stats.ready_notification_timeout_ns > 0
+        assert stats.payload_receive_count == 0
+        transport.shutdown()
+
+    def test_attributes_announced_packet_timeout_to_payload_wait(self):
+        """A notification without delivered bytes is reported as a payload timeout."""
+        transport = EpisodeTransport(
+            worker_count=1,
+            max_pending_episodes=1,
+            use_mp=False,
+        )
+        with transport._pending_episodes.get_lock():
+            transport._pending_episodes.value = 1
+        transport._ready_queue.put(0)
+
+        with pytest.raises(queue.Empty):
+            transport.receive(TRANSPORT_TEST_TIMEOUT_SECONDS)
+
+        stats = transport.get_stats()
+        assert stats.receive_attempts == 1
+        assert stats.receive_timeouts == 1
+        assert stats.receive_timeouts_with_pending == 1
+        assert stats.ready_notification_timeouts == 0
+        assert stats.payload_receive_count == 1
+        assert stats.payload_receive_timeouts == 1
+        assert stats.payload_receive_ns > 0
+        assert stats.payload_receive_timeout_ns > 0
         transport.shutdown()
