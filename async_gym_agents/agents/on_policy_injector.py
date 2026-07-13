@@ -11,6 +11,15 @@ from stable_baselines3.common.utils import obs_as_tensor
 from stable_baselines3.common.vec_env import VecEnv
 
 from async_gym_agents.agents.injector import AsyncAgentInjector, InjectorWorkerBase
+from async_gym_agents.constants import (
+    ASSEMBLY_COMPLETED_BUFFERS_KEY,
+    ASSEMBLY_FILLING_TRANSITIONS_KEY,
+    ASSEMBLY_LAST_PAYLOAD_BYTES_KEY,
+    ASSEMBLY_LAST_TRANSITIONS_KEY,
+    ASSEMBLY_MAX_PAYLOAD_BYTES_KEY,
+    ASSEMBLY_MAX_TRANSITIONS_KEY,
+    ASSEMBLY_TARGET_TRANSITIONS_KEY,
+)
 from async_gym_agents.data_classes import OnPolicyTransition as Transition
 from async_gym_agents.enums import EpisodeKind
 from async_gym_agents.episode_assembler import AsyncEpisodeAssembler
@@ -48,6 +57,7 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
         )
         super(AsyncAgentInjector, self).__init__(*args, **kwargs)
         self._episode_assembler = None
+        self._final_assembly_report = {}
 
     # must be updated from SB3 (!)
     def collect_rollouts(
@@ -197,6 +207,7 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
 
             callback.update_locals(locals())
 
+        self.record_profiler_metrics()
         callback.on_rollout_end()
 
         return True
@@ -213,10 +224,29 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
         self._episode_assembler.start()
 
     def _excluded_save_params(self):
-        return super()._excluded_save_params() + ["_episode_assembler"]
+        return super()._excluded_save_params() + [
+            "_episode_assembler",
+            "_final_assembly_report",
+        ]
+
+    def _build_assembly_report(self):
+        if self._episode_assembler is None:
+            return dict(self._final_assembly_report)
+
+        stats = self._episode_assembler.get_stats()
+        return {
+            ASSEMBLY_TARGET_TRANSITIONS_KEY: stats.target_transition_count,
+            ASSEMBLY_FILLING_TRANSITIONS_KEY: stats.filling_transition_count,
+            ASSEMBLY_COMPLETED_BUFFERS_KEY: stats.completed_assemblies,
+            ASSEMBLY_LAST_TRANSITIONS_KEY: stats.last_transition_count,
+            ASSEMBLY_MAX_TRANSITIONS_KEY: stats.max_transition_count,
+            ASSEMBLY_LAST_PAYLOAD_BYTES_KEY: stats.last_payload_bytes,
+            ASSEMBLY_MAX_PAYLOAD_BYTES_KEY: stats.max_payload_bytes,
+        }
 
     def shutdown(self):
         if self._episode_assembler is not None:
+            self._final_assembly_report = self._build_assembly_report()
             self._episode_assembler.shutdown()
             self._episode_assembler = None
         return super().shutdown()

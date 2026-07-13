@@ -55,11 +55,13 @@ class TestEpisodeTransport:
             stop,
             TRANSPORT_TEST_TIMEOUT_SECONDS,
         )
-        assert not transport.get_sender(2).send(
+        blocked_result = transport.get_sender(2).send(
             worker_two_packet,
             stop,
             TRANSPORT_TEST_TIMEOUT_SECONDS,
         )
+        assert not blocked_result
+        assert blocked_result.waiting_ns > 0
 
         transport.receive(TRANSPORT_TEST_TIMEOUT_SECONDS)
         assert transport.get_sender(2).send(
@@ -68,6 +70,7 @@ class TestEpisodeTransport:
             TRANSPORT_TEST_TIMEOUT_SECONDS,
         )
         assert transport.get_stats().max_pending_episodes == 2
+        assert transport.get_stats().sent_episodes == 3
         transport.shutdown()
 
     def test_allows_one_pending_episode_per_worker(self, on_policy_packet):

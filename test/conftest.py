@@ -4,6 +4,7 @@ import gymnasium as gym
 import numpy as np
 import pytest
 from stable_baselines3 import PPO
+from stable_baselines3.common.logger import configure
 from stable_baselines3.common.monitor import Monitor
 
 from async_gym_agents.agents.async_agent import get_injected_agent
@@ -52,6 +53,13 @@ def initialized_on_policy_agent():
     agent._init_collect_state()
     yield agent
     agent.shutdown()
+
+
+@pytest.fixture
+def logged_on_policy_agent(initialized_on_policy_agent):
+    """Configure an initialized agent with an in-memory Stable Baselines logger."""
+    initialized_on_policy_agent.set_logger(configure(format_strings=[]))
+    return initialized_on_policy_agent
 
 
 @pytest.fixture

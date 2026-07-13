@@ -56,6 +56,8 @@ class EpisodeTransportStats:
     max_pending_episodes: int
     pending_bytes: int
     max_pending_bytes: int
+    sent_episodes: int
+    sent_bytes: int
     received_episodes: int
 
 
@@ -70,3 +72,24 @@ class EpisodeAssembly:
     episodes: List[AssembledEpisode]
     transition_count: int
     payload_bytes: int
+
+
+@dataclass(frozen=True)
+class EpisodeSendResult:
+    sent: bool
+    waiting_ns: int
+    transport_ns: int
+
+    def __bool__(self) -> bool:
+        return self.sent
+
+
+@dataclass(frozen=True)
+class EpisodeAssemblerStats:
+    target_transition_count: int
+    filling_transition_count: int
+    completed_assemblies: int
+    last_transition_count: int
+    max_transition_count: int
+    last_payload_bytes: int
+    max_payload_bytes: int

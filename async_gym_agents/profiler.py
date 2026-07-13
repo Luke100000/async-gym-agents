@@ -1,7 +1,7 @@
 import threading
 from contextlib import contextmanager
 from time import perf_counter_ns, time
-from typing import Any, Dict, Iterator, Mapping, MutableMapping, Optional
+from typing import Any, Dict, Iterator, Mapping, MutableMapping, Optional, Tuple
 
 from async_gym_agents.constants import (
     BUFFER_AVG_POLICY_LAG_KEY,
@@ -81,6 +81,8 @@ def build_profiler_report(
     discarded_episodes_fraction: float,
     avg_policy_lag: float,
     max_policy_lag: int,
+    transport_stats: Optional[Mapping[str, float | int]] = None,
+    assembly_stats: Optional[Mapping[str, float | int]] = None,
 ) -> Dict[str, object]:
     return {
         "main": _summarize_stats(main_stats),
@@ -101,6 +103,8 @@ def build_profiler_report(
             if worker_last_sync_time is None
             else max(0.0, time() - worker_last_sync_time),
         },
+        "transport": dict(transport_stats or {}),
+        "assembly": dict(assembly_stats or {}),
     }
 
 
@@ -131,7 +135,40 @@ def render_profiler_report(report: Mapping[str, Any]) -> str:
     )
     lines.append(f"Worker sync: {sync_age}")
 
+    transport = report.get("transport", {})
+    if transport:
+        lines.append(
+            "Transport: "
+            f"pending={int(transport.get('pending_episodes', 0))}, "
+            f"peak={int(transport.get('max_pending_episodes', 0))}, "
+            f"pending_bytes={int(transport.get('pending_bytes', 0))}, "
+            f"peak_bytes={int(transport.get('max_pending_bytes', 0))}"
+        )
+
+    assembly = report.get("assembly", {})
+    if assembly:
+        lines.append(
+            "Assembly: "
+            f"filling={int(assembly.get('filling_transitions', 0))}, "
+            f"last={int(assembly.get('last_transitions', 0))}, "
+            f"target={int(assembly.get('target_transitions', 0))}, "
+            f"peak_bytes={int(assembly.get('max_payload_bytes', 0))}"
+        )
+
     return "\n".join(lines)
+
+
+def iterate_profiler_metrics(
+    report: Mapping[str, Any],
+    prefix: str = "",
+) -> Iterator[Tuple[str, float | int]]:
+    """Flatten numeric report leaves into stable logger metric names."""
+    for name, value in report.items():
+        metric_name = f"{prefix}/{name}" if prefix else name
+        if isinstance(value, Mapping):
+            yield from iterate_profiler_metrics(value, metric_name)
+        elif isinstance(value, (float, int)) and not isinstance(value, bool):
+            yield metric_name, value
 
 
 def _summarize_stats(

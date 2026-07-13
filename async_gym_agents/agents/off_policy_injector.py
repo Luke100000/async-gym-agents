@@ -226,6 +226,7 @@ class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithm):
                         ):
                             self._dump_logs()
 
+        self.record_profiler_metrics()
         callback.on_rollout_end()
 
         return RolloutReturn(

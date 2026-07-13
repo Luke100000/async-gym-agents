@@ -9,7 +9,11 @@ from async_gym_agents.constants import (
     PROFILE_PHASE_ASSEMBLER_WAITING,
     PROFILE_PHASE_EPISODE_DESERIALIZATION,
 )
-from async_gym_agents.data_classes import AssembledEpisode, EpisodeAssembly
+from async_gym_agents.data_classes import (
+    AssembledEpisode,
+    EpisodeAssemblerStats,
+    EpisodeAssembly,
+)
 from async_gym_agents.enums import EpisodeKind
 from async_gym_agents.episode_codec import decode_episode_packet
 from async_gym_agents.episode_transport import EpisodeTransport
@@ -40,6 +44,11 @@ class AsyncEpisodeAssembler:
         self._error: Optional[BaseException] = None
         self._active = False
         self._filled_transition_count = 0
+        self._completed_assemblies = 0
+        self._last_transition_count = 0
+        self._max_transition_count = 0
+        self._last_payload_bytes = 0
+        self._max_payload_bytes = 0
 
     def start(self) -> None:
         """Start filling the first background episode buffer."""
@@ -96,6 +105,19 @@ class AsyncEpisodeAssembler:
         with self._state_lock:
             return self._filled_transition_count
 
+    def get_stats(self) -> EpisodeAssemblerStats:
+        """Return current fill progress and completed buffer peaks."""
+        with self._state_lock:
+            return EpisodeAssemblerStats(
+                target_transition_count=self._target_transition_count,
+                filling_transition_count=self._filled_transition_count,
+                completed_assemblies=self._completed_assemblies,
+                last_transition_count=self._last_transition_count,
+                max_transition_count=self._max_transition_count,
+                last_payload_bytes=self._last_payload_bytes,
+                max_payload_bytes=self._max_payload_bytes,
+            )
+
     def _run(self) -> None:
         try:
             while not self._stop.is_set():
@@ -145,6 +167,18 @@ class AsyncEpisodeAssembler:
 
         if self._stop.is_set():
             return None
+        with self._state_lock:
+            self._completed_assemblies += 1
+            self._last_transition_count = transition_count
+            self._max_transition_count = max(
+                self._max_transition_count,
+                transition_count,
+            )
+            self._last_payload_bytes = payload_bytes
+            self._max_payload_bytes = max(
+                self._max_payload_bytes,
+                payload_bytes,
+            )
         return EpisodeAssembly(
             episodes=episodes,
             transition_count=transition_count,

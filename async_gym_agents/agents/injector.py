@@ -29,6 +29,16 @@ from async_gym_agents.constants import (
     PROFILE_PHASE_TRANSITION_RECONSTRUCTION,
     PROFILE_PHASE_TRANSPORT,
     PROFILE_PHASE_WAITING,
+    PROFILER_LOG_PREFIX,
+    TRANSPORT_CAPACITY_EPISODES_KEY,
+    TRANSPORT_MAX_PENDING_BYTES_KEY,
+    TRANSPORT_MAX_PENDING_EPISODES_KEY,
+    TRANSPORT_PENDING_BYTES_KEY,
+    TRANSPORT_PENDING_EPISODES_KEY,
+    TRANSPORT_RECEIVED_EPISODES_KEY,
+    TRANSPORT_SENT_BYTES_KEY,
+    TRANSPORT_SENT_EPISODES_KEY,
+    TRANSPORT_UTILIZATION_KEY,
 )
 from async_gym_agents.data_classes import EpisodePacket
 from async_gym_agents.envs.multi_env import IndexableMultiEnv
@@ -43,6 +53,7 @@ from async_gym_agents.profiler import (
     ProfileStats,
     RuntimeProfiler,
     build_profiler_report,
+    iterate_profiler_metrics,
     merge_profile_stats,
 )
 from async_gym_agents.types import EnvFactory, Transition
@@ -133,6 +144,7 @@ class AsyncAgentInjector:
         self._policy_lag_total = 0
         self._policy_lag_count = 0
         self._policy_lag_max = 0
+        self._final_transport_report = {}
 
         self._profiler_main = RuntimeProfiler()
         self._logger = logging.getLogger("async_gym_agents")
@@ -341,6 +353,7 @@ class AsyncAgentInjector:
             "_policy_lag_total",
             "_policy_lag_count",
             "_policy_lag_max",
+            "_final_transport_report",
         ]
 
     @staticmethod
@@ -424,6 +437,7 @@ class AsyncAgentInjector:
                     self._logger.warning("cannot kill process due to permission error")
 
         if self._episode_transport is not None:
+            self._final_transport_report = self._build_transport_report()
             self._episode_transport.shutdown()
             self._episode_transport = None
         for update_queue in self._update_queues:
@@ -475,7 +489,35 @@ class AsyncAgentInjector:
             discarded_episodes_fraction=self.discarded_episodes_fraction,
             avg_policy_lag=self.avg_policy_lag,
             max_policy_lag=self.max_policy_lag,
+            transport_stats=self._build_transport_report(),
+            assembly_stats=self._build_assembly_report(),
         )
+
+    def record_profiler_metrics(self) -> None:
+        """Record profiler report leaves through the Stable Baselines logger."""
+        for metric_name, value in iterate_profiler_metrics(self.get_profiler_report()):
+            self.logger.record(f"{PROFILER_LOG_PREFIX}/{metric_name}", value)
+
+    def _build_transport_report(self) -> Dict[str, float | int]:
+        if self._episode_transport is None:
+            return dict(self._final_transport_report)
+
+        stats = self._episode_transport.get_stats()
+        capacity = self._episode_transport.max_pending_episodes
+        return {
+            TRANSPORT_PENDING_EPISODES_KEY: stats.pending_episodes,
+            TRANSPORT_MAX_PENDING_EPISODES_KEY: stats.max_pending_episodes,
+            TRANSPORT_CAPACITY_EPISODES_KEY: capacity,
+            TRANSPORT_UTILIZATION_KEY: stats.pending_episodes / capacity,
+            TRANSPORT_PENDING_BYTES_KEY: stats.pending_bytes,
+            TRANSPORT_MAX_PENDING_BYTES_KEY: stats.max_pending_bytes,
+            TRANSPORT_SENT_EPISODES_KEY: stats.sent_episodes,
+            TRANSPORT_SENT_BYTES_KEY: stats.sent_bytes,
+            TRANSPORT_RECEIVED_EPISODES_KEY: stats.received_episodes,
+        }
+
+    def _build_assembly_report(self) -> Dict[str, float | int]:
+        return {}
 
     def _get_worker_profiler_stats(self) -> ProfileStats:
         if self._state is None or not hasattr(self._state, "worker_profiler_stats"):
@@ -647,24 +689,25 @@ class InjectorWorkerBase:
                 self._policy_version,
                 episode_batch,
             )
-        start_ns = time.perf_counter_ns()
-        sent = self._episode_sender.send(
+        send_result = self._episode_sender.send(
             packet,
             self._stop,
             self._queue_put_timeout,
         )
-        elapsed_ns = time.perf_counter_ns() - start_ns
         with self._state_lock:
             self._state.queue_put_attempts += 1
-            self._state.total_queue_put_wait_ns += elapsed_ns
-            if not sent:
+            self._state.total_queue_put_wait_ns += send_result.waiting_ns
+            if send_result.waiting_ns > 0:
                 self._state.full_queue_put_attempts += 1
+            if not send_result:
                 self._state.discarded_episodes += 1
-        self._profiler.record(
-            PROFILE_PHASE_TRANSPORT,
-            elapsed_ns,
-        )
-        if not sent and not self._stop.is_set():
+        if send_result.waiting_ns > 0:
+            self._profiler.record(
+                PROFILE_PHASE_WAITING,
+                send_result.waiting_ns,
+            )
+        self._profiler.record(PROFILE_PHASE_TRANSPORT, send_result.transport_ns)
+        if not send_result and not self._stop.is_set():
             self._logger.info("Dropped episode after transport timeout")
 
     def _flush_profiler(self, force: bool = False):

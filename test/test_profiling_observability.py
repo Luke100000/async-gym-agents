@@ -2,8 +2,12 @@ from async_gym_agents.constants import (
     BUFFER_AVG_POLICY_LAG_KEY,
     BUFFER_MAX_POLICY_LAG_KEY,
     PROFILE_PHASE_TRANSPORT,
+    PROFILER_LOG_PREFIX,
+    TRANSPORT_MAX_PENDING_BYTES_KEY,
+    TRANSPORT_PENDING_BYTES_KEY,
 )
 from async_gym_agents.episode_codec import encode_episode_batch, pack_episode
+from async_gym_agents.profiler import iterate_profiler_metrics
 
 
 class TestPolicyLagProfiling:
@@ -52,3 +56,46 @@ class TestPolicyLagProfiling:
 
         profile = initialized_on_policy_agent.get_profiler_report()["main"]
         assert profile[PROFILE_PHASE_TRANSPORT]["count"] == 1
+
+    def test_reports_dynamic_transport_memory(
+        self,
+        initialized_on_policy_agent,
+        on_policy_episode,
+        enqueue_episode_packet,
+    ):
+        """Transport reports actual packet bytes instead of fixed info allocation."""
+        packet = encode_episode_batch(
+            worker_index=0,
+            policy_version=0,
+            batch=pack_episode(on_policy_episode),
+        )
+        enqueue_episode_packet(initialized_on_policy_agent, packet)
+
+        transport = initialized_on_policy_agent.get_profiler_report()["transport"]
+
+        assert transport[TRANSPORT_PENDING_BYTES_KEY] == len(packet.payload)
+        assert transport[TRANSPORT_MAX_PENDING_BYTES_KEY] == len(packet.payload)
+
+    def test_flattens_report_into_stable_scalar_names(
+        self,
+        logged_on_policy_agent,
+        on_policy_episode,
+        enqueue_episode_packet,
+    ):
+        """Profiler leaves are available to ClearML through the SB3 logger."""
+        packet = encode_episode_batch(
+            worker_index=0,
+            policy_version=0,
+            batch=pack_episode(on_policy_episode),
+        )
+        enqueue_episode_packet(logged_on_policy_agent, packet)
+        logged_on_policy_agent.fetch_transition()
+
+        logged_on_policy_agent.record_profiler_metrics()
+
+        metric_name = f"{PROFILER_LOG_PREFIX}/buffer/{BUFFER_AVG_POLICY_LAG_KEY}"
+        assert metric_name in logged_on_policy_agent.logger.name_to_value
+        flattened_metrics = dict(
+            iterate_profiler_metrics(logged_on_policy_agent.get_profiler_report())
+        )
+        assert f"transport/{TRANSPORT_MAX_PENDING_BYTES_KEY}" in flattened_metrics

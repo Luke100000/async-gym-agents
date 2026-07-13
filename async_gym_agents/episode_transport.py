@@ -4,7 +4,11 @@ import time
 from typing import Any, Optional, TypeAlias
 
 from async_gym_agents.constants import QUEUE_PUT_RETRY_TIMEOUT_SECONDS
-from async_gym_agents.data_classes import EpisodePacket, EpisodeTransportStats
+from async_gym_agents.data_classes import (
+    EpisodePacket,
+    EpisodeSendResult,
+    EpisodeTransportStats,
+)
 
 GenericQueue: TypeAlias = Any
 GenericSemaphore: TypeAlias = Any
@@ -23,6 +27,8 @@ class EpisodeSender:
         max_pending_episodes: GenericSharedCounter,
         pending_bytes: GenericSharedCounter,
         max_pending_bytes: GenericSharedCounter,
+        sent_episodes: GenericSharedCounter,
+        sent_bytes: GenericSharedCounter,
         use_mp: bool,
     ) -> None:
         self.worker_index = worker_index
@@ -33,6 +39,8 @@ class EpisodeSender:
         self._max_pending_episodes = max_pending_episodes
         self._pending_bytes = pending_bytes
         self._max_pending_bytes = max_pending_bytes
+        self._sent_episodes = sent_episodes
+        self._sent_bytes = sent_bytes
         self._use_mp = use_mp
 
     def send(
@@ -40,26 +48,38 @@ class EpisodeSender:
         packet: EpisodePacket,
         stop: GenericStopEvent,
         timeout: float,
-    ) -> bool:
+    ) -> EpisodeSendResult:
         """Send one complete episode while respecting global and worker bounds."""
         if packet.worker_index != self.worker_index:
             raise ValueError("Episode packet was sent through the wrong worker channel")
 
+        start_ns = time.perf_counter_ns()
         deadline = time.monotonic() + timeout
-        if not self._acquire_capacity(stop, deadline):
-            return False
+        waiting_ns = 0
+        if not self._capacity.acquire(block=False):
+            waiting_start_ns = time.perf_counter_ns()
+            capacity_acquired = self._acquire_capacity(stop, deadline)
+            waiting_ns += time.perf_counter_ns() - waiting_start_ns
+            if not capacity_acquired:
+                return self._build_result(False, waiting_ns, start_ns)
 
         try:
-            if not self._put_packet(packet, stop, deadline):
-                self._capacity.release()
-                return False
+            try:
+                self._episode_queue.put_nowait(packet)
+            except queue.Full:
+                waiting_start_ns = time.perf_counter_ns()
+                packet_sent = self._put_packet(packet, stop, deadline)
+                waiting_ns += time.perf_counter_ns() - waiting_start_ns
+                if not packet_sent:
+                    self._capacity.release()
+                    return self._build_result(False, waiting_ns, start_ns)
         except BaseException:
             self._capacity.release()
             raise
 
         self._record_send(len(packet.payload))
         self._ready_queue.put(self.worker_index)
-        return True
+        return self._build_result(True, waiting_ns, start_ns)
 
     def close(self) -> None:
         """Close this process's queue handles after its worker exits."""
@@ -121,6 +141,23 @@ class EpisodeSender:
                 self._max_pending_bytes.value,
                 pending_bytes,
             )
+        with self._sent_episodes.get_lock():
+            self._sent_episodes.value += 1
+        with self._sent_bytes.get_lock():
+            self._sent_bytes.value += payload_size
+
+    @staticmethod
+    def _build_result(
+        sent: bool,
+        waiting_ns: int,
+        start_ns: int,
+    ) -> EpisodeSendResult:
+        total_ns = time.perf_counter_ns() - start_ns
+        return EpisodeSendResult(
+            sent=sent,
+            waiting_ns=waiting_ns,
+            transport_ns=max(0, total_ns - waiting_ns),
+        )
 
 
 class EpisodeTransport:
@@ -149,6 +186,8 @@ class EpisodeTransport:
         self._max_pending_episodes = self._mp_ctx.Value("q", 0)
         self._pending_bytes = self._mp_ctx.Value("q", 0)
         self._max_pending_bytes = self._mp_ctx.Value("q", 0)
+        self._sent_episodes = self._mp_ctx.Value("q", 0)
+        self._sent_bytes = self._mp_ctx.Value("q", 0)
         self._senders = [
             EpisodeSender(
                 worker_index=worker_index,
@@ -159,6 +198,8 @@ class EpisodeTransport:
                 max_pending_episodes=self._max_pending_episodes,
                 pending_bytes=self._pending_bytes,
                 max_pending_bytes=self._max_pending_bytes,
+                sent_episodes=self._sent_episodes,
+                sent_bytes=self._sent_bytes,
                 use_mp=use_mp,
             )
             for worker_index in range(worker_count)
@@ -197,6 +238,8 @@ class EpisodeTransport:
             max_pending_episodes=self._max_pending_episodes.value,
             pending_bytes=self._pending_bytes.value,
             max_pending_bytes=self._max_pending_bytes.value,
+            sent_episodes=self._sent_episodes.value,
+            sent_bytes=self._sent_bytes.value,
             received_episodes=self._received_episodes,
         )
 
