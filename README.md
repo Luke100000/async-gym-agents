@@ -2,6 +2,19 @@
 
 Wrapper environments and agent injectors to allow for drop-in async training.
 
+Workers build complete episodes, compact their numeric fields into contiguous
+arrays, and serialize each episode once. Empty per-step `info` dictionaries are
+not stored. The trainer receives at most one pending episode per worker and also
+enforces the global `max_episodes_in_buffer` limit, so transport memory grows
+with real payloads rather than a fixed transition ring.
+
+For PPO and other on-policy algorithms, a background assembler fills buffer B
+from complete episodes while Stable Baselines trains buffer A. The final episode
+is never split: an `n_steps` target may therefore produce a slightly larger
+rollout buffer. Episode-start markers still separate trajectories for GAE. The
+bounded worker queues provide backpressure after B is full and prevent workers
+from running arbitrarily far ahead of the trainer.
+
 ```py
 import gymnasium as gym
 from functools import partial
@@ -15,7 +28,12 @@ from async_gym_agents.profiler import render_profiler_report
 env = IndexableMultiEnv([partial(gym.make, "Pendulum-v1") for i in range(8)])
 
 # Create the model, injected with async capabilities
-model = get_injected_agent(TD3)("MlpPolicy", env, use_mp=False)
+model = get_injected_agent(TD3)(
+    "MlpPolicy",
+    env,
+    use_mp=False,
+    max_episodes_in_buffer=8,
+)
 
 # Train the model
 model.learn(total_timesteps=10)
@@ -26,4 +44,26 @@ print(render_profiler_report(report))
 
 # Shut down workers
 model.shutdown()
+```
+
+`queue_put_timeout` defaults to `None`, which keeps workers blocked under
+backpressure until capacity becomes available or shutdown begins. Set a finite
+timeout only when intentionally dropping episodes is preferable to waiting.
+
+Profiler values are recorded automatically through the Stable Baselines logger
+under `profiler/`. Useful series include:
+
+- `profiler/buffer/avg_policy_lag` and `profiler/buffer/max_policy_lag`
+- `profiler/transport/pending_episodes` and
+  `profiler/transport/max_pending_bytes`
+- `profiler/assembly/filling_transitions` and
+  `profiler/assembly/last_transitions`
+- phase timings such as `profiler/main/assembler_waiting/avg_milliseconds` and
+  `profiler/worker/episode_packing/avg_milliseconds`
+
+The standalone payload benchmark compares legacy transition-object pickling
+with the packed whole-episode path:
+
+```shell
+python benchmarks/episode_transport_benchmark.py --episode-length 4096
 ```
