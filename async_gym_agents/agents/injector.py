@@ -18,6 +18,16 @@ from typing import Any, Deque, Dict, Generator, List, Optional, Type, TypeAlias,
 import torch
 from stable_baselines3.common.base_class import BasePolicy
 
+from async_gym_agents.constants import (
+    NANOSECONDS_PER_SECOND,
+    PROFILE_PHASE_POLICY_BROADCAST,
+    PROFILE_PHASE_POLICY_LOADING,
+    PROFILE_PHASE_POLICY_SERIALIZATION,
+    PROFILE_PHASE_TRANSPORT,
+    PROFILE_PHASE_WAITING,
+    QUEUE_PUT_RETRY_TIMEOUT_SECONDS,
+)
+from async_gym_agents.data_classes import EpisodeEnvelope
 from async_gym_agents.envs.multi_env import IndexableMultiEnv
 from async_gym_agents.profiler import (
     ProfileStats,
@@ -111,6 +121,9 @@ class AsyncAgentInjector:
         self._buffer_utilization = 0.0
         self._buffer_emptiness = 0.0
         self._buffer_stat_count = 0
+        self._policy_lag_total = 0
+        self._policy_lag_count = 0
+        self._policy_lag_max = 0
 
         self._profiler_main = RuntimeProfiler()
         self._logger = logging.getLogger("async_gym_agents")
@@ -118,6 +131,7 @@ class AsyncAgentInjector:
     @staticmethod
     def _run_worker(
         worker_class: Type["InjectorWorkerBase"],
+        worker_index: int,
         env_func: EnvFactory,
         episode_queue: GenericQueue,
         update_queue: GenericUpdateQueue,
@@ -140,6 +154,7 @@ class AsyncAgentInjector:
                 )
 
         worker = worker_class(
+            worker_index=worker_index,
             env_func=env_func,
             episode_queue=episode_queue,
             update_queue=update_queue,
@@ -189,16 +204,16 @@ class AsyncAgentInjector:
     def pre_collect_preparation(self, policy: BasePolicy):
         self._init_collect_state()
 
-        with self._profiler_main.track("syncing"):
-            # weights -> bytes
+        with self._profiler_main.track(PROFILE_PHASE_POLICY_SERIALIZATION):
             weights_buf = io.BytesIO()
             torch.save(policy.state_dict(), weights_buf)
             weights_bytes = weights_buf.getvalue()
 
-            self._version += 1
+        self._version += 1
+        with self._profiler_main.track(PROFILE_PHASE_POLICY_BROADCAST):
             self._push_policy_update(self._version, weights_bytes)
 
-            self._logger.debug(f"update policy to the version: {self._version}")
+        self._logger.debug(f"update policy to the version: {self._version}")
 
         with self._profiler_main.track("worker_bootstrap"):
             self._init_collect_processes(policy)
@@ -270,6 +285,7 @@ class AsyncAgentInjector:
                     target=AsyncAgentInjector._run_worker,
                     kwargs=dict(
                         worker_class=self.get_worker_class(),
+                        worker_index=worker_index,
                         env_func=env_func,
                         episode_queue=self._episode_queue,
                         update_queue=update_queue,
@@ -313,6 +329,9 @@ class AsyncAgentInjector:
             "_workers",
             "_profiler_main",
             "_logger",
+            "_policy_lag_total",
+            "_policy_lag_count",
+            "_policy_lag_max",
         ]
 
     @staticmethod
@@ -328,9 +347,26 @@ class AsyncAgentInjector:
             self._clear_queue(update_queue)
             update_queue.put((version, weights))
 
-    def _fetch_transitions(self) -> List[Transition]:
-        with self._profiler_main.track("transport"):
-            return self._episode_queue.get()
+    def _fetch_transitions(self, buffer_was_empty: bool) -> List[Transition]:
+        phase = PROFILE_PHASE_WAITING if buffer_was_empty else PROFILE_PHASE_TRANSPORT
+        with self._profiler_main.track(phase):
+            episode = self._episode_queue.get()
+
+        self._record_policy_lag(episode.policy_version, len(episode.transitions))
+        return episode.transitions
+
+    def _record_policy_lag(
+        self,
+        policy_version: Optional[int],
+        transition_count: int,
+    ) -> None:
+        if policy_version is None or transition_count == 0:
+            return
+
+        lag = max(0, self._version - policy_version)
+        self._policy_lag_total += lag * transition_count
+        self._policy_lag_count += transition_count
+        self._policy_lag_max = max(self._policy_lag_max, lag)
 
     def fetch_transition(self) -> Transition:
         """
@@ -339,10 +375,11 @@ class AsyncAgentInjector:
         """
         while len(self._transitions) == 0:
             self._buffer_utilization += self._episode_queue.qsize()
-            self._buffer_emptiness += 1 if self._episode_queue.empty() else 0
+            buffer_was_empty = self._episode_queue.empty()
+            self._buffer_emptiness += 1 if buffer_was_empty else 0
             self._buffer_stat_count += 1
 
-            self._transitions.extend(self._fetch_transitions())
+            self._transitions.extend(self._fetch_transitions(buffer_was_empty))
 
         return self._transitions.popleft()
 
@@ -417,8 +454,10 @@ class AsyncAgentInjector:
             buffer_utilization=self.buffer_utilization,
             buffer_emptiness=self.buffer_emptyness,
             buffer_full_push_fraction=self.buffer_full_push_fraction,
-            buffer_avg_push_time=self.buffer_avg_push_time,
+            buffer_avg_push_wait_time=self.buffer_avg_push_wait_time,
             discarded_episodes_fraction=self.discarded_episodes_fraction,
+            avg_policy_lag=self.avg_policy_lag,
+            max_policy_lag=self.max_policy_lag,
         )
 
     def _get_worker_profiler_stats(self) -> ProfileStats:
@@ -473,6 +512,11 @@ class AsyncAgentInjector:
 
     @property
     def buffer_avg_push_time(self) -> float:
+        """Return the average enqueue wait through the legacy property name."""
+        return self.buffer_avg_push_wait_time
+
+    @property
+    def buffer_avg_push_wait_time(self) -> float:
         """
         The average time spent waiting to enqueue an episode, in seconds.
         """
@@ -481,13 +525,28 @@ class AsyncAgentInjector:
             if self._state is None or self._state.queue_put_attempts == 0
             else self._state.total_queue_put_wait_ns
             / self._state.queue_put_attempts
-            / 1_000_000_000
+            / NANOSECONDS_PER_SECOND
         )
+
+    @property
+    def avg_policy_lag(self) -> float:
+        """Return the transition-weighted average policy update lag."""
+        return (
+            0
+            if self._policy_lag_count == 0
+            else self._policy_lag_total / self._policy_lag_count
+        )
+
+    @property
+    def max_policy_lag(self) -> int:
+        """Return the largest observed policy update lag."""
+        return self._policy_lag_max
 
 
 class InjectorWorkerBase:
     def __init__(
         self,
+        worker_index: int,
         env_func: EnvFactory,
         episode_queue: GenericQueue,
         update_queue: GenericUpdateQueue,
@@ -502,6 +561,7 @@ class InjectorWorkerBase:
         **kwargs,
     ):
         self.env = make_venv(env_func())
+        self.worker_index = worker_index
 
         self.policy: BasePolicy | None = None
         self.policy_class = policy_class
@@ -547,7 +607,7 @@ class InjectorWorkerBase:
         if self._policy_version == version:
             return
 
-        with self._profiler.track("syncing"):
+        with self._profiler.track(PROFILE_PHASE_POLICY_LOADING):
             weights = torch.load(
                 io.BytesIO(weights_bytes),
                 map_location="cpu",
@@ -562,8 +622,13 @@ class InjectorWorkerBase:
             )
 
     def _put_episode_with_timeout(self, episode):
+        payload = EpisodeEnvelope(
+            worker_index=self.worker_index,
+            policy_version=self._policy_version,
+            transitions=episode,
+        )
         start_ns = time.perf_counter_ns()
-        deadline_ns = start_ns + int(self._queue_put_timeout * 1_000_000_000)
+        deadline_ns = start_ns + int(self._queue_put_timeout * NANOSECONDS_PER_SECOND)
         queue_was_full = self._episode_queue.full()
 
         def record_push_wait() -> None:
@@ -581,35 +646,47 @@ class InjectorWorkerBase:
         while time.perf_counter_ns() < deadline_ns:
             if self._stop.is_set():
                 record_push_wait()
-                self._profiler.record("transport", time.perf_counter_ns() - start_ns)
+                self._profiler.record(
+                    PROFILE_PHASE_TRANSPORT,
+                    time.perf_counter_ns() - start_ns,
+                )
                 return
 
             try:
                 remaining_timeout = min(
-                    0.1,
-                    max(0.0, (deadline_ns - time.perf_counter_ns()) / 1_000_000_000),
+                    QUEUE_PUT_RETRY_TIMEOUT_SECONDS,
+                    max(
+                        0.0,
+                        (deadline_ns - time.perf_counter_ns()) / NANOSECONDS_PER_SECOND,
+                    ),
                 )
                 self._episode_queue.put(
-                    episode,
+                    payload,
                     block=True,
                     timeout=remaining_timeout,
                 )
                 record_push_wait()
-                self._profiler.record("transport", time.perf_counter_ns() - start_ns)
+                self._profiler.record(
+                    PROFILE_PHASE_TRANSPORT,
+                    time.perf_counter_ns() - start_ns,
+                )
                 return
             except queue.Full:
                 pass
 
         try:
             self._episode_queue.get(block=False)
-            self._episode_queue.put(episode, block=False)
+            self._episode_queue.put(payload, block=False)
         except (queue.Full, queue.Empty):
             pass
 
         with self._state_lock:
             self._state.discarded_episodes += 1
         record_push_wait()
-        self._profiler.record("transport", time.perf_counter_ns() - start_ns)
+        self._profiler.record(
+            PROFILE_PHASE_TRANSPORT,
+            time.perf_counter_ns() - start_ns,
+        )
         self._logger.info("Dropped episode due to buffer full")
 
     def _flush_profiler(self, force: bool = False):

@@ -2,6 +2,15 @@ from contextlib import contextmanager
 from time import perf_counter_ns, time
 from typing import Any, Dict, Iterator, Mapping, MutableMapping, Optional
 
+from async_gym_agents.constants import (
+    BUFFER_AVG_POLICY_LAG_KEY,
+    BUFFER_AVG_PUSH_TIME_SECONDS_KEY,
+    BUFFER_AVG_PUSH_WAIT_SECONDS_KEY,
+    BUFFER_MAX_POLICY_LAG_KEY,
+    MILLISECONDS_PER_SECOND,
+    NANOSECONDS_PER_SECOND,
+)
+
 ProfileStats = Dict[str, Dict[str, int]]
 
 
@@ -63,8 +72,10 @@ def build_profiler_report(
     buffer_utilization: float,
     buffer_emptiness: float,
     buffer_full_push_fraction: float,
-    buffer_avg_push_time: float,
+    buffer_avg_push_wait_time: float,
     discarded_episodes_fraction: float,
+    avg_policy_lag: float,
+    max_policy_lag: int,
 ) -> Dict[str, object]:
     return {
         "main": _summarize_stats(main_stats),
@@ -73,8 +84,11 @@ def build_profiler_report(
             "utilization": buffer_utilization,
             "emptiness": buffer_emptiness,
             "full_push_fraction": buffer_full_push_fraction,
-            "avg_push_time_seconds": buffer_avg_push_time,
+            BUFFER_AVG_PUSH_WAIT_SECONDS_KEY: buffer_avg_push_wait_time,
+            BUFFER_AVG_PUSH_TIME_SECONDS_KEY: buffer_avg_push_wait_time,
             "discarded_episodes_fraction": discarded_episodes_fraction,
+            BUFFER_AVG_POLICY_LAG_KEY: avg_policy_lag,
+            BUFFER_MAX_POLICY_LAG_KEY: max_policy_lag,
         },
         "worker_sync": {
             "last_sync_unix_time": worker_last_sync_time,
@@ -91,13 +105,16 @@ def render_profiler_report(report: Mapping[str, Any]) -> str:
     lines.extend(_render_profile_section("Worker", report.get("worker", {})))
 
     buffer = report.get("buffer", {})
+    avg_push_wait_seconds = buffer.get(BUFFER_AVG_PUSH_WAIT_SECONDS_KEY, 0.0)
     lines.append(
         "Buffer: "
         f"util={buffer.get('utilization', 0.0):.2f}, "
         f"empty={buffer.get('emptiness', 0.0):.2f}, "
         f"full_push={buffer.get('full_push_fraction', 0.0):.2f}, "
-        f"push_ms={buffer.get('avg_push_time_seconds', 0.0) * 1000:.2f}, "
-        f"dropped={buffer.get('discarded_episodes_fraction', 0.0):.2f}"
+        f"push_wait_ms={avg_push_wait_seconds * MILLISECONDS_PER_SECOND:.2f}, "
+        f"dropped={buffer.get('discarded_episodes_fraction', 0.0):.2f}, "
+        f"policy_lag_avg={buffer.get(BUFFER_AVG_POLICY_LAG_KEY, 0.0):.2f}, "
+        f"policy_lag_max={int(buffer.get(BUFFER_MAX_POLICY_LAG_KEY, 0))}"
     )
 
     worker_sync = report.get("worker_sync", {})
@@ -122,11 +139,13 @@ def _summarize_stats(
         phase_total_ns = int(values.get("total_ns", 0))
         count = int(values.get("count", 0))
         summarized[phase] = {
-            "total_seconds": phase_total_ns / 1_000_000_000,
+            "total_seconds": phase_total_ns / NANOSECONDS_PER_SECOND,
             "count": count,
             "avg_milliseconds": 0.0
             if count == 0
-            else phase_total_ns / count / 1_000_000,
+            else phase_total_ns
+            / count
+            / (NANOSECONDS_PER_SECOND / MILLISECONDS_PER_SECOND),
             "share": 0.0 if total_ns == 0 else phase_total_ns / total_ns,
         }
 
