@@ -1,5 +1,4 @@
-from dataclasses import dataclass
-from typing import Dict, Generator, Type
+from typing import Generator, Type
 
 import gymnasium as gym
 import numpy as np
@@ -10,24 +9,10 @@ from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.on_policy_algorithm import OnPolicyAlgorithm
 from stable_baselines3.common.utils import obs_as_tensor
 from stable_baselines3.common.vec_env import VecEnv
-from stable_baselines3.common.vec_env.base_vec_env import VecEnvObs
 
 from async_gym_agents.agents.injector import AsyncAgentInjector, InjectorWorkerBase
+from async_gym_agents.data_classes import OnPolicyTransition as Transition
 from async_gym_agents.utils import copy_obs, single_slice
-
-
-@dataclass
-class Transition:
-    actions: np.ndarray
-    values: np.ndarray
-    log_probs: np.ndarray
-    last_obs: VecEnvObs
-    new_obs: VecEnvObs
-    rewards: np.ndarray
-    dones: np.ndarray
-    last_dones: np.ndarray
-    infos: list[Dict]
-    reset_infos: list[Dict]
 
 
 class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):

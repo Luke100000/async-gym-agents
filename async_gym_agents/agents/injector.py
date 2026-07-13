@@ -20,15 +20,25 @@ from stable_baselines3.common.base_class import BasePolicy
 
 from async_gym_agents.constants import (
     NANOSECONDS_PER_SECOND,
+    PROFILE_PHASE_EPISODE_DESERIALIZATION,
+    PROFILE_PHASE_EPISODE_PACKING,
+    PROFILE_PHASE_EPISODE_SERIALIZATION,
     PROFILE_PHASE_POLICY_BROADCAST,
     PROFILE_PHASE_POLICY_LOADING,
     PROFILE_PHASE_POLICY_SERIALIZATION,
+    PROFILE_PHASE_TRANSITION_RECONSTRUCTION,
     PROFILE_PHASE_TRANSPORT,
     PROFILE_PHASE_WAITING,
     QUEUE_PUT_RETRY_TIMEOUT_SECONDS,
 )
-from async_gym_agents.data_classes import EpisodeEnvelope
+from async_gym_agents.data_classes import EpisodePacket
 from async_gym_agents.envs.multi_env import IndexableMultiEnv
+from async_gym_agents.episode_codec import (
+    decode_episode_packet,
+    encode_episode_batch,
+    pack_episode,
+    unpack_episode,
+)
 from async_gym_agents.profiler import (
     ProfileStats,
     RuntimeProfiler,
@@ -350,10 +360,20 @@ class AsyncAgentInjector:
     def _fetch_transitions(self, buffer_was_empty: bool) -> List[Transition]:
         phase = PROFILE_PHASE_WAITING if buffer_was_empty else PROFILE_PHASE_TRANSPORT
         with self._profiler_main.track(phase):
-            episode = self._episode_queue.get()
+            packet: EpisodePacket = self._episode_queue.get()
 
-        self._record_policy_lag(episode.policy_version, len(episode.transitions))
-        return episode.transitions
+        self._record_policy_lag(packet.policy_version, packet.transition_count)
+        with self._profiler_main.track(PROFILE_PHASE_EPISODE_DESERIALIZATION):
+            episode_batch = decode_episode_packet(packet)
+
+        reconstruction_start_ns = time.perf_counter_ns()
+        transitions = unpack_episode(episode_batch)
+        self._profiler_main.record(
+            PROFILE_PHASE_TRANSITION_RECONSTRUCTION,
+            time.perf_counter_ns() - reconstruction_start_ns,
+            count=packet.transition_count,
+        )
+        return transitions
 
     def _record_policy_lag(
         self,
@@ -622,11 +642,14 @@ class InjectorWorkerBase:
             )
 
     def _put_episode_with_timeout(self, episode):
-        payload = EpisodeEnvelope(
-            worker_index=self.worker_index,
-            policy_version=self._policy_version,
-            transitions=episode,
-        )
+        with self._profiler.track(PROFILE_PHASE_EPISODE_PACKING):
+            episode_batch = pack_episode(episode)
+        with self._profiler.track(PROFILE_PHASE_EPISODE_SERIALIZATION):
+            packet = encode_episode_batch(
+                self.worker_index,
+                self._policy_version,
+                episode_batch,
+            )
         start_ns = time.perf_counter_ns()
         deadline_ns = start_ns + int(self._queue_put_timeout * NANOSECONDS_PER_SECOND)
         queue_was_full = self._episode_queue.full()
@@ -661,7 +684,7 @@ class InjectorWorkerBase:
                     ),
                 )
                 self._episode_queue.put(
-                    payload,
+                    packet,
                     block=True,
                     timeout=remaining_timeout,
                 )
@@ -676,7 +699,7 @@ class InjectorWorkerBase:
 
         try:
             self._episode_queue.get(block=False)
-            self._episode_queue.put(payload, block=False)
+            self._episode_queue.put(packet, block=False)
         except (queue.Full, queue.Empty):
             pass
 

@@ -1,24 +1,32 @@
 from collections import deque
 
-from async_gym_agents.data_classes import EpisodeEnvelope
+import numpy as np
+
+from async_gym_agents.episode_codec import encode_episode_batch, pack_episode
 
 
 class TestTransitionConsumption:
     """Episode transitions are consumed in order without shifting a Python list."""
 
-    def test_consumes_episode_from_deque(self, initialized_on_policy_agent):
+    def test_consumes_episode_from_deque(
+        self,
+        initialized_on_policy_agent,
+        on_policy_episode,
+    ):
         """Fetching the first row keeps the remaining episode in a deque."""
-        first_transition = object()
-        second_transition = object()
         initialized_on_policy_agent._episode_queue.put(
-            EpisodeEnvelope(
+            encode_episode_batch(
                 worker_index=0,
                 policy_version=0,
-                transitions=[first_transition, second_transition],
+                batch=pack_episode(on_policy_episode),
             )
         )
 
         fetched_transition = initialized_on_policy_agent.fetch_transition()
 
-        assert fetched_transition is first_transition
-        assert initialized_on_policy_agent._transitions == deque([second_transition])
+        np.testing.assert_array_equal(
+            fetched_transition.actions,
+            on_policy_episode[0].actions,
+        )
+        assert isinstance(initialized_on_policy_agent._transitions, deque)
+        assert len(initialized_on_policy_agent._transitions) == 1

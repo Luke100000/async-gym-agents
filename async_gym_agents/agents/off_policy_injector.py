@@ -1,4 +1,3 @@
-from dataclasses import dataclass
 from typing import Any, Dict, Generator, List, Optional, Tuple, Type
 
 import gymnasium as gym
@@ -15,18 +14,8 @@ from stable_baselines3.common.vec_env import VecEnv
 from stable_baselines3.common.vec_env.base_vec_env import VecEnvObs
 
 from async_gym_agents.agents.injector import AsyncAgentInjector, InjectorWorkerBase
+from async_gym_agents.data_classes import OffPolicyTransition as Transition
 from async_gym_agents.utils import copy_obs, single_slice
-
-
-@dataclass
-class Transition:
-    buffer_actions: np.ndarray
-    last_obs: VecEnvObs
-    new_obs: VecEnvObs
-    rewards: np.ndarray
-    dones: np.ndarray
-    infos: list[Dict]
-    reset_infos: list[Dict]
 
 
 class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithm):
