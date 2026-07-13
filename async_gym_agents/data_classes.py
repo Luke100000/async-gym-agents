@@ -57,3 +57,16 @@ class EpisodeTransportStats:
     pending_bytes: int
     max_pending_bytes: int
     received_episodes: int
+
+
+@dataclass(frozen=True)
+class AssembledEpisode:
+    packet: EpisodePacket
+    batch: EpisodeBatch
+
+
+@dataclass(frozen=True)
+class EpisodeAssembly:
+    episodes: List[AssembledEpisode]
+    transition_count: int
+    payload_bytes: int

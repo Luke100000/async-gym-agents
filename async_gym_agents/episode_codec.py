@@ -86,6 +86,21 @@ def unpack_episode(
     return transitions
 
 
+def slice_episode_field(batch: EpisodeBatch, field_name: str, index: int) -> Any:
+    """Return one row from a packed episode field with its environment axis."""
+    return _slice_value(batch.fields[field_name], index)
+
+
+def get_episode_infos(batch: EpisodeBatch, index: int) -> List[Dict]:
+    """Return one row's sparse info list."""
+    return batch.infos.get(index, [{}])
+
+
+def get_episode_reset_infos(batch: EpisodeBatch, index: int) -> List[Dict]:
+    """Return one row's sparse reset-info list."""
+    return batch.reset_infos.get(index, [{}])
+
+
 def _resolve_episode_type(
     transition: OnPolicyTransition | OffPolicyTransition,
 ) -> tuple[Type[OnPolicyTransition | OffPolicyTransition], EpisodeKind]:

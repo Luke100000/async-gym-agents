@@ -31,6 +31,14 @@ def lunar_lander_multi_env():
 
 
 @pytest.fixture
+def short_cartpole_multi_env():
+    """Create workers whose episodes always end after two transitions."""
+    return IndexableMultiEnv(
+        [partial(gym.make, "CartPole-v1", max_episode_steps=2) for _ in range(2)]
+    )
+
+
+@pytest.fixture
 def initialized_on_policy_agent():
     """Create an on-policy agent with initialized transport state and no workers."""
     env = IndexableMultiEnv([partial(gym.make, "Taxi-v3")])

@@ -12,6 +12,13 @@ from stable_baselines3.common.vec_env import VecEnv
 
 from async_gym_agents.agents.injector import AsyncAgentInjector, InjectorWorkerBase
 from async_gym_agents.data_classes import OnPolicyTransition as Transition
+from async_gym_agents.enums import EpisodeKind
+from async_gym_agents.episode_assembler import AsyncEpisodeAssembler
+from async_gym_agents.episode_codec import (
+    get_episode_infos,
+    get_episode_reset_infos,
+    slice_episode_field,
+)
 from async_gym_agents.utils import copy_obs, single_slice
 
 
@@ -40,6 +47,7 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
             mp_threads=mp_threads,
         )
         super(AsyncAgentInjector, self).__init__(*args, **kwargs)
+        self._episode_assembler = None
 
     # must be updated from SB3 (!)
     def collect_rollouts(
@@ -64,16 +72,21 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
         """
         assert self._last_obs is not None, "No previous observation was provided"
 
-        # Switch to eval mode (this affects batch norm / dropout)
         self.policy.set_training_mode(False)
-
         self.pre_collect_preparation(self.policy)
+        self._initialize_episode_assembler(n_rollout_steps)
+        assembly = self._episode_assembler.acquire()
+        for assembled_episode in assembly.episodes:
+            self._record_policy_lag(
+                assembled_episode.packet.policy_version,
+                assembled_episode.packet.transition_count,
+            )
 
         n_steps = 0
         rollout_buffer.n_envs = 1
+        rollout_buffer.buffer_size = assembly.transition_count
         rollout_buffer.reset()
 
-        # Sample new weights for the state-dependent exploration
         if self.use_sde:
             self.policy.reset_noise(1)
 
@@ -81,72 +94,103 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
 
         new_obs = None
         dones = None
-        while n_steps < n_rollout_steps:
-            if (
-                self.use_sde
-                and self.sde_sample_freq > 0
-                and n_steps % self.sde_sample_freq == 0
-            ):
-                # Sample a new noise matrix
-                self.policy.reset_noise(1)
-
-            # Fetch transitions from workers
-            transition: Transition = self.fetch_transition()
-
-            with self._profiler_main.track("processing"):
-                # Make locals available for callbacks
-                new_obs = transition.new_obs
-                self._last_obs = transition.last_obs
-                actions = transition.actions
-                rewards = transition.rewards
-                self._last_episode_starts = transition.last_dones
-                values = torch.from_numpy(transition.values)
-                log_probs = torch.from_numpy(transition.log_probs)
-                dones = transition.dones
-                infos = transition.infos
-                reset_infos = transition.reset_infos
-
-                self.num_timesteps += 1
-
-                # Give access to local variables
-                callback.update_locals(locals())
-                if not callback.on_step():
-                    return False
-
-                self._update_info_buffer(infos, dones)
-                n_steps += 1
-
-                # Handle timeout by bootstrapping with value function
-                # see GitHub issue #633
-                for idx, done in enumerate(dones):
+        try:
+            for assembled_episode in assembly.episodes:
+                batch = assembled_episode.batch
+                for transition_index in range(batch.transition_count):
                     if (
-                        done
-                        and infos[idx].get("terminal_observation") is not None
-                        and infos[idx].get("TimeLimit.truncated", False)
+                        self.use_sde
+                        and self.sde_sample_freq > 0
+                        and n_steps % self.sde_sample_freq == 0
                     ):
-                        terminal_obs = self.policy.obs_to_tensor(
-                            infos[idx]["terminal_observation"]
-                        )[0]
-                        with torch.inference_mode():
-                            terminal_value = self.policy.predict_values(terminal_obs)[0]
-                        rewards[idx] += self.gamma * terminal_value
+                        self.policy.reset_noise(1)
 
-                assert rollout_buffer.n_envs == 1
+                    with self._profiler_main.track("processing"):
+                        new_obs = slice_episode_field(
+                            batch,
+                            "new_obs",
+                            transition_index,
+                        )
+                        self._last_obs = slice_episode_field(
+                            batch,
+                            "last_obs",
+                            transition_index,
+                        )
+                        actions = slice_episode_field(
+                            batch,
+                            "actions",
+                            transition_index,
+                        )
+                        rewards = slice_episode_field(
+                            batch,
+                            "rewards",
+                            transition_index,
+                        )
+                        self._last_episode_starts = slice_episode_field(
+                            batch,
+                            "last_dones",
+                            transition_index,
+                        )
+                        values = torch.from_numpy(
+                            slice_episode_field(
+                                batch,
+                                "values",
+                                transition_index,
+                            )
+                        )
+                        log_probs = torch.from_numpy(
+                            slice_episode_field(
+                                batch,
+                                "log_probs",
+                                transition_index,
+                            )
+                        )
+                        dones = slice_episode_field(
+                            batch,
+                            "dones",
+                            transition_index,
+                        )
+                        infos = get_episode_infos(batch, transition_index)
+                        reset_infos = get_episode_reset_infos(
+                            batch,
+                            transition_index,
+                        )
 
-                rollout_buffer.add(
-                    self._last_obs,
-                    actions,
-                    rewards,
-                    self._last_episode_starts,
-                    values,
-                    log_probs,
-                )
+                        self.num_timesteps += 1
+                        callback.update_locals(locals())
+                        if not callback.on_step():
+                            return False
+
+                        self._update_info_buffer(infos, dones)
+                        n_steps += 1
+                        for idx, done in enumerate(dones):
+                            if (
+                                done
+                                and infos[idx].get("terminal_observation") is not None
+                                and infos[idx].get("TimeLimit.truncated", False)
+                            ):
+                                terminal_obs = self.policy.obs_to_tensor(
+                                    infos[idx]["terminal_observation"]
+                                )[0]
+                                with torch.inference_mode():
+                                    terminal_value = self.policy.predict_values(
+                                        terminal_obs
+                                    )[0]
+                                rewards[idx] += self.gamma * terminal_value.item()
+
+                        rollout_buffer.add(
+                            self._last_obs,
+                            actions,
+                            rewards,
+                            self._last_episode_starts,
+                            values,
+                            log_probs,
+                        )
+        finally:
+            self._episode_assembler.release()
 
         with self._profiler_main.track("processing"):
-            with torch.inference_mode():
-                # Compute value for the last timestep
-                values = self.policy.predict_values(obs_as_tensor(new_obs, self.device))
-
+            values = torch.zeros(1, device=self.device)
             rollout_buffer.compute_returns_and_advantage(
                 last_values=values, dones=dones
             )
@@ -156,6 +200,26 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
         callback.on_rollout_end()
 
         return True
+
+    def _initialize_episode_assembler(self, target_transition_count: int) -> None:
+        if self._episode_assembler is not None:
+            return
+        self._episode_assembler = AsyncEpisodeAssembler(
+            transport=self._episode_transport,
+            target_transition_count=target_transition_count,
+            expected_episode_kind=EpisodeKind.ON_POLICY,
+            profiler=self._profiler_main,
+        )
+        self._episode_assembler.start()
+
+    def _excluded_save_params(self):
+        return super()._excluded_save_params() + ["_episode_assembler"]
+
+    def shutdown(self):
+        if self._episode_assembler is not None:
+            self._episode_assembler.shutdown()
+            self._episode_assembler = None
+        return super().shutdown()
 
     def get_worker_class(self) -> Type[InjectorWorkerBase]:
         return InjectorWorker

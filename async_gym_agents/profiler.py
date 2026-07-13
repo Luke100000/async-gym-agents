@@ -1,3 +1,4 @@
+import threading
 from contextlib import contextmanager
 from time import perf_counter_ns, time
 from typing import Any, Dict, Iterator, Mapping, MutableMapping, Optional
@@ -41,6 +42,7 @@ class RuntimeProfiler:
     def __init__(self) -> None:
         self._stats: ProfileStats = {}
         self._pending: ProfileStats = {}
+        self._lock = threading.Lock()
 
     @contextmanager
     def track(self, phase: str) -> Iterator[None]:
@@ -52,16 +54,19 @@ class RuntimeProfiler:
 
     def record(self, phase: str, duration_ns: int, count: int = 1) -> None:
         update = {"total_ns": max(0, int(duration_ns)), "count": int(count)}
-        merge_profile_stats(self._stats, {phase: update})
-        merge_profile_stats(self._pending, {phase: update})
+        with self._lock:
+            merge_profile_stats(self._stats, {phase: update})
+            merge_profile_stats(self._pending, {phase: update})
 
     def snapshot(self) -> ProfileStats:
-        return _copy_stats(self._stats)
+        with self._lock:
+            return _copy_stats(self._stats)
 
     def drain_pending(self) -> ProfileStats:
-        pending = self._pending
-        self._pending = {}
-        return _copy_stats(pending)
+        with self._lock:
+            pending = self._pending
+            self._pending = {}
+            return _copy_stats(pending)
 
 
 def build_profiler_report(
