@@ -3,7 +3,11 @@ import queue
 import time
 from typing import Any, Optional, TypeAlias
 
-from async_gym_agents.constants import QUEUE_PUT_RETRY_TIMEOUT_SECONDS
+from async_gym_agents.constants import (
+    PER_WORKER_PENDING_EPISODE_CAPACITY,
+    QUEUE_PUT_RETRY_TIMEOUT_SECONDS,
+    SHARED_COUNTER_TYPE_CODE,
+)
 from async_gym_agents.data_classes import (
     EpisodePacket,
     EpisodeSendResult,
@@ -186,15 +190,16 @@ class EpisodeTransport:
         self._mp_ctx = mp_ctx or multiprocessing.get_context()
         self._ready_queue = self._create_queue()
         self._episode_queues = [
-            self._create_queue(maxsize=1) for _ in range(worker_count)
+            self._create_queue(maxsize=PER_WORKER_PENDING_EPISODE_CAPACITY)
+            for _ in range(worker_count)
         ]
         self._capacity = self._mp_ctx.BoundedSemaphore(max_pending_episodes)
-        self._pending_episodes = self._mp_ctx.Value("q", 0)
-        self._max_pending_episodes = self._mp_ctx.Value("q", 0)
-        self._pending_bytes = self._mp_ctx.Value("q", 0)
-        self._max_pending_bytes = self._mp_ctx.Value("q", 0)
-        self._sent_episodes = self._mp_ctx.Value("q", 0)
-        self._sent_bytes = self._mp_ctx.Value("q", 0)
+        self._pending_episodes = self._mp_ctx.Value(SHARED_COUNTER_TYPE_CODE, 0)
+        self._max_pending_episodes = self._mp_ctx.Value(SHARED_COUNTER_TYPE_CODE, 0)
+        self._pending_bytes = self._mp_ctx.Value(SHARED_COUNTER_TYPE_CODE, 0)
+        self._max_pending_bytes = self._mp_ctx.Value(SHARED_COUNTER_TYPE_CODE, 0)
+        self._sent_episodes = self._mp_ctx.Value(SHARED_COUNTER_TYPE_CODE, 0)
+        self._sent_bytes = self._mp_ctx.Value(SHARED_COUNTER_TYPE_CODE, 0)
         self._senders = [
             EpisodeSender(
                 worker_index=worker_index,

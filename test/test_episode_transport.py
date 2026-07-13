@@ -112,6 +112,7 @@ class TestEpisodeTransport:
         results = []
 
         def send_blocked_episode():
+            """Capture the result of a sender blocked by transport capacity."""
             results.append(transport.get_sender(0).send(on_policy_packet, stop, None))
 
         sender_thread = threading.Thread(target=send_blocked_episode)

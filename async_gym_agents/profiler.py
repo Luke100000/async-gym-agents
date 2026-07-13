@@ -4,12 +4,20 @@ from time import perf_counter_ns, time
 from typing import Any, Dict, Iterator, Mapping, MutableMapping, Optional, Tuple
 
 from async_gym_agents.constants import (
+    ASSEMBLY_FILLING_TRANSITIONS_KEY,
+    ASSEMBLY_LAST_TRANSITIONS_KEY,
+    ASSEMBLY_MAX_PAYLOAD_BYTES_KEY,
+    ASSEMBLY_TARGET_TRANSITIONS_KEY,
     BUFFER_AVG_POLICY_LAG_KEY,
     BUFFER_AVG_PUSH_TIME_SECONDS_KEY,
     BUFFER_AVG_PUSH_WAIT_SECONDS_KEY,
     BUFFER_MAX_POLICY_LAG_KEY,
     MILLISECONDS_PER_SECOND,
     NANOSECONDS_PER_SECOND,
+    TRANSPORT_MAX_PENDING_BYTES_KEY,
+    TRANSPORT_MAX_PENDING_EPISODES_KEY,
+    TRANSPORT_PENDING_BYTES_KEY,
+    TRANSPORT_PENDING_EPISODES_KEY,
 )
 
 ProfileStats = Dict[str, Dict[str, int]]
@@ -139,20 +147,20 @@ def render_profiler_report(report: Mapping[str, Any]) -> str:
     if transport:
         lines.append(
             "Transport: "
-            f"pending={int(transport.get('pending_episodes', 0))}, "
-            f"peak={int(transport.get('max_pending_episodes', 0))}, "
-            f"pending_bytes={int(transport.get('pending_bytes', 0))}, "
-            f"peak_bytes={int(transport.get('max_pending_bytes', 0))}"
+            f"pending={int(transport.get(TRANSPORT_PENDING_EPISODES_KEY, 0))}, "
+            f"peak={int(transport.get(TRANSPORT_MAX_PENDING_EPISODES_KEY, 0))}, "
+            f"pending_bytes={int(transport.get(TRANSPORT_PENDING_BYTES_KEY, 0))}, "
+            f"peak_bytes={int(transport.get(TRANSPORT_MAX_PENDING_BYTES_KEY, 0))}"
         )
 
     assembly = report.get("assembly", {})
     if assembly:
         lines.append(
             "Assembly: "
-            f"filling={int(assembly.get('filling_transitions', 0))}, "
-            f"last={int(assembly.get('last_transitions', 0))}, "
-            f"target={int(assembly.get('target_transitions', 0))}, "
-            f"peak_bytes={int(assembly.get('max_payload_bytes', 0))}"
+            f"filling={int(assembly.get(ASSEMBLY_FILLING_TRANSITIONS_KEY, 0))}, "
+            f"last={int(assembly.get(ASSEMBLY_LAST_TRANSITIONS_KEY, 0))}, "
+            f"target={int(assembly.get(ASSEMBLY_TARGET_TRANSITIONS_KEY, 0))}, "
+            f"peak_bytes={int(assembly.get(ASSEMBLY_MAX_PAYLOAD_BYTES_KEY, 0))}"
         )
 
     return "\n".join(lines)

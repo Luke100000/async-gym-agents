@@ -1,4 +1,5 @@
 import argparse
+import multiprocessing
 import pickle
 import time
 from typing import Callable, Sequence
@@ -52,6 +53,20 @@ def measure_average_seconds(operation: Callable[[], object], iterations: int) ->
     return (time.perf_counter() - start_time) / iterations
 
 
+def measure_queue_seconds(payload: object, iterations: int) -> float:
+    """Measure one multiprocessing queue put/get cycle including outer pickle."""
+    context = multiprocessing.get_context()
+    transport_queue = context.Queue(maxsize=1)
+    try:
+        return measure_average_seconds(
+            lambda: (transport_queue.put(payload), transport_queue.get()),
+            iterations,
+        )
+    finally:
+        transport_queue.close()
+        transport_queue.join_thread()
+
+
 def benchmark_episode_transport(
     episode: Sequence[OnPolicyTransition],
     iterations: int,
@@ -73,6 +88,8 @@ def benchmark_episode_transport(
         lambda: decode_episode_packet(packed_packet),
         iterations,
     )
+    legacy_queue_seconds = measure_queue_seconds(episode, iterations)
+    packed_queue_seconds = measure_queue_seconds(packed_packet, iterations)
 
     return {
         "transitions": len(episode),
@@ -80,9 +97,15 @@ def benchmark_episode_transport(
         "packed_payload_bytes": len(packed_packet.payload),
         "payload_ratio": len(packed_packet.payload) / len(raw_payload),
         "legacy_roundtrip_ms": raw_roundtrip_seconds * MILLISECONDS_PER_SECOND,
+        "legacy_queue_ms": legacy_queue_seconds * MILLISECONDS_PER_SECOND,
         "packed_worker_ms": packed_worker_seconds * MILLISECONDS_PER_SECOND,
+        "packed_queue_ms": packed_queue_seconds * MILLISECONDS_PER_SECOND,
         "packed_trainer_ms": packed_trainer_seconds * MILLISECONDS_PER_SECOND,
         "packed_roundtrip_ms": (packed_worker_seconds + packed_trainer_seconds)
+        * MILLISECONDS_PER_SECOND,
+        "packed_end_to_end_ms": (
+            packed_worker_seconds + packed_queue_seconds + packed_trainer_seconds
+        )
         * MILLISECONDS_PER_SECOND,
     }
 

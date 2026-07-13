@@ -19,6 +19,14 @@ from async_gym_agents.constants import (
     ASSEMBLY_MAX_PAYLOAD_BYTES_KEY,
     ASSEMBLY_MAX_TRANSITIONS_KEY,
     ASSEMBLY_TARGET_TRANSITIONS_KEY,
+    EPISODE_ACTIONS_FIELD,
+    EPISODE_DONES_FIELD,
+    EPISODE_LAST_DONES_FIELD,
+    EPISODE_LAST_OBSERVATION_FIELD,
+    EPISODE_LOG_PROBABILITIES_FIELD,
+    EPISODE_NEW_OBSERVATION_FIELD,
+    EPISODE_REWARDS_FIELD,
+    EPISODE_VALUES_FIELD,
 )
 from async_gym_agents.data_classes import OnPolicyTransition as Transition
 from async_gym_agents.enums import EpisodeKind
@@ -118,46 +126,46 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
                     with self._profiler_main.track("processing"):
                         new_obs = slice_episode_field(
                             batch,
-                            "new_obs",
+                            EPISODE_NEW_OBSERVATION_FIELD,
                             transition_index,
                         )
                         self._last_obs = slice_episode_field(
                             batch,
-                            "last_obs",
+                            EPISODE_LAST_OBSERVATION_FIELD,
                             transition_index,
                         )
                         actions = slice_episode_field(
                             batch,
-                            "actions",
+                            EPISODE_ACTIONS_FIELD,
                             transition_index,
                         )
                         rewards = slice_episode_field(
                             batch,
-                            "rewards",
+                            EPISODE_REWARDS_FIELD,
                             transition_index,
                         )
                         self._last_episode_starts = slice_episode_field(
                             batch,
-                            "last_dones",
+                            EPISODE_LAST_DONES_FIELD,
                             transition_index,
                         )
                         values = torch.from_numpy(
                             slice_episode_field(
                                 batch,
-                                "values",
+                                EPISODE_VALUES_FIELD,
                                 transition_index,
                             )
                         )
                         log_probs = torch.from_numpy(
                             slice_episode_field(
                                 batch,
-                                "log_probs",
+                                EPISODE_LOG_PROBABILITIES_FIELD,
                                 transition_index,
                             )
                         )
                         dones = slice_episode_field(
                             batch,
-                            "dones",
+                            EPISODE_DONES_FIELD,
                             transition_index,
                         )
                         infos = get_episode_infos(batch, transition_index)

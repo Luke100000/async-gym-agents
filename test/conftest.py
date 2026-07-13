@@ -134,6 +134,7 @@ def enqueue_episode_packet():
     """Return a helper that sends a packet through an initialized agent transport."""
 
     def enqueue(agent, packet):
+        """Send one packet and assert that the bounded transport accepted it."""
         sender = agent._episode_transport.get_sender(packet.worker_index)
         assert sender.send(packet, agent._stop, TEST_EPISODE_SEND_TIMEOUT_SECONDS)
 
