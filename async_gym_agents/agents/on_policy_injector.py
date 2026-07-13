@@ -7,10 +7,15 @@ from gymnasium import spaces
 from stable_baselines3.common.buffers import RolloutBuffer
 from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.on_policy_algorithm import OnPolicyAlgorithm
+from stable_baselines3.common.type_aliases import MaybeCallback
 from stable_baselines3.common.utils import obs_as_tensor
 from stable_baselines3.common.vec_env import VecEnv
 
 from async_gym_agents.agents.injector import AsyncAgentInjector, InjectorWorkerBase
+from async_gym_agents.callback_profiler import (
+    CallbackRuntimeProfiler,
+    render_callback_profiler_report,
+)
 from async_gym_agents.constants import (
     ASSEMBLY_COMPLETED_BUFFERS_KEY,
     ASSEMBLY_FILLING_TRANSITIONS_KEY,
@@ -66,6 +71,7 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
         super(AsyncAgentInjector, self).__init__(*args, **kwargs)
         self._episode_assembler = None
         self._final_assembly_report = {}
+        self._callback_profiler = CallbackRuntimeProfiler()
 
     # must be updated from SB3 (!)
     def collect_rollouts(
@@ -235,7 +241,25 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
         return super()._excluded_save_params() + [
             "_episode_assembler",
             "_final_assembly_report",
+            "_callback_profiler",
         ]
+
+    def _init_callback(
+        self,
+        callback: MaybeCallback,
+        progress_bar: bool = False,
+    ) -> BaseCallback:
+        initialized_callback = super()._init_callback(callback, progress_bar)
+        self._callback_profiler.instrument(initialized_callback)
+        return initialized_callback
+
+    def train(self, *args, **kwargs):
+        result = super().train(*args, **kwargs)
+        print(
+            render_callback_profiler_report(self._callback_profiler.get_report()),
+            flush=True,
+        )
+        return result
 
     def _build_assembly_report(self):
         if self._episode_assembler is None:

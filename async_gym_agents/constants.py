@@ -7,6 +7,15 @@ EPISODE_ASSEMBLER_THREAD_NAME = "episode-assembler"
 PER_WORKER_PENDING_EPISODE_CAPACITY = 1
 SHARED_COUNTER_TYPE_CODE = "q"
 
+CALLBACK_PROFILE_HOOK_NAMES = (
+    "on_training_start",
+    "on_rollout_start",
+    "on_step",
+    "on_rollout_end",
+    "on_training_end",
+)
+CALLBACK_PROFILER_REPORT_TITLE = "Callback profiler"
+
 EPISODE_ACTIONS_FIELD = "actions"
 EPISODE_DONES_FIELD = "dones"
 EPISODE_LAST_DONES_FIELD = "last_dones"

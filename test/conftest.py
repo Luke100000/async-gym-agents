@@ -1,9 +1,11 @@
 from functools import partial
+from unittest.mock import Mock
 
 import gymnasium as gym
 import numpy as np
 import pytest
 from stable_baselines3 import PPO
+from stable_baselines3.common.callbacks import CallbackList, ConvertCallback
 from stable_baselines3.common.logger import configure
 from stable_baselines3.common.monitor import Monitor
 
@@ -37,6 +39,33 @@ def short_cartpole_multi_env():
     return IndexableMultiEnv(
         [partial(gym.make, "CartPole-v1", max_episode_steps=2) for _ in range(2)]
     )
+
+
+@pytest.fixture
+def short_episode_on_policy_agent(short_cartpole_multi_env):
+    """Create a PPO agent whose workers complete two-transition episodes."""
+    agent = get_injected_agent(PPO)(
+        "MlpPolicy",
+        short_cartpole_multi_env,
+        batch_size=2,
+        device="cpu",
+        n_epochs=1,
+        n_steps=3,
+    )
+    yield agent
+    agent.shutdown()
+
+
+@pytest.fixture
+def single_convert_callback_list():
+    """Create a real SB3 callback list with one no-op leaf callback."""
+    return CallbackList([ConvertCallback(None)])
+
+
+@pytest.fixture
+def deterministic_callback_clock():
+    """Return nanosecond timestamps for two callback invocations."""
+    return Mock(side_effect=[1_000, 2_000, 3_000, 5_000])
 
 
 @pytest.fixture
