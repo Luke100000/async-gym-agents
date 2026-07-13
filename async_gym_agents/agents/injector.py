@@ -6,13 +6,14 @@ import os
 import queue
 import threading
 import time
+from collections import deque
 from contextlib import contextmanager
 from multiprocessing.context import Process as MPProcess
 from multiprocessing.managers import Namespace
 from multiprocessing.queues import Queue as MPQueue
 from multiprocessing.synchronize import Event as MPEvent
 from types import SimpleNamespace
-from typing import Any, Dict, Generator, List, Optional, Type, TypeAlias, cast
+from typing import Any, Deque, Dict, Generator, List, Optional, Type, TypeAlias, cast
 
 import torch
 from stable_baselines3.common.base_class import BasePolicy
@@ -92,7 +93,7 @@ class AsyncAgentInjector:
         # shared memory
         self._episode_queue: GenericQueue | None = None
         self._update_queues: List[GenericUpdateQueue] = []
-        self._transitions: List[Transition] = []
+        self._transitions: Deque[Transition] = deque()
 
         # shared object (!)
         self._manager: Optional[multiprocessing.Manager] = None
@@ -341,9 +342,9 @@ class AsyncAgentInjector:
             self._buffer_emptiness += 1 if self._episode_queue.empty() else 0
             self._buffer_stat_count += 1
 
-            self._transitions = self._fetch_transitions()
+            self._transitions.extend(self._fetch_transitions())
 
-        return self._transitions.pop(0)
+        return self._transitions.popleft()
 
     def shutdown(self):
         if self._stop is None:
