@@ -32,6 +32,10 @@ from async_gym_agents.constants import (
     EPISODE_NEW_OBSERVATION_FIELD,
     EPISODE_REWARDS_FIELD,
     EPISODE_VALUES_FIELD,
+    PROFILE_PHASE_ASSEMBLER_ACQUIRE,
+    PROFILE_PHASE_CALLBACK_DEBUG_PRINT,
+    PROFILE_PHASE_LOGGER_DUMP,
+    PROFILE_PHASE_PROFILER_REPORTING,
 )
 from async_gym_agents.data_classes import OnPolicyTransition as Transition
 from async_gym_agents.enums import EpisodeKind
@@ -99,7 +103,8 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
         self.policy.set_training_mode(False)
         self.pre_collect_preparation(self.policy)
         self._initialize_episode_assembler(n_rollout_steps)
-        assembly = self._episode_assembler.acquire()
+        with self._profiler_main.track(PROFILE_PHASE_ASSEMBLER_ACQUIRE):
+            assembly = self._episode_assembler.acquire()
         for assembled_episode in assembly.episodes:
             self._record_policy_lag(
                 assembled_episode.packet.policy_version,
@@ -221,7 +226,8 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
 
             callback.update_locals(locals())
 
-        self.record_profiler_metrics()
+        with self._profiler_main.track(PROFILE_PHASE_PROFILER_REPORTING):
+            self.record_profiler_metrics()
         callback.on_rollout_end()
 
         return True
@@ -255,11 +261,16 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
 
     def train(self, *args, **kwargs):
         result = super().train(*args, **kwargs)
-        print(
-            render_callback_profiler_report(self._callback_profiler.get_report()),
-            flush=True,
-        )
+        with self._profiler_main.track(PROFILE_PHASE_CALLBACK_DEBUG_PRINT):
+            print(
+                render_callback_profiler_report(self._callback_profiler.get_report()),
+                flush=True,
+            )
         return result
+
+    def _dump_logs(self, iteration: int) -> None:
+        with self._profiler_main.track(PROFILE_PHASE_LOGGER_DUMP):
+            super()._dump_logs(iteration)
 
     def _build_assembly_report(self):
         if self._episode_assembler is None:
