@@ -65,10 +65,39 @@ under `profiler/`. Useful series include:
   `profiler/main/rollout_buffer_building/avg_milliseconds`,
   `profiler/main/callback_processing/avg_milliseconds`, and
   `profiler/worker/episode_packing/avg_milliseconds`
+- leaf callback totals under `profiler/callbacks/<callback>/`, without
+  synchronous console reporting
+- transport attribution under `profiler/transport/`, including
+  `receive_timeout_fraction`, `receive_timeouts_with_pending_fraction`,
+  `ready_notification/avg_milliseconds`,
+  `payload_receive/avg_milliseconds`,
+  `payload_receive_timeout/avg_milliseconds`, `payload_mib_per_second`, and
+  `queue_latency/avg_milliseconds`
+
+A high `receive_timeouts_with_pending_fraction` means workers have announced
+episodes that the trainer cannot yet receive. Compare notification time,
+payload-receive time, and end-to-end queue latency to distinguish worker
+starvation from multiprocessing feeder or pipe delivery delays.
 
 The standalone payload benchmark compares legacy transition-object pickling
 with the packed whole-episode path:
 
 ```shell
 python benchmarks/episode_transport_benchmark.py --episode-length 4096
+```
+
+The IPC benchmark reproduces the training topology with 128 producers,
+approximately 2.5 MiB per episode, and the production pending-episode bound.
+It compares the current per-worker multiprocessing queues plus ready queue with
+one raw unidirectional pipe per worker. Process startup is excluded from the
+timed region:
+
+```shell
+python benchmarks/ipc_transport_benchmark.py
+```
+
+Use smaller dimensions for a quick smoke test:
+
+```shell
+python benchmarks/ipc_transport_benchmark.py --workers 4 --packets-per-worker 1 --payload-mib 0.25
 ```
