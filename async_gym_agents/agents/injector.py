@@ -89,7 +89,7 @@ class AsyncAgentInjector:
         use_mp: bool = False,
         worker_start_interval_seconds: float = 0.0,
         skip_truncated: bool = False,
-        queue_put_timeout: float = 60.0,
+        queue_put_timeout: Optional[float] = None,
         worker_join_timeout: float = 120.0,
         profiler_sync_interval: float = 1.0,
         mp_threads: int = 1,
@@ -101,7 +101,7 @@ class AsyncAgentInjector:
         :param use_mp: Use processes instead of threads
         :param worker_start_interval_seconds: Delay between parent-side worker starts
         :param skip_truncated: Skip episodes with truncated signal
-        :param queue_put_timeout: Timeout when putting an episode before dropping
+        :param queue_put_timeout: Optional timeout before dropping a blocked episode. None applies backpressure until shutdown.
         :param worker_join_timeout: Shutdown time before killing the process
         :param mp_threads: Cores used for various torch multiprocessing, which for workers should be lowered
         :param profiler_sync_interval: Worker profiler flush interval in seconds
@@ -613,7 +613,7 @@ class InjectorWorkerBase:
         state_lock: GenericStateLock,
         stop: GenericEvent,
         skip_truncated: bool,
-        queue_put_timeout: float,
+        queue_put_timeout: Optional[float],
         profiler_sync_interval: float,
         policy_class: BasePolicy,
         policy_data: Dict[str, Any],

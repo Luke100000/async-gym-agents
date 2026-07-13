@@ -47,14 +47,14 @@ class EpisodeSender:
         self,
         packet: EpisodePacket,
         stop: GenericStopEvent,
-        timeout: float,
+        timeout: Optional[float],
     ) -> EpisodeSendResult:
         """Send one complete episode while respecting global and worker bounds."""
         if packet.worker_index != self.worker_index:
             raise ValueError("Episode packet was sent through the wrong worker channel")
 
         start_ns = time.perf_counter_ns()
-        deadline = time.monotonic() + timeout
+        deadline = None if timeout is None else time.monotonic() + timeout
         waiting_ns = 0
         if not self._capacity.acquire(block=False):
             waiting_start_ns = time.perf_counter_ns()
@@ -92,15 +92,13 @@ class EpisodeSender:
     def _acquire_capacity(
         self,
         stop: GenericStopEvent,
-        deadline: float,
+        deadline: Optional[float],
     ) -> bool:
         while not stop.is_set():
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
+            retry_timeout = self._calculate_retry_timeout(deadline)
+            if retry_timeout is None:
                 return False
-            if self._capacity.acquire(
-                timeout=min(QUEUE_PUT_RETRY_TIMEOUT_SECONDS, remaining)
-            ):
+            if self._capacity.acquire(timeout=retry_timeout):
                 return True
         return False
 
@@ -108,21 +106,30 @@ class EpisodeSender:
         self,
         packet: EpisodePacket,
         stop: GenericStopEvent,
-        deadline: float,
+        deadline: Optional[float],
     ) -> bool:
         while not stop.is_set():
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
+            retry_timeout = self._calculate_retry_timeout(deadline)
+            if retry_timeout is None:
                 return False
             try:
                 self._episode_queue.put(
                     packet,
-                    timeout=min(QUEUE_PUT_RETRY_TIMEOUT_SECONDS, remaining),
+                    timeout=retry_timeout,
                 )
                 return True
             except queue.Full:
                 continue
         return False
+
+    @staticmethod
+    def _calculate_retry_timeout(deadline: Optional[float]) -> Optional[float]:
+        if deadline is None:
+            return QUEUE_PUT_RETRY_TIMEOUT_SECONDS
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None
+        return min(QUEUE_PUT_RETRY_TIMEOUT_SECONDS, remaining)
 
     def _record_send(self, payload_size: int) -> None:
         with self._pending_episodes.get_lock():

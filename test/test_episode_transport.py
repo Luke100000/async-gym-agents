@@ -4,6 +4,7 @@ from dataclasses import replace
 from async_gym_agents.episode_transport import EpisodeTransport
 
 TRANSPORT_TEST_TIMEOUT_SECONDS = 0.02
+TRANSPORT_THREAD_JOIN_TIMEOUT_SECONDS = 1.0
 
 
 class TestEpisodeTransport:
@@ -93,4 +94,32 @@ class TestEpisodeTransport:
             TRANSPORT_TEST_TIMEOUT_SECONDS,
         )
         assert transport.get_stats().pending_episodes == 1
+        transport.shutdown()
+
+    def test_unblocks_indefinite_backpressure_on_shutdown(self, on_policy_packet):
+        """A stop event releases a sender waiting without a drop timeout."""
+        transport = EpisodeTransport(
+            worker_count=1,
+            max_pending_episodes=1,
+            use_mp=False,
+        )
+        stop = threading.Event()
+        assert transport.get_sender(0).send(
+            on_policy_packet,
+            stop,
+            TRANSPORT_TEST_TIMEOUT_SECONDS,
+        )
+        results = []
+
+        def send_blocked_episode():
+            results.append(transport.get_sender(0).send(on_policy_packet, stop, None))
+
+        sender_thread = threading.Thread(target=send_blocked_episode)
+        sender_thread.start()
+
+        stop.set()
+        sender_thread.join(TRANSPORT_THREAD_JOIN_TIMEOUT_SECONDS)
+
+        assert not sender_thread.is_alive()
+        assert not results[0]
         transport.shutdown()

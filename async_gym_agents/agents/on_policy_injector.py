@@ -1,4 +1,4 @@
-from typing import Generator, Type
+from typing import Generator, Optional, Type
 
 import gymnasium as gym
 import numpy as np
@@ -39,7 +39,7 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
         use_mp: bool = False,
         worker_start_interval_seconds: float = 0.0,
         skip_truncated: bool = False,
-        queue_put_timeout: float = 60.0,
+        queue_put_timeout: Optional[float] = None,
         worker_join_timeout: float = 120.0,
         profiler_sync_interval: float = 1.0,
         mp_threads: int = 1,
