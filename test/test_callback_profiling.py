@@ -2,8 +2,10 @@ from async_gym_agents.callback_profiler import CallbackRuntimeProfiler
 from async_gym_agents.constants import (
     PROFILE_PHASE_ASSEMBLER_ACQUIRE,
     PROFILE_PHASE_CALLBACK_DEBUG_PRINT,
+    PROFILE_PHASE_CALLBACK_PROCESSING,
     PROFILE_PHASE_LOGGER_DUMP,
     PROFILE_PHASE_PROFILER_REPORTING,
+    PROFILE_PHASE_ROLLOUT_BUFFER_BUILDING,
 )
 
 
@@ -45,6 +47,12 @@ class TestCallbackRuntimeProfiler:
         output = capsys.readouterr().out
         assert "Callback profiler" in output
         assert "ConvertCallback" in output
+        assert (
+            short_episode_on_policy_agent._callback_profiler.get_report()[
+                "ConvertCallback"
+            ]["count"]
+            == 8
+        )
 
 
 class TestPpoBoundaryProfiling:
@@ -70,3 +78,18 @@ class TestPpoBoundaryProfiling:
         }
         assert expected_phases <= main_report.keys()
         assert {main_report[phase]["count"] for phase in expected_phases} == {1}
+
+    def test_separates_background_building_from_trainer_callback_work(
+        self,
+        short_episode_on_policy_agent,
+        single_convert_callback_list,
+    ):
+        """One PPO update reports buffer building and callback replay separately."""
+        short_episode_on_policy_agent.learn(
+            total_timesteps=3,
+            callback=single_convert_callback_list,
+        )
+
+        main_report = short_episode_on_policy_agent.get_profiler_report()["main"]
+        assert main_report[PROFILE_PHASE_ROLLOUT_BUFFER_BUILDING]["count"] >= 1
+        assert main_report[PROFILE_PHASE_CALLBACK_PROCESSING]["count"] == 1

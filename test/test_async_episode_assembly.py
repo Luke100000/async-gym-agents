@@ -1,21 +1,68 @@
 import threading
 from dataclasses import replace
 
+import numpy as np
 from stable_baselines3 import PPO
 
 from async_gym_agents.agents.async_agent import get_injected_agent
-from async_gym_agents.enums import EpisodeKind
-from async_gym_agents.episode_assembler import AsyncEpisodeAssembler
+from async_gym_agents.agents.on_policy_injector import bootstrap_truncated_rewards
 from async_gym_agents.episode_transport import EpisodeTransport
+from async_gym_agents.on_policy_rollout_assembler import (
+    AsyncOnPolicyRolloutAssembler,
+)
 from async_gym_agents.profiler import RuntimeProfiler
 
 ASSEMBLY_TEST_TIMEOUT_SECONDS = 1.0
 
 
-class TestAsyncEpisodeAssembler:
+class TestAsyncOnPolicyRolloutAssembler:
     """Buffer B is filled from complete episodes while buffer A is in use."""
 
-    def test_keeps_the_final_episode_complete(self, on_policy_packet):
+    def test_prepares_a_full_rollout_buffer_before_acquisition(
+        self,
+        on_policy_packet,
+        on_policy_rollout_buffer,
+    ):
+        """The acquired buffer is immediately ready for PPO training."""
+        transport = EpisodeTransport(
+            worker_count=1,
+            max_pending_episodes=1,
+            use_mp=False,
+        )
+        stop = threading.Event()
+        assembler = AsyncOnPolicyRolloutAssembler(
+            transport=transport,
+            target_transition_count=2,
+            profiler=RuntimeProfiler(),
+            rollout_buffer_template=on_policy_rollout_buffer,
+        )
+        assembler.start()
+        assert transport.get_sender(0).send(
+            on_policy_packet,
+            stop,
+            ASSEMBLY_TEST_TIMEOUT_SECONDS,
+        )
+
+        prepared_rollout = assembler.acquire(ASSEMBLY_TEST_TIMEOUT_SECONDS)
+
+        assert prepared_rollout.rollout_buffer.full is True
+        assert prepared_rollout.rollout_buffer.pos == 2
+        assert prepared_rollout.rollout_buffer.observations[:, 0].tolist() == [
+            [1.0, 2.0],
+            [2.0, 3.0],
+        ]
+        assert prepared_rollout.rollout_buffer.episode_starts[:, 0].tolist() == [
+            1.0,
+            0.0,
+        ]
+        assembler.shutdown()
+        transport.shutdown()
+
+    def test_keeps_the_final_episode_complete(
+        self,
+        on_policy_packet,
+        on_policy_rollout_buffer,
+    ):
         """Assembly exceeds its row target instead of splitting the final episode."""
         transport = EpisodeTransport(
             worker_count=2,
@@ -34,11 +81,11 @@ class TestAsyncEpisodeAssembler:
             stop,
             ASSEMBLY_TEST_TIMEOUT_SECONDS,
         )
-        assembler = AsyncEpisodeAssembler(
+        assembler = AsyncOnPolicyRolloutAssembler(
             transport=transport,
             target_transition_count=3,
-            expected_episode_kind=EpisodeKind.ON_POLICY,
             profiler=RuntimeProfiler(),
+            rollout_buffer_template=on_policy_rollout_buffer,
         )
         assembler.start()
 
@@ -52,19 +99,23 @@ class TestAsyncEpisodeAssembler:
         assembler.shutdown()
         transport.shutdown()
 
-    def test_refills_after_the_active_buffer_is_released(self, on_policy_packet):
-        """Releasing A lets the background thread build the next B immediately."""
+    def test_refills_while_the_acquired_buffer_remains_in_use(
+        self,
+        on_policy_packet,
+        on_policy_rollout_buffer,
+    ):
+        """Acquiring A lets the background thread build B without a release."""
         transport = EpisodeTransport(
             worker_count=1,
             max_pending_episodes=1,
             use_mp=False,
         )
         stop = threading.Event()
-        assembler = AsyncEpisodeAssembler(
+        assembler = AsyncOnPolicyRolloutAssembler(
             transport=transport,
             target_transition_count=2,
-            expected_episode_kind=EpisodeKind.ON_POLICY,
             profiler=RuntimeProfiler(),
+            rollout_buffer_template=on_policy_rollout_buffer,
         )
         assembler.start()
         assert transport.get_sender(0).send(
@@ -73,7 +124,6 @@ class TestAsyncEpisodeAssembler:
             ASSEMBLY_TEST_TIMEOUT_SECONDS,
         )
         first_assembly = assembler.acquire(ASSEMBLY_TEST_TIMEOUT_SECONDS)
-        assembler.release()
         assert transport.get_sender(0).send(
             on_policy_packet,
             stop,
@@ -115,3 +165,36 @@ class TestOnPolicyCompleteEpisodeAssembly:
             0.0,
         ]
         model.shutdown()
+
+
+class TestTruncatedRewardBootstrap:
+    """Time-limit rewards are finalized before background buffer construction."""
+
+    def test_uses_the_rollout_policy_only_for_truncated_episodes(
+        self,
+        fixed_terminal_value_policy,
+    ):
+        """Only a truncated terminal reward receives the discounted value."""
+        rewards = np.array([1.0, 3.0], dtype=np.float32)
+        dones = np.array([True, True])
+        infos = [
+            {
+                "TimeLimit.truncated": True,
+                "terminal_observation": np.array([1.0, 2.0], dtype=np.float32),
+            },
+            {
+                "TimeLimit.truncated": False,
+                "terminal_observation": np.array([3.0, 4.0], dtype=np.float32),
+            },
+        ]
+
+        bootstrap_truncated_rewards(
+            fixed_terminal_value_policy,
+            0.5,
+            rewards,
+            dones,
+            infos,
+        )
+
+        assert rewards.tolist() == [2.0, 3.0]
+        fixed_terminal_value_policy.predict_values.assert_called_once()

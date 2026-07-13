@@ -8,12 +8,15 @@ not stored. The trainer receives at most one pending episode per worker and also
 enforces the global `max_episodes_in_buffer` limit, so transport memory grows
 with real payloads rather than a fixed transition ring.
 
-For PPO and other on-policy algorithms, a background assembler fills buffer B
-from complete episodes while Stable Baselines trains buffer A. The final episode
-is never split: an `n_steps` target may therefore produce a slightly larger
-rollout buffer. Episode-start markers still separate trajectories for GAE. The
-bounded worker queues provide backpressure after B is full and prevent workers
-from running arbitrarily far ahead of the trainer.
+For PPO and other on-policy algorithms, a background assembler decodes complete
+episodes, bulk-populates the inactive Stable Baselines rollout buffer B, and
+computes its advantages while Stable Baselines trains buffer A. Acquiring the
+prepared B immediately starts construction of its replacement; no trainer-side
+transition insertion or return pass is required. The final episode is never
+split, so an `n_steps` target may produce a slightly larger rollout buffer.
+Episode-start markers still separate trajectories for GAE. The bounded worker queues provide
+backpressure after B is full and prevent workers from running arbitrarily far
+ahead of the trainer.
 
 ```py
 import gymnasium as gym
@@ -58,7 +61,9 @@ under `profiler/`. Useful series include:
   `profiler/transport/max_pending_bytes`
 - `profiler/assembly/filling_transitions` and
   `profiler/assembly/last_transitions`
-- phase timings such as `profiler/main/assembler_waiting/avg_milliseconds` and
+- phase timings such as
+  `profiler/main/rollout_buffer_building/avg_milliseconds`,
+  `profiler/main/callback_processing/avg_milliseconds`, and
   `profiler/worker/episode_packing/avg_milliseconds`
 
 The standalone payload benchmark compares legacy transition-object pickling

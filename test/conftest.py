@@ -4,7 +4,9 @@ from unittest.mock import Mock
 import gymnasium as gym
 import numpy as np
 import pytest
+import torch
 from stable_baselines3 import PPO
+from stable_baselines3.common.buffers import RolloutBuffer
 from stable_baselines3.common.callbacks import CallbackList, ConvertCallback
 from stable_baselines3.common.logger import configure
 from stable_baselines3.common.monitor import Monitor
@@ -66,6 +68,15 @@ def single_convert_callback_list():
 def deterministic_callback_clock():
     """Return nanosecond timestamps for two callback invocations."""
     return Mock(side_effect=[1_000, 2_000, 3_000, 5_000])
+
+
+@pytest.fixture
+def fixed_terminal_value_policy():
+    """Create a policy boundary returning a fixed terminal state value."""
+    policy = Mock()
+    policy.obs_to_tensor.return_value = (torch.zeros((1, 2)), None)
+    policy.predict_values.return_value = torch.tensor([2.0])
+    return policy
 
 
 @pytest.fixture
@@ -156,6 +167,25 @@ def off_policy_episode():
 def on_policy_packet(on_policy_episode):
     """Encode a representative on-policy episode for transport tests."""
     return encode_episode_batch(0, 1, pack_episode(on_policy_episode))
+
+
+@pytest.fixture
+def on_policy_rollout_buffer():
+    """Create a rollout buffer matching the representative on-policy episode."""
+    return RolloutBuffer(
+        buffer_size=2,
+        observation_space=gym.spaces.Box(
+            low=-10.0,
+            high=10.0,
+            shape=(2,),
+            dtype=np.float32,
+        ),
+        action_space=gym.spaces.Discrete(2),
+        device="cpu",
+        gae_lambda=0.95,
+        gamma=0.99,
+        n_envs=1,
+    )
 
 
 @pytest.fixture

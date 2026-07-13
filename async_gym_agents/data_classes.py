@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 import numpy as np
+from stable_baselines3.common.buffers import RolloutBuffer
 from stable_baselines3.common.vec_env.base_vec_env import VecEnvObs
 
 from async_gym_agents.enums import EpisodeKind
@@ -68,7 +69,8 @@ class AssembledEpisode:
 
 
 @dataclass(frozen=True)
-class EpisodeAssembly:
+class PreparedOnPolicyRollout:
+    rollout_buffer: RolloutBuffer
     episodes: List[AssembledEpisode]
     transition_count: int
     payload_bytes: int
