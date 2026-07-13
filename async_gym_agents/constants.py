@@ -14,8 +14,7 @@ CALLBACK_PROFILE_HOOK_NAMES = (
     "on_rollout_end",
     "on_training_end",
 )
-CALLBACK_PROFILER_REPORT_TITLE = "Callback profiler"
-
+CALLBACK_PROFILER_REPORT_KEY = "callbacks"
 EPISODE_ACTIONS_FIELD = "actions"
 EPISODE_DONES_FIELD = "dones"
 EPISODE_LAST_DONES_FIELD = "last_dones"
@@ -38,7 +37,6 @@ PROFILE_PHASE_CALLBACK_PROCESSING = "callback_processing"
 PROFILE_PHASE_ROLLOUT_BUFFER_BUILDING = "rollout_buffer_building"
 PROFILE_PHASE_PROFILER_REPORTING = "profiler_reporting"
 PROFILE_PHASE_LOGGER_DUMP = "logger_dump"
-PROFILE_PHASE_CALLBACK_DEBUG_PRINT = "callback_debug_print"
 PROFILE_PHASE_TRANSPORT = "transport"
 PROFILE_PHASE_TRANSITION_RECONSTRUCTION = "transition_reconstruction"
 PROFILE_PHASE_WAITING = "waiting"

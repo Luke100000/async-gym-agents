@@ -6,7 +6,6 @@ from stable_baselines3.common.callbacks import BaseCallback, CallbackList
 
 from async_gym_agents.constants import (
     CALLBACK_PROFILE_HOOK_NAMES,
-    CALLBACK_PROFILER_REPORT_TITLE,
     MILLISECONDS_PER_SECOND,
     NANOSECONDS_PER_SECOND,
 )
@@ -90,23 +89,3 @@ class CallbackRuntimeProfiler:
                 timing.count += 1
 
         setattr(callback, hook_name, measured_hook)
-
-
-def render_callback_profiler_report(
-    report: Dict[str, Dict[str, float | int]],
-) -> str:
-    """Render callback timings as a compact debug report."""
-    lines = [CALLBACK_PROFILER_REPORT_TITLE]
-    if not report:
-        lines.append("  (no callbacks recorded)")
-        return "\n".join(lines)
-
-    for callback_name, values in report.items():
-        lines.append(
-            "  "
-            f"{callback_name}: "
-            f"total={float(values['total_seconds']):.6f}s "
-            f"count={int(values['count'])} "
-            f"avg={float(values['avg_milliseconds']):.6f}ms"
-        )
-    return "\n".join(lines)

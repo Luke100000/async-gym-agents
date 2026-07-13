@@ -1,4 +1,4 @@
-from typing import Generator, Optional, Type
+from typing import Any, Dict, Generator, Optional, Type
 
 import gymnasium as gym
 import numpy as np
@@ -13,10 +13,7 @@ from stable_baselines3.common.utils import obs_as_tensor
 from stable_baselines3.common.vec_env import VecEnv
 
 from async_gym_agents.agents.injector import AsyncAgentInjector, InjectorWorkerBase
-from async_gym_agents.callback_profiler import (
-    CallbackRuntimeProfiler,
-    render_callback_profiler_report,
-)
+from async_gym_agents.callback_profiler import CallbackRuntimeProfiler
 from async_gym_agents.constants import (
     ASSEMBLY_COMPLETED_BUFFERS_KEY,
     ASSEMBLY_FILLING_TRANSITIONS_KEY,
@@ -25,11 +22,11 @@ from async_gym_agents.constants import (
     ASSEMBLY_MAX_PAYLOAD_BYTES_KEY,
     ASSEMBLY_MAX_TRANSITIONS_KEY,
     ASSEMBLY_TARGET_TRANSITIONS_KEY,
+    CALLBACK_PROFILER_REPORT_KEY,
     EPISODE_DONES_FIELD,
     EPISODE_LAST_OBSERVATION_FIELD,
     EPISODE_NEW_OBSERVATION_FIELD,
     PROFILE_PHASE_ASSEMBLER_ACQUIRE,
-    PROFILE_PHASE_CALLBACK_DEBUG_PRINT,
     PROFILE_PHASE_CALLBACK_PROCESSING,
     PROFILE_PHASE_LOGGER_DUMP,
     PROFILE_PHASE_PROFILER_REPORTING,
@@ -226,14 +223,11 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
         self._callback_profiler.instrument(initialized_callback)
         return initialized_callback
 
-    def train(self, *args, **kwargs):
-        result = super().train(*args, **kwargs)
-        with self._profiler_main.track(PROFILE_PHASE_CALLBACK_DEBUG_PRINT):
-            print(
-                render_callback_profiler_report(self._callback_profiler.get_report()),
-                flush=True,
-            )
-        return result
+    def get_profiler_report(self) -> Dict[str, Any]:
+        """Include leaf callback timings in the standard profiler report."""
+        report = super().get_profiler_report()
+        report[CALLBACK_PROFILER_REPORT_KEY] = self._callback_profiler.get_report()
+        return report
 
     def _dump_logs(self, iteration: int) -> None:
         with self._profiler_main.track(PROFILE_PHASE_LOGGER_DUMP):

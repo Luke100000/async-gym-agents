@@ -1,11 +1,12 @@
 from async_gym_agents.callback_profiler import CallbackRuntimeProfiler
 from async_gym_agents.constants import (
+    CALLBACK_PROFILER_REPORT_KEY,
     PROFILE_PHASE_ASSEMBLER_ACQUIRE,
-    PROFILE_PHASE_CALLBACK_DEBUG_PRINT,
     PROFILE_PHASE_CALLBACK_PROCESSING,
     PROFILE_PHASE_LOGGER_DUMP,
     PROFILE_PHASE_PROFILER_REPORTING,
     PROFILE_PHASE_ROLLOUT_BUFFER_BUILDING,
+    PROFILER_LOG_PREFIX,
 )
 
 
@@ -32,27 +33,31 @@ class TestCallbackRuntimeProfiler:
             }
         }
 
-    def test_prints_callback_report_after_each_ppo_train(
+    def test_reports_callback_timings_without_printing(
         self,
         short_episode_on_policy_agent,
         single_convert_callback_list,
         capsys,
     ):
-        """Every PPO update prints the callback timing summary for debugging."""
+        """Callback timings use profiler metrics without writing debug output."""
         short_episode_on_policy_agent.learn(
             total_timesteps=3,
             callback=single_convert_callback_list,
         )
 
         output = capsys.readouterr().out
-        assert "Callback profiler" in output
-        assert "ConvertCallback" in output
-        assert (
-            short_episode_on_policy_agent._callback_profiler.get_report()[
-                "ConvertCallback"
-            ]["count"]
-            == 8
+        assert "Callback profiler" not in output
+        callback_report = short_episode_on_policy_agent.get_profiler_report()[
+            CALLBACK_PROFILER_REPORT_KEY
+        ]
+        assert callback_report["ConvertCallback"]["count"] == 8
+
+        short_episode_on_policy_agent.record_profiler_metrics()
+        metric_name = (
+            f"{PROFILER_LOG_PREFIX}/{CALLBACK_PROFILER_REPORT_KEY}/"
+            "ConvertCallback/total_seconds"
         )
+        assert metric_name in short_episode_on_policy_agent.logger.name_to_value
 
 
 class TestPpoBoundaryProfiling:
@@ -72,7 +77,6 @@ class TestPpoBoundaryProfiling:
         main_report = short_episode_on_policy_agent.get_profiler_report()["main"]
         expected_phases = {
             PROFILE_PHASE_ASSEMBLER_ACQUIRE,
-            PROFILE_PHASE_CALLBACK_DEBUG_PRINT,
             PROFILE_PHASE_LOGGER_DUMP,
             PROFILE_PHASE_PROFILER_REPORTING,
         }
