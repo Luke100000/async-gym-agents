@@ -13,15 +13,17 @@ class TestPolicyLagProfiling:
         self,
         initialized_on_policy_agent,
         on_policy_episode,
+        enqueue_episode_packet,
     ):
         """A two-row episode contributes two samples of its policy lag."""
         initialized_on_policy_agent._version = 3
-        initialized_on_policy_agent._episode_queue.put(
+        enqueue_episode_packet(
+            initialized_on_policy_agent,
             encode_episode_batch(
                 worker_index=0,
                 policy_version=1,
                 batch=pack_episode(on_policy_episode),
-            )
+            ),
         )
 
         initialized_on_policy_agent.fetch_transition()
@@ -34,14 +36,16 @@ class TestPolicyLagProfiling:
         self,
         initialized_on_policy_agent,
         on_policy_episode,
+        enqueue_episode_packet,
     ):
         """Fetching an already queued episode records transport rather than waiting."""
-        initialized_on_policy_agent._episode_queue.put(
+        enqueue_episode_packet(
+            initialized_on_policy_agent,
             encode_episode_batch(
                 worker_index=0,
                 policy_version=0,
                 batch=pack_episode(on_policy_episode[:1]),
-            )
+            ),
         )
 
         initialized_on_policy_agent.fetch_transition()

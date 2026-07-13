@@ -29,7 +29,6 @@ from async_gym_agents.constants import (
     PROFILE_PHASE_TRANSITION_RECONSTRUCTION,
     PROFILE_PHASE_TRANSPORT,
     PROFILE_PHASE_WAITING,
-    QUEUE_PUT_RETRY_TIMEOUT_SECONDS,
 )
 from async_gym_agents.data_classes import EpisodePacket
 from async_gym_agents.envs.multi_env import IndexableMultiEnv
@@ -39,6 +38,7 @@ from async_gym_agents.episode_codec import (
     pack_episode,
     unpack_episode,
 )
+from async_gym_agents.episode_transport import EpisodeSender, EpisodeTransport
 from async_gym_agents.profiler import (
     ProfileStats,
     RuntimeProfiler,
@@ -51,7 +51,6 @@ from async_gym_agents.utils import make_venv
 GenericState: TypeAlias = Namespace | SimpleNamespace
 GenericStateLock: TypeAlias = Any
 GenericEvent: TypeAlias = MPEvent | threading.Event
-GenericQueue: TypeAlias = MPQueue | queue.Queue
 GenericUpdateQueue: TypeAlias = MPQueue | queue.Queue
 GenericWorker: TypeAlias = MPProcess | threading.Thread
 
@@ -111,7 +110,7 @@ class AsyncAgentInjector:
         self.mp_threads = mp_threads
 
         # shared memory
-        self._episode_queue: GenericQueue | None = None
+        self._episode_transport: EpisodeTransport | None = None
         self._update_queues: List[GenericUpdateQueue] = []
         self._transitions: Deque[Transition] = deque()
 
@@ -143,7 +142,7 @@ class AsyncAgentInjector:
         worker_class: Type["InjectorWorkerBase"],
         worker_index: int,
         env_func: EnvFactory,
-        episode_queue: GenericQueue,
+        episode_sender: EpisodeSender,
         update_queue: GenericUpdateQueue,
         state: GenericState,
         state_lock: GenericStateLock,
@@ -166,7 +165,7 @@ class AsyncAgentInjector:
         worker = worker_class(
             worker_index=worker_index,
             env_func=env_func,
-            episode_queue=episode_queue,
+            episode_sender=episode_sender,
             update_queue=update_queue,
             state=state,
             state_lock=state_lock,
@@ -186,8 +185,7 @@ class AsyncAgentInjector:
         # Only close the queue in a child process; closing it in a thread
         # would close the shared queue for all workers.
         if use_mp:
-            episode_queue.close()
-            episode_queue.cancel_join_thread()
+            episode_sender.close()
             update_queue.close()
             update_queue.cancel_join_thread()
 
@@ -236,11 +234,12 @@ class AsyncAgentInjector:
         # primitives from the current mode before creating worker state.
         self._state_lock = self.mp_ctx.Lock() if self.use_mp else threading.Lock()
 
-        # Environment queue
-        self._episode_queue = (
-            self.mp_ctx.Queue(maxsize=self.max_episodes_in_buffer)
-            if self.use_mp
-            else queue.Queue(maxsize=self.max_episodes_in_buffer)
+        worker_count = len(self.get_indexable_env().env_fns)
+        self._episode_transport = EpisodeTransport(
+            worker_count=worker_count,
+            max_pending_episodes=self.max_episodes_in_buffer,
+            use_mp=self.use_mp,
+            mp_ctx=self.mp_ctx,
         )
         self._update_queues = [
             self.mp_ctx.Queue() if self.use_mp else queue.Queue()
@@ -297,7 +296,7 @@ class AsyncAgentInjector:
                         worker_class=self.get_worker_class(),
                         worker_index=worker_index,
                         env_func=env_func,
-                        episode_queue=self._episode_queue,
+                        episode_sender=self._episode_transport.get_sender(worker_index),
                         update_queue=update_queue,
                         state=self._state,
                         state_lock=self._state_lock,
@@ -326,7 +325,7 @@ class AsyncAgentInjector:
         # noinspection PyUnresolvedReferences
         return super()._excluded_save_params() + [
             "_envs",
-            "_episode_queue",
+            "_episode_transport",
             "_update_queues",
             "_transitions",
             "_manager",
@@ -360,7 +359,7 @@ class AsyncAgentInjector:
     def _fetch_transitions(self, buffer_was_empty: bool) -> List[Transition]:
         phase = PROFILE_PHASE_WAITING if buffer_was_empty else PROFILE_PHASE_TRANSPORT
         with self._profiler_main.track(phase):
-            packet: EpisodePacket = self._episode_queue.get()
+            packet: EpisodePacket = self._episode_transport.receive()
 
         self._record_policy_lag(packet.policy_version, packet.transition_count)
         with self._profiler_main.track(PROFILE_PHASE_EPISODE_DESERIALIZATION):
@@ -394,8 +393,9 @@ class AsyncAgentInjector:
         and not interleaved with episodes from other workers.
         """
         while len(self._transitions) == 0:
-            self._buffer_utilization += self._episode_queue.qsize()
-            buffer_was_empty = self._episode_queue.empty()
+            transport_stats = self._episode_transport.get_stats()
+            self._buffer_utilization += transport_stats.pending_episodes
+            buffer_was_empty = transport_stats.pending_episodes == 0
             self._buffer_emptiness += 1 if buffer_was_empty else 0
             self._buffer_stat_count += 1
 
@@ -423,12 +423,9 @@ class AsyncAgentInjector:
                 except PermissionError:
                     self._logger.warning("cannot kill process due to permission error")
 
-        # close the queue (multiprocessing.Queue needs explicit cleanup)
-        if self._episode_queue is not None:
-            if self.use_mp:
-                self._episode_queue.close()
-                self._episode_queue.cancel_join_thread()
-            self._episode_queue = None
+        if self._episode_transport is not None:
+            self._episode_transport.shutdown()
+            self._episode_transport = None
         for update_queue in self._update_queues:
             if self.use_mp:
                 update_queue.close()
@@ -568,7 +565,7 @@ class InjectorWorkerBase:
         self,
         worker_index: int,
         env_func: EnvFactory,
-        episode_queue: GenericQueue,
+        episode_sender: EpisodeSender,
         update_queue: GenericUpdateQueue,
         state: GenericState,
         state_lock: GenericStateLock,
@@ -589,7 +586,7 @@ class InjectorWorkerBase:
 
         self._policy_version = None
 
-        self._episode_queue = episode_queue
+        self._episode_sender = episode_sender
         self._update_queue = update_queue
         self._state = state
         self._state_lock = state_lock
@@ -651,66 +648,24 @@ class InjectorWorkerBase:
                 episode_batch,
             )
         start_ns = time.perf_counter_ns()
-        deadline_ns = start_ns + int(self._queue_put_timeout * NANOSECONDS_PER_SECOND)
-        queue_was_full = self._episode_queue.full()
-
-        def record_push_wait() -> None:
-            with self._state_lock:
-                self._state.total_queue_put_wait_ns += max(
-                    0,
-                    min(time.perf_counter_ns(), deadline_ns) - start_ns,
-                )
-
+        sent = self._episode_sender.send(
+            packet,
+            self._stop,
+            self._queue_put_timeout,
+        )
+        elapsed_ns = time.perf_counter_ns() - start_ns
         with self._state_lock:
             self._state.queue_put_attempts += 1
-            if queue_was_full:
+            self._state.total_queue_put_wait_ns += elapsed_ns
+            if not sent:
                 self._state.full_queue_put_attempts += 1
-
-        while time.perf_counter_ns() < deadline_ns:
-            if self._stop.is_set():
-                record_push_wait()
-                self._profiler.record(
-                    PROFILE_PHASE_TRANSPORT,
-                    time.perf_counter_ns() - start_ns,
-                )
-                return
-
-            try:
-                remaining_timeout = min(
-                    QUEUE_PUT_RETRY_TIMEOUT_SECONDS,
-                    max(
-                        0.0,
-                        (deadline_ns - time.perf_counter_ns()) / NANOSECONDS_PER_SECOND,
-                    ),
-                )
-                self._episode_queue.put(
-                    packet,
-                    block=True,
-                    timeout=remaining_timeout,
-                )
-                record_push_wait()
-                self._profiler.record(
-                    PROFILE_PHASE_TRANSPORT,
-                    time.perf_counter_ns() - start_ns,
-                )
-                return
-            except queue.Full:
-                pass
-
-        try:
-            self._episode_queue.get(block=False)
-            self._episode_queue.put(packet, block=False)
-        except (queue.Full, queue.Empty):
-            pass
-
-        with self._state_lock:
-            self._state.discarded_episodes += 1
-        record_push_wait()
+                self._state.discarded_episodes += 1
         self._profiler.record(
             PROFILE_PHASE_TRANSPORT,
-            time.perf_counter_ns() - start_ns,
+            elapsed_ns,
         )
-        self._logger.info("Dropped episode due to buffer full")
+        if not sent and not self._stop.is_set():
+            self._logger.info("Dropped episode after transport timeout")
 
     def _flush_profiler(self, force: bool = False):
         now = time.time()

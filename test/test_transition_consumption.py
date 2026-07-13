@@ -12,14 +12,16 @@ class TestTransitionConsumption:
         self,
         initialized_on_policy_agent,
         on_policy_episode,
+        enqueue_episode_packet,
     ):
         """Fetching the first row keeps the remaining episode in a deque."""
-        initialized_on_policy_agent._episode_queue.put(
+        enqueue_episode_packet(
+            initialized_on_policy_agent,
             encode_episode_batch(
                 worker_index=0,
                 policy_version=0,
                 batch=pack_episode(on_policy_episode),
-            )
+            ),
         )
 
         fetched_transition = initialized_on_policy_agent.fetch_transition()

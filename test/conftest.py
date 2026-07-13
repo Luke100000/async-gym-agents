@@ -10,8 +10,10 @@ from async_gym_agents.agents.async_agent import get_injected_agent
 from async_gym_agents.data_classes import OffPolicyTransition, OnPolicyTransition
 from async_gym_agents.envs.buggy_lunar_lander import BuggyLunarLander
 from async_gym_agents.envs.multi_env import IndexableMultiEnv
+from async_gym_agents.episode_codec import encode_episode_batch, pack_episode
 
 PROCESSES = 8
+TEST_EPISODE_SEND_TIMEOUT_SECONDS = 1.0
 
 
 @pytest.fixture
@@ -103,6 +105,23 @@ def off_policy_episode():
             reset_infos=[{}],
         ),
     ]
+
+
+@pytest.fixture
+def on_policy_packet(on_policy_episode):
+    """Encode a representative on-policy episode for transport tests."""
+    return encode_episode_batch(0, 1, pack_episode(on_policy_episode))
+
+
+@pytest.fixture
+def enqueue_episode_packet():
+    """Return a helper that sends a packet through an initialized agent transport."""
+
+    def enqueue(agent, packet):
+        sender = agent._episode_transport.get_sender(packet.worker_index)
+        assert sender.send(packet, agent._stop, TEST_EPISODE_SEND_TIMEOUT_SECONDS)
+
+    return enqueue
 
 
 def get_buggy_env(buggy: bool) -> gym.Env:

@@ -48,3 +48,12 @@ class EpisodePacket:
     episode_kind: EpisodeKind
     transition_count: int
     payload: bytes
+
+
+@dataclass(frozen=True)
+class EpisodeTransportStats:
+    pending_episodes: int
+    max_pending_episodes: int
+    pending_bytes: int
+    max_pending_bytes: int
+    received_episodes: int
