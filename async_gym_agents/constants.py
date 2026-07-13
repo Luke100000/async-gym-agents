@@ -48,6 +48,7 @@ BUFFER_AVG_PUSH_WAIT_SECONDS_KEY = "avg_push_wait_seconds"
 BUFFER_MAX_POLICY_LAG_KEY = "max_policy_lag"
 
 PROFILER_LOG_PREFIX = "profiler"
+PROFILER_EXCLUDED_OUTPUT_FORMATS = ("stdout", "log")
 
 TRANSPORT_PENDING_EPISODES_KEY = "pending_episodes"
 TRANSPORT_MAX_PENDING_EPISODES_KEY = "max_pending_episodes"

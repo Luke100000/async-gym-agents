@@ -30,6 +30,7 @@ from async_gym_agents.constants import (
     PROFILE_PHASE_TRANSITION_RECONSTRUCTION,
     PROFILE_PHASE_TRANSPORT,
     PROFILE_PHASE_WAITING,
+    PROFILER_EXCLUDED_OUTPUT_FORMATS,
     PROFILER_LOG_PREFIX,
     TRANSPORT_CAPACITY_EPISODES_KEY,
     TRANSPORT_MAX_PENDING_BYTES_KEY,
@@ -510,7 +511,11 @@ class AsyncAgentInjector:
     def record_profiler_metrics(self) -> None:
         """Record profiler report leaves through the Stable Baselines logger."""
         for metric_name, value in iterate_profiler_metrics(self.get_profiler_report()):
-            self.logger.record(f"{PROFILER_LOG_PREFIX}/{metric_name}", value)
+            self.logger.record(
+                f"{PROFILER_LOG_PREFIX}/{metric_name}",
+                value,
+                exclude=PROFILER_EXCLUDED_OUTPUT_FORMATS,
+            )
 
     def _build_transport_report(self) -> Dict[str, Any]:
         if self._episode_transport is None:

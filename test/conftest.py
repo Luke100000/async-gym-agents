@@ -1,4 +1,5 @@
 from functools import partial
+from io import StringIO
 from unittest.mock import Mock
 
 import gymnasium as gym
@@ -8,7 +9,7 @@ import torch
 from stable_baselines3 import PPO
 from stable_baselines3.common.buffers import RolloutBuffer
 from stable_baselines3.common.callbacks import CallbackList, ConvertCallback
-from stable_baselines3.common.logger import configure
+from stable_baselines3.common.logger import HumanOutputFormat, Logger, configure
 from stable_baselines3.common.monitor import Monitor
 
 from async_gym_agents.agents.async_agent import get_injected_agent
@@ -100,6 +101,14 @@ def logged_on_policy_agent(initialized_on_policy_agent):
     """Configure an initialized agent with an in-memory Stable Baselines logger."""
     initialized_on_policy_agent.set_logger(configure(format_strings=[]))
     return initialized_on_policy_agent
+
+
+@pytest.fixture
+def human_output_profiler_logger():
+    """Create an SB3 logger backed by the truncating console-table formatter."""
+    output = StringIO()
+    logger = Logger(folder=None, output_formats=[HumanOutputFormat(output)])
+    return logger, output
 
 
 @pytest.fixture
