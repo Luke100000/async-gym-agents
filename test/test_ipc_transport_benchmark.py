@@ -12,7 +12,7 @@ class TestIpcTransportBenchmark:
     def test_summarizes_payload_throughput(self):
         """Two one-MiB packets over one second report two MiB per second."""
         result = summarize_benchmark(
-            method="queue",
+            method="production_pipe",
             worker_count=2,
             packet_count=1,
             payload_bytes=1_048_576,

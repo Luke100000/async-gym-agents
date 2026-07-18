@@ -65,16 +65,16 @@ class EpisodeTransportStats:
     receive_attempts: int
     receive_timeouts: int
     receive_timeouts_with_pending: int
-    ready_notification_ns: int
-    ready_notification_count: int
-    ready_notification_timeout_ns: int
-    ready_notification_timeouts: int
+    readiness_wait_ns: int
+    readiness_wait_count: int
+    readiness_timeout_ns: int
+    readiness_timeouts: int
     payload_receive_ns: int
     payload_receive_count: int
     payload_receive_timeout_ns: int
     payload_receive_timeouts: int
-    queue_latency_ns: int
-    queue_latency_count: int
+    pipe_latency_ns: int
+    pipe_latency_count: int
 
 
 @dataclass(frozen=True)

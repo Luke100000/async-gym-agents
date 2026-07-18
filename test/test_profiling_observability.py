@@ -9,7 +9,7 @@ from async_gym_agents.constants import (
     TRANSPORT_MAX_PENDING_BYTES_KEY,
     TRANSPORT_PAYLOAD_RECEIVE_PROFILE_KEY,
     TRANSPORT_PENDING_BYTES_KEY,
-    TRANSPORT_QUEUE_LATENCY_PROFILE_KEY,
+    TRANSPORT_PIPE_LATENCY_PROFILE_KEY,
     TRANSPORT_RECEIVE_ATTEMPTS_KEY,
     TRANSPORT_RECEIVED_BYTES_KEY,
 )
@@ -49,7 +49,7 @@ class TestPolicyLagProfiling:
         on_policy_episode,
         enqueue_episode_packet,
     ):
-        """Fetching an already queued episode records transport rather than waiting."""
+        """Fetching an already pending episode records transport rather than waiting."""
         enqueue_episode_packet(
             initialized_on_policy_agent,
             encode_episode_batch(
@@ -89,7 +89,7 @@ class TestPolicyLagProfiling:
         on_policy_packet,
         enqueue_episode_packet,
     ):
-        """Delivered episodes expose payload timing, bytes, and queue latency."""
+        """Delivered episodes expose payload timing, bytes, and pipe latency."""
         enqueue_episode_packet(initialized_on_policy_agent, on_policy_packet)
 
         initialized_on_policy_agent.fetch_transition()
@@ -98,7 +98,7 @@ class TestPolicyLagProfiling:
         assert transport[TRANSPORT_RECEIVE_ATTEMPTS_KEY] == 1
         assert transport[TRANSPORT_RECEIVED_BYTES_KEY] == len(on_policy_packet.payload)
         assert transport[TRANSPORT_PAYLOAD_RECEIVE_PROFILE_KEY]["count"] == 1
-        assert transport[TRANSPORT_QUEUE_LATENCY_PROFILE_KEY]["count"] == 1
+        assert transport[TRANSPORT_PIPE_LATENCY_PROFILE_KEY]["count"] == 1
 
     def test_flattens_report_into_stable_scalar_names(
         self,

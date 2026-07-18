@@ -25,7 +25,7 @@ PROCESS_JOIN_TIMEOUT_SECONDS = 30.0
 BENCHMARK_STALL_TIMEOUT_SECONDS = 60.0
 
 
-def send_queue_packets(
+def send_production_packets(
     sender: EpisodeSender,
     packet: EpisodePacket,
     packet_count: int,
@@ -33,12 +33,12 @@ def send_queue_packets(
     start: Any,
     stop: Any,
 ) -> None:
-    """Send representative packets through the production queue transport."""
+    """Send representative packets through the production pipe transport."""
     ready.release()
     start.wait()
     for _ in range(packet_count):
         if not sender.send(packet, stop, timeout=None):
-            raise RuntimeError("Queue benchmark sender stopped before completion")
+            raise RuntimeError("Pipe benchmark sender stopped before completion")
 
 
 def send_pipe_payloads(
@@ -83,14 +83,14 @@ def summarize_benchmark(
     }
 
 
-def measure_queue_transport(
+def measure_production_transport(
     context: multiprocessing.context.BaseContext,
     worker_count: int,
     packet_count: int,
     payload: bytes,
     max_pending_episodes: int,
 ) -> Dict[str, Any]:
-    """Measure the current per-worker Queue plus ready-Queue implementation."""
+    """Measure the production framed-payload pipe implementation."""
     transport = EpisodeTransport(
         worker_count=worker_count,
         max_pending_episodes=max_pending_episodes,
@@ -109,7 +109,7 @@ def measure_queue_transport(
     )
     processes = [
         context.Process(
-            target=send_queue_packets,
+            target=send_production_packets,
             args=(
                 transport.get_sender(worker_index),
                 replace(base_packet, worker_index=worker_index),
@@ -124,6 +124,7 @@ def measure_queue_transport(
 
     try:
         start_processes(processes)
+        transport.close_parent_senders()
         wait_for_processes_ready(ready, worker_count)
         start_time = time.perf_counter()
         consumer_cpu_start = time.process_time()
@@ -135,7 +136,9 @@ def measure_queue_transport(
                 transport.receive(ASSEMBLER_RECEIVE_TIMEOUT_SECONDS)
             except queue.Empty:
                 if time.perf_counter() - start_time > BENCHMARK_STALL_TIMEOUT_SECONDS:
-                    raise TimeoutError("Queue benchmark stopped making progress")
+                    raise TimeoutError(
+                        "Production pipe benchmark stopped making progress"
+                    )
                 continue
             received_packet_count += 1
         elapsed_seconds = time.perf_counter() - start_time
@@ -143,7 +146,7 @@ def measure_queue_transport(
         join_processes(processes)
 
         result = summarize_benchmark(
-            "queue",
+            "production_pipe",
             worker_count,
             packet_count,
             len(payload),
@@ -171,9 +174,9 @@ def measure_queue_transport(
                     stats.payload_receive_timeout_ns,
                     stats.payload_receive_timeouts,
                 ),
-                "queue_latency_avg_ms": calculate_average_milliseconds(
-                    stats.queue_latency_ns,
-                    stats.queue_latency_count,
+                "pipe_latency_avg_ms": calculate_average_milliseconds(
+                    stats.pipe_latency_ns,
+                    stats.pipe_latency_count,
                 ),
             }
         )
@@ -181,8 +184,8 @@ def measure_queue_transport(
     finally:
         stop.set()
         start.set()
-        stop_processes(processes)
         transport.shutdown()
+        stop_processes(processes)
 
 
 def measure_pipe_transport(
@@ -221,7 +224,7 @@ def measure_pipe_transport(
         consumer_cpu_seconds = time.process_time() - consumer_cpu_start
         join_processes(processes)
         return summarize_benchmark(
-            "pipe",
+            "raw_pipe",
             worker_count,
             packet_count,
             len(payload),
@@ -306,7 +309,7 @@ def run_benchmark(
     max_pending_episodes: int,
     start_method: Optional[str],
 ) -> Dict[str, Any]:
-    """Compare production Queue transport against the proposed raw pipes."""
+    """Compare framed production pipes against raw payload pipe throughput."""
     validate_benchmark_dimensions(
         worker_count,
         packet_count,
@@ -315,14 +318,14 @@ def run_benchmark(
     )
     context = multiprocessing.get_context(start_method)
     payload = bytes(payload_bytes)
-    queue_result = measure_queue_transport(
+    production_result = measure_production_transport(
         context,
         worker_count,
         packet_count,
         payload,
         max_pending_episodes,
     )
-    pipe_result = measure_pipe_transport(
+    raw_pipe_result = measure_pipe_transport(
         context,
         worker_count,
         packet_count,
@@ -336,14 +339,15 @@ def run_benchmark(
             "payload_bytes": payload_bytes,
             "max_pending_episodes": max_pending_episodes,
         },
-        "queue": queue_result,
-        "pipe": pipe_result,
+        "production_pipe": production_result,
+        "raw_pipe": raw_pipe_result,
         "comparison": {
-            "pipe_throughput_speedup": (
-                pipe_result["mib_per_second"] / queue_result["mib_per_second"]
+            "raw_pipe_throughput_ratio": (
+                raw_pipe_result["mib_per_second"] / production_result["mib_per_second"]
             ),
-            "pipe_elapsed_time_ratio": (
-                pipe_result["elapsed_seconds"] / queue_result["elapsed_seconds"]
+            "production_elapsed_time_ratio": (
+                production_result["elapsed_seconds"]
+                / raw_pipe_result["elapsed_seconds"]
             ),
         },
     }
@@ -371,8 +375,8 @@ def parse_arguments() -> argparse.Namespace:
     """Parse benchmark topology and payload dimensions."""
     parser = argparse.ArgumentParser(
         description=(
-            "Compare the production episode Queue topology with one raw pipe per "
-            "worker. Process startup is excluded from the timed region."
+            "Compare the framed production episode pipes with raw payload pipes. "
+            "Process startup is excluded from the timed region."
         )
     )
     parser.add_argument("--workers", type=int, default=DEFAULT_WORKER_COUNT)

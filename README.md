@@ -14,9 +14,10 @@ computes its advantages while Stable Baselines trains buffer A. Acquiring the
 prepared B immediately starts construction of its replacement; no trainer-side
 transition insertion or return pass is required. The final episode is never
 split, so an `n_steps` target may produce a slightly larger rollout buffer.
-Episode-start markers still separate trajectories for GAE. The bounded worker queues provide
-backpressure after B is full and prevent workers from running arbitrarily far
-ahead of the trainer.
+Episode-start markers still separate trajectories for GAE. Each worker streams
+through its own unidirectional pipe. Per-worker and global capacity semaphores
+provide backpressure after B is full and prevent workers from running
+arbitrarily far ahead of the trainer.
 
 ```py
 import gymnasium as gym
@@ -69,15 +70,18 @@ under `profiler/`. Useful series include:
   synchronous console reporting
 - transport attribution under `profiler/transport/`, including
   `receive_timeout_fraction`, `receive_timeouts_with_pending_fraction`,
-  `ready_notification/avg_milliseconds`,
+  `readiness_wait/avg_milliseconds`,
+  `readiness_timeout/avg_milliseconds`,
   `payload_receive/avg_milliseconds`,
   `payload_receive_timeout/avg_milliseconds`, `payload_mib_per_second`, and
-  `queue_latency/avg_milliseconds`
+  `pipe_latency/avg_milliseconds`
 
-A high `receive_timeouts_with_pending_fraction` means workers have announced
-episodes that the trainer cannot yet receive. Compare notification time,
-payload-receive time, and end-to-end queue latency to distinguish worker
-starvation from multiprocessing feeder or pipe delivery delays.
+A high `receive_timeouts_with_pending_fraction` means workers have reserved
+transport capacity but no complete pipe frame became readable. Compare
+readiness time, payload-receive time, and end-to-end pipe latency to distinguish
+worker starvation from payload transfer delays. Worker-side `transport` timing
+now covers the synchronous pipe send through trainer receipt, so long samples
+also expose backpressure while the inactive PPO buffer is full.
 
 The standalone payload benchmark compares legacy transition-object pickling
 with the packed whole-episode path:
@@ -88,8 +92,8 @@ python benchmarks/episode_transport_benchmark.py --episode-length 4096
 
 The IPC benchmark reproduces the training topology with 128 producers,
 approximately 2.5 MiB per episode, and the production pending-episode bound.
-It compares the current per-worker multiprocessing queues plus ready queue with
-one raw unidirectional pipe per worker. Process startup is excluded from the
+It compares the framed production transport with raw payload throughput over
+the same one-pipe-per-worker topology. Process startup is excluded from the
 timed region:
 
 ```shell

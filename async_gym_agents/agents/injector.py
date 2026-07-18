@@ -40,9 +40,9 @@ from async_gym_agents.constants import (
     TRANSPORT_PAYLOAD_RECEIVE_TIMEOUT_PROFILE_KEY,
     TRANSPORT_PENDING_BYTES_KEY,
     TRANSPORT_PENDING_EPISODES_KEY,
-    TRANSPORT_QUEUE_LATENCY_PROFILE_KEY,
-    TRANSPORT_READY_NOTIFICATION_PROFILE_KEY,
-    TRANSPORT_READY_NOTIFICATION_TIMEOUT_PROFILE_KEY,
+    TRANSPORT_PIPE_LATENCY_PROFILE_KEY,
+    TRANSPORT_READINESS_TIMEOUT_PROFILE_KEY,
+    TRANSPORT_READINESS_WAIT_PROFILE_KEY,
     TRANSPORT_RECEIVE_ATTEMPTS_KEY,
     TRANSPORT_RECEIVE_TIMEOUT_FRACTION_KEY,
     TRANSPORT_RECEIVE_TIMEOUTS_KEY,
@@ -209,8 +209,8 @@ class AsyncAgentInjector:
 
         worker.run()
 
-        # Only close the queue in a child process; closing it in a thread
-        # would close the shared queue for all workers.
+        # Only close process-owned handles here. Thread workers share the
+        # parent's transport and update queue handles.
         if use_mp:
             episode_sender.close()
             update_queue.close()
@@ -346,6 +346,8 @@ class AsyncAgentInjector:
             ):
                 time.sleep(self.worker_start_interval_seconds)
 
+        self._episode_transport.close_parent_senders()
+
         self._initialized_workers = True
 
     def _excluded_save_params(self) -> List[str]:
@@ -437,6 +439,8 @@ class AsyncAgentInjector:
 
         self._logger.info("Send stop event to all processes")
         self._stop.set()
+        if self._episode_transport is not None:
+            self._episode_transport.interrupt()
         self._stop = None
 
         for worker in self._workers:
@@ -556,13 +560,13 @@ class AsyncAgentInjector:
                 if stats.receive_timeouts == 0
                 else stats.receive_timeouts_with_pending / stats.receive_timeouts
             ),
-            TRANSPORT_READY_NOTIFICATION_PROFILE_KEY: summarize_duration(
-                stats.ready_notification_ns,
-                stats.ready_notification_count,
+            TRANSPORT_READINESS_WAIT_PROFILE_KEY: summarize_duration(
+                stats.readiness_wait_ns,
+                stats.readiness_wait_count,
             ),
-            TRANSPORT_READY_NOTIFICATION_TIMEOUT_PROFILE_KEY: summarize_duration(
-                stats.ready_notification_timeout_ns,
-                stats.ready_notification_timeouts,
+            TRANSPORT_READINESS_TIMEOUT_PROFILE_KEY: summarize_duration(
+                stats.readiness_timeout_ns,
+                stats.readiness_timeouts,
             ),
             TRANSPORT_PAYLOAD_RECEIVE_PROFILE_KEY: summarize_duration(
                 successful_payload_ns,
@@ -577,9 +581,9 @@ class AsyncAgentInjector:
                 if payload_seconds == 0.0
                 else stats.received_bytes / BYTES_PER_MEBIBYTE / payload_seconds
             ),
-            TRANSPORT_QUEUE_LATENCY_PROFILE_KEY: summarize_duration(
-                stats.queue_latency_ns,
-                stats.queue_latency_count,
+            TRANSPORT_PIPE_LATENCY_PROFILE_KEY: summarize_duration(
+                stats.pipe_latency_ns,
+                stats.pipe_latency_count,
             ),
         }
 

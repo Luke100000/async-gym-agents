@@ -1,3 +1,5 @@
+import multiprocessing
+from dataclasses import replace
 from functools import partial
 from io import StringIO
 from unittest.mock import Mock
@@ -13,13 +15,30 @@ from stable_baselines3.common.logger import HumanOutputFormat, Logger, configure
 from stable_baselines3.common.monitor import Monitor
 
 from async_gym_agents.agents.async_agent import get_injected_agent
+from async_gym_agents.constants import BYTES_PER_MEBIBYTE
 from async_gym_agents.data_classes import OffPolicyTransition, OnPolicyTransition
 from async_gym_agents.envs.buggy_lunar_lander import BuggyLunarLander
 from async_gym_agents.envs.multi_env import IndexableMultiEnv
 from async_gym_agents.episode_codec import encode_episode_batch, pack_episode
+from async_gym_agents.episode_transport import EpisodeTransport
 
 PROCESSES = 8
+DIRECT_TRANSPORT_PAYLOAD_BYTES = 8 * BYTES_PER_MEBIBYTE
+DIRECT_TRANSPORT_PROCESS_TIMEOUT_SECONDS = 5.0
 TEST_EPISODE_SEND_TIMEOUT_SECONDS = 1.0
+
+
+def send_episode_and_signal(
+    sender,
+    packet,
+    stop,
+    send_started,
+    send_completed,
+):
+    """Send one episode and expose when its synchronous transfer completes."""
+    send_started.set()
+    if sender.send(packet, stop, DIRECT_TRANSPORT_PROCESS_TIMEOUT_SECONDS):
+        send_completed.set()
 
 
 @pytest.fixture
@@ -54,6 +73,22 @@ def short_episode_on_policy_agent(short_cartpole_multi_env):
         device="cpu",
         n_epochs=1,
         n_steps=3,
+    )
+    yield agent
+    agent.shutdown()
+
+
+@pytest.fixture
+def short_episode_on_policy_mp_agent(short_cartpole_multi_env):
+    """Create a PPO agent with short episodes in multiprocessing workers."""
+    agent = get_injected_agent(PPO)(
+        "MlpPolicy",
+        short_cartpole_multi_env,
+        batch_size=2,
+        device="cpu",
+        n_epochs=1,
+        n_steps=3,
+        use_mp=True,
     )
     yield agent
     agent.shutdown()
@@ -176,6 +211,52 @@ def off_policy_episode():
 def on_policy_packet(on_policy_episode):
     """Encode a representative on-policy episode for transport tests."""
     return encode_episode_batch(0, 1, pack_episode(on_policy_episode))
+
+
+@pytest.fixture
+def off_policy_packet(off_policy_episode):
+    """Encode an off-policy episode without a policy version."""
+    return encode_episode_batch(0, None, pack_episode(off_policy_episode))
+
+
+@pytest.fixture
+def active_direct_episode_send(on_policy_packet):
+    """Start one process sending a payload larger than an operating-system pipe."""
+    context = multiprocessing.get_context("spawn")
+    transport = EpisodeTransport(
+        worker_count=1,
+        max_pending_episodes=1,
+        use_mp=True,
+        mp_ctx=context,
+    )
+    stop = context.Event()
+    send_started = context.Event()
+    send_completed = context.Event()
+    packet = replace(
+        on_policy_packet,
+        payload=bytes(DIRECT_TRANSPORT_PAYLOAD_BYTES),
+    )
+    process = context.Process(
+        target=send_episode_and_signal,
+        args=(
+            transport.get_sender(0),
+            packet,
+            stop,
+            send_started,
+            send_completed,
+        ),
+    )
+    process.start()
+    assert send_started.wait(DIRECT_TRANSPORT_PROCESS_TIMEOUT_SECONDS)
+
+    yield transport, packet, process, stop, send_completed
+
+    stop.set()
+    transport.shutdown()
+    process.join(DIRECT_TRANSPORT_PROCESS_TIMEOUT_SECONDS)
+    if process.is_alive():
+        process.kill()
+        process.join(DIRECT_TRANSPORT_PROCESS_TIMEOUT_SECONDS)
 
 
 @pytest.fixture

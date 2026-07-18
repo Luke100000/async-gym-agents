@@ -166,6 +166,16 @@ class TestOnPolicyCompleteEpisodeAssembly:
         ]
         model.shutdown()
 
+    def test_streams_complete_episodes_from_process_workers(
+        self,
+        short_episode_on_policy_mp_agent,
+    ):
+        """Multiprocessing workers stream complete episodes into the PPO buffer."""
+        short_episode_on_policy_mp_agent.learn(total_timesteps=3)
+
+        assert short_episode_on_policy_mp_agent.rollout_buffer.buffer_size == 4
+        assert short_episode_on_policy_mp_agent.rollout_buffer.full is True
+
 
 class TestTruncatedRewardBootstrap:
     """Time-limit rewards are finalized before background buffer construction."""

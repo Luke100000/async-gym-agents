@@ -8,6 +8,8 @@ from async_gym_agents.episode_transport import EpisodeTransport
 
 TRANSPORT_TEST_TIMEOUT_SECONDS = 0.02
 TRANSPORT_THREAD_JOIN_TIMEOUT_SECONDS = 1.0
+TRANSPORT_PROCESS_WAIT_SECONDS = 0.5
+TRANSPORT_PROCESS_COMPLETION_TIMEOUT_SECONDS = 5.0
 
 
 class TestEpisodeTransport:
@@ -128,9 +130,64 @@ class TestEpisodeTransport:
         assert not results[0]
         transport.shutdown()
 
+    def test_streams_large_payload_before_sender_returns(
+        self,
+        active_direct_episode_send,
+    ):
+        """A worker remains in the send until the trainer drains its large payload."""
+        transport, expected_packet, process, _, send_completed = (
+            active_direct_episode_send
+        )
+
+        assert not send_completed.wait(TRANSPORT_PROCESS_WAIT_SECONDS)
+
+        received_packet = transport.receive(TRANSPORT_PROCESS_WAIT_SECONDS)
+        assert received_packet.payload == expected_packet.payload
+        assert send_completed.wait(TRANSPORT_PROCESS_COMPLETION_TIMEOUT_SECONDS)
+        process.join(TRANSPORT_PROCESS_COMPLETION_TIMEOUT_SECONDS)
+        assert process.exitcode == 0
+
+    def test_preserves_off_policy_packet_metadata(self, off_policy_packet):
+        """Pipe framing preserves the episode kind and absent policy version."""
+        transport = EpisodeTransport(
+            worker_count=1,
+            max_pending_episodes=1,
+            use_mp=False,
+        )
+        stop = threading.Event()
+        assert transport.get_sender(0).send(
+            off_policy_packet,
+            stop,
+            TRANSPORT_TEST_TIMEOUT_SECONDS,
+        )
+
+        received_packet = transport.receive(TRANSPORT_TEST_TIMEOUT_SECONDS)
+
+        assert received_packet.policy_version is None
+        assert received_packet.episode_kind is off_policy_packet.episode_kind
+        assert received_packet.transition_count == off_policy_packet.transition_count
+        assert received_packet.payload == off_policy_packet.payload
+        transport.shutdown()
+
+    def test_interrupts_in_flight_payload_on_shutdown(
+        self,
+        active_direct_episode_send,
+    ):
+        """Closing trainer pipe endpoints stops a worker blocked in a large send."""
+        transport, _, process, stop, send_completed = active_direct_episode_send
+        assert not send_completed.wait(TRANSPORT_PROCESS_WAIT_SECONDS)
+
+        stop.set()
+        transport.interrupt()
+        process.join(TRANSPORT_PROCESS_COMPLETION_TIMEOUT_SECONDS)
+
+        assert not process.is_alive()
+        assert process.exitcode == 0
+        assert not send_completed.is_set()
+
 
 class TestEpisodeTransportProfiling:
-    """Receive metrics distinguish delivery from notification and timeout waits."""
+    """Receive metrics distinguish payload delivery from pipe-readiness waits."""
 
     def test_records_successful_payload_delivery(self, on_policy_packet):
         """A delivered packet records payload bytes, latency, and receive time."""
@@ -146,21 +203,26 @@ class TestEpisodeTransportProfiling:
             TRANSPORT_TEST_TIMEOUT_SECONDS,
         )
 
-        transport.receive(TRANSPORT_TEST_TIMEOUT_SECONDS)
+        received_packet = transport.receive(TRANSPORT_TEST_TIMEOUT_SECONDS)
 
         stats = transport.get_stats()
+        assert received_packet.worker_index == on_policy_packet.worker_index
+        assert received_packet.policy_version == on_policy_packet.policy_version
+        assert received_packet.episode_kind is on_policy_packet.episode_kind
+        assert received_packet.transition_count == on_policy_packet.transition_count
+        assert received_packet.payload == on_policy_packet.payload
         assert stats.receive_attempts == 1
         assert stats.receive_timeouts == 0
         assert stats.received_bytes == len(on_policy_packet.payload)
         assert stats.payload_receive_count == 1
         assert stats.payload_receive_timeouts == 0
         assert stats.payload_receive_ns >= 0
-        assert stats.queue_latency_count == 1
-        assert stats.queue_latency_ns >= 0
+        assert stats.pipe_latency_count == 1
+        assert stats.pipe_latency_ns >= 0
         transport.shutdown()
 
-    def test_attributes_empty_transport_timeout_to_notification_wait(self):
-        """An empty transport times out before any worker notification arrives."""
+    def test_attributes_empty_transport_timeout_to_readiness_wait(self):
+        """An empty transport times out while waiting for a readable worker pipe."""
         transport = EpisodeTransport(
             worker_count=1,
             max_pending_episodes=1,
@@ -174,15 +236,15 @@ class TestEpisodeTransportProfiling:
         assert stats.receive_attempts == 1
         assert stats.receive_timeouts == 1
         assert stats.receive_timeouts_with_pending == 0
-        assert stats.ready_notification_count == 1
-        assert stats.ready_notification_timeouts == 1
-        assert stats.ready_notification_ns > 0
-        assert stats.ready_notification_timeout_ns > 0
+        assert stats.readiness_wait_count == 1
+        assert stats.readiness_timeouts == 1
+        assert stats.readiness_wait_ns > 0
+        assert stats.readiness_timeout_ns > 0
         assert stats.payload_receive_count == 0
         transport.shutdown()
 
-    def test_attributes_announced_packet_timeout_to_payload_wait(self):
-        """A notification without delivered bytes is reported as a payload timeout."""
+    def test_attributes_pending_pipe_timeout_to_readiness_wait(self):
+        """A reserved packet without readable bytes remains a readiness timeout."""
         transport = EpisodeTransport(
             worker_count=1,
             max_pending_episodes=1,
@@ -190,7 +252,6 @@ class TestEpisodeTransportProfiling:
         )
         with transport._pending_episodes.get_lock():
             transport._pending_episodes.value = 1
-        transport._ready_queue.put(0)
 
         with pytest.raises(queue.Empty):
             transport.receive(TRANSPORT_TEST_TIMEOUT_SECONDS)
@@ -199,9 +260,6 @@ class TestEpisodeTransportProfiling:
         assert stats.receive_attempts == 1
         assert stats.receive_timeouts == 1
         assert stats.receive_timeouts_with_pending == 1
-        assert stats.ready_notification_timeouts == 0
-        assert stats.payload_receive_count == 1
-        assert stats.payload_receive_timeouts == 1
-        assert stats.payload_receive_ns > 0
-        assert stats.payload_receive_timeout_ns > 0
+        assert stats.readiness_timeouts == 1
+        assert stats.payload_receive_count == 0
         transport.shutdown()
