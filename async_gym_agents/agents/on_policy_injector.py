@@ -26,6 +26,7 @@ from async_gym_agents.constants import (
     EPISODE_DONES_FIELD,
     EPISODE_LAST_OBSERVATION_FIELD,
     EPISODE_NEW_OBSERVATION_FIELD,
+    PPO_THROUGHPUT_EPISODE_REPETITIONS,
     PROFILE_PHASE_ASSEMBLER_ACQUIRE,
     PROFILE_PHASE_CALLBACK_PROCESSING,
     PROFILE_PHASE_LOGGER_DUMP,
@@ -64,6 +65,14 @@ def bootstrap_truncated_rewards(
         with torch.inference_mode():
             terminal_value = policy.predict_values(terminal_obs)[0]
         rewards[index] += gamma * terminal_value.item()
+
+
+def repeat_episode_for_throughput_benchmark(
+    episode: list[Transition],
+) -> Generator[list[Transition], None, None]:
+    """Yield one completed PPO episode repeatedly to benchmark downstream throughput."""
+    for _ in range(PPO_THROUGHPUT_EPISODE_REPETITIONS):
+        yield episode
 
 
 class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
@@ -359,7 +368,9 @@ class InjectorWorker(InjectorWorkerBase):
             # Start a new episode
             for idx, done in enumerate(dones):
                 if done:
-                    yield episodes[idx]
-                    del episodes[idx]
+                    completed_episode = episodes.pop(idx)
+                    yield from repeat_episode_for_throughput_benchmark(
+                        completed_episode
+                    )
 
                     self.copy_policy_from_store()

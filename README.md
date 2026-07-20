@@ -26,6 +26,12 @@ snapshot. Workers check its version at episode boundaries, copy only a stable
 latest snapshot, and load it into their CPU policy. This removes the previous
 per-worker policy queues and their O(worker count) trainer-side broadcast.
 
+This profiling branch deliberately yields every completed PPO episode ten times
+before advancing its worker environment. The repeated episode objects are not
+copied. This invalidates training data but isolates the throughput of episode
+packing, transport, assembly, callbacks, and PPO training from environment-step
+latency.
+
 ```py
 import gymnasium as gym
 from functools import partial
