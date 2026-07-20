@@ -4,19 +4,6 @@ from typing import Any, Dict, List, Optional, Sequence, Type
 
 import numpy as np
 
-from async_gym_agents.constants import (
-    EMPTY_EPISODE_ERROR,
-    EPISODE_INFOS_FIELD,
-    EPISODE_KIND_MISMATCH_ERROR,
-    EPISODE_LENGTH_MISMATCH_ERROR,
-    EPISODE_RESET_INFOS_FIELD,
-    EPISODE_SPARSE_INFO_FIELDS,
-    INVALID_EPISODE_BATCH_ERROR,
-    UNPACKABLE_EPISODE_FIELD_ERROR,
-    UNSLICEABLE_EPISODE_FIELD_ERROR,
-    UNSUPPORTED_EPISODE_KIND_ERROR,
-    UNSUPPORTED_TRANSITION_TYPE_ERROR,
-)
 from async_gym_agents.data_classes import (
     EpisodeBatch,
     EpisodePacket,
@@ -31,7 +18,7 @@ def pack_episode(
 ) -> EpisodeBatch:
     """Pack one complete episode into contiguous arrays and sparse info maps."""
     if not transitions:
-        raise ValueError(EMPTY_EPISODE_ERROR)
+        raise ValueError("Cannot pack an empty episode")
 
     transition_type, episode_kind = _resolve_episode_type(transitions[0])
     packed_fields = {
@@ -39,7 +26,7 @@ def pack_episode(
             [getattr(transition, field.name) for transition in transitions]
         )
         for field in fields(transition_type)
-        if field.name not in EPISODE_SPARSE_INFO_FIELDS
+        if field.name not in {"infos", "reset_infos"}
     }
     return EpisodeBatch(
         episode_kind=episode_kind,
@@ -71,11 +58,11 @@ def decode_episode_packet(packet: EpisodePacket) -> EpisodeBatch:
     """Deserialize and validate one complete episode packet."""
     batch = pickle.loads(packet.payload)
     if not isinstance(batch, EpisodeBatch):
-        raise TypeError(INVALID_EPISODE_BATCH_ERROR)
+        raise TypeError("Episode payload did not contain an EpisodeBatch")
     if batch.episode_kind is not packet.episode_kind:
-        raise ValueError(EPISODE_KIND_MISMATCH_ERROR)
+        raise ValueError("Episode payload kind does not match its packet metadata")
     if batch.transition_count != packet.transition_count:
-        raise ValueError(EPISODE_LENGTH_MISMATCH_ERROR)
+        raise ValueError("Episode payload length does not match its packet metadata")
     return batch
 
 
@@ -89,8 +76,8 @@ def unpack_episode(
         values = {
             name: _slice_value(value, index) for name, value in batch.fields.items()
         }
-        values[EPISODE_INFOS_FIELD] = batch.infos.get(index, [{}])
-        values[EPISODE_RESET_INFOS_FIELD] = batch.reset_infos.get(index, [{}])
+        values["infos"] = batch.infos.get(index, [{}])
+        values["reset_infos"] = batch.reset_infos.get(index, [{}])
         transitions.append(transition_type(**values))
     return transitions
 
@@ -117,9 +104,7 @@ def _resolve_episode_type(
         return OnPolicyTransition, EpisodeKind.ON_POLICY
     if isinstance(transition, OffPolicyTransition):
         return OffPolicyTransition, EpisodeKind.OFF_POLICY
-    raise TypeError(
-        UNSUPPORTED_TRANSITION_TYPE_ERROR.format(transition_type=type(transition))
-    )
+    raise TypeError(f"Unsupported transition type: {type(transition)!r}")
 
 
 def _resolve_transition_class(
@@ -129,7 +114,7 @@ def _resolve_transition_class(
         return OnPolicyTransition
     if episode_kind is EpisodeKind.OFF_POLICY:
         return OffPolicyTransition
-    raise ValueError(UNSUPPORTED_EPISODE_KIND_ERROR.format(episode_kind=episode_kind))
+    raise ValueError(f"Unsupported episode kind: {episode_kind!r}")
 
 
 def _concatenate_values(values: Sequence[Any]) -> Any:
@@ -146,7 +131,7 @@ def _concatenate_values(values: Sequence[Any]) -> Any:
             _concatenate_values([value[index] for value in values])
             for index in range(len(first_value))
         )
-    raise TypeError(UNPACKABLE_EPISODE_FIELD_ERROR.format(field_type=type(first_value)))
+    raise TypeError(f"Cannot pack field value of type {type(first_value)!r}")
 
 
 def _slice_value(value: Any, index: int) -> Any:
@@ -156,7 +141,7 @@ def _slice_value(value: Any, index: int) -> Any:
         return {key: _slice_value(item, index) for key, item in value.items()}
     if isinstance(value, tuple):
         return tuple(_slice_value(item, index) for item in value)
-    raise TypeError(UNSLICEABLE_EPISODE_FIELD_ERROR.format(field_type=type(value)))
+    raise TypeError(f"Cannot slice packed field value of type {type(value)!r}")
 
 
 def _pack_sparse_infos(values: Sequence[List[Dict]]) -> Dict[int, List[Dict]]:

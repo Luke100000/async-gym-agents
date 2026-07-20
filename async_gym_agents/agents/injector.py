@@ -17,43 +17,7 @@ from typing import Any, Deque, Dict, Generator, List, Optional, Type, TypeAlias,
 import torch
 from stable_baselines3.common.base_class import BasePolicy
 
-from async_gym_agents.constants import (
-    ASYNC_AGENT_WORKER_NAME_PREFIX,
-    NANOSECONDS_PER_SECOND,
-    POLICY_MISSING_INITIAL_SNAPSHOT_ERROR,
-    POLICY_PAYLOAD_BYTES_KEY,
-    POLICY_PUBLICATION_COUNT_KEY,
-    POLICY_PUBLICATION_FAILURES_KEY,
-    POLICY_PUBLISHED_VERSION_KEY,
-    POLICY_SLOT_CAPACITY_BYTES_KEY,
-    PROFILE_PHASE_EPISODE_DESERIALIZATION,
-    PROFILE_PHASE_EPISODE_PACKING,
-    PROFILE_PHASE_EPISODE_SERIALIZATION,
-    PROFILE_PHASE_POLICY_LOADING,
-    PROFILE_PHASE_POLICY_PUBLICATION,
-    PROFILE_PHASE_POLICY_SERIALIZATION,
-    PROFILE_PHASE_POLICY_SNAPSHOT_COPY,
-    PROFILE_PHASE_POLICY_SNAPSHOT_RETRY,
-    PROFILE_PHASE_TRANSITION_RECONSTRUCTION,
-    PROFILE_PHASE_TRANSPORT,
-    PROFILE_PHASE_WAITING,
-    SHARED_POLICY_STARTUP_LOG,
-    TRANSPORT_CAPACITY_EPISODES_KEY,
-    TRANSPORT_MAX_PENDING_BYTES_KEY,
-    TRANSPORT_MAX_PENDING_EPISODES_KEY,
-    TRANSPORT_PENDING_BYTES_KEY,
-    TRANSPORT_PENDING_EPISODES_KEY,
-    TRANSPORT_RECEIVED_BYTES_KEY,
-    TRANSPORT_RECEIVED_EPISODES_KEY,
-    TRANSPORT_SENT_BYTES_KEY,
-    TRANSPORT_SENT_EPISODES_KEY,
-    TRANSPORT_UTILIZATION_KEY,
-    WORKER_EXCEPTION_LOG,
-    WORKER_EXIT_CODE_REASON,
-    WORKER_FAILURE_DETAIL,
-    WORKER_FAILURE_ERROR,
-    WORKER_UNKNOWN_SIGNAL_REASON,
-)
+from async_gym_agents import constants
 from async_gym_agents.data_classes import (
     EpisodePacket,
     EpisodeSendResult,
@@ -216,7 +180,8 @@ class AsyncAgentInjector:
             worker.run()
         except BaseException:
             logging.getLogger("async_gym_agents").exception(
-                WORKER_EXCEPTION_LOG.format(worker_index=worker_index)
+                "Async worker %s failed",
+                worker_index,
             )
             raise
         finally:
@@ -247,13 +212,13 @@ class AsyncAgentInjector:
     def pre_collect_preparation(self, policy: BasePolicy):
         self._init_collect_state()
 
-        with self._profiler_main.track(PROFILE_PHASE_POLICY_SERIALIZATION):
+        with self._profiler_main.track("policy_serialization"):
             weights_buf = io.BytesIO()
             torch.save(policy.state_dict(), weights_buf)
             weights_bytes = weights_buf.getvalue()
 
         next_version = self._version + 1
-        with self._profiler_main.track(PROFILE_PHASE_POLICY_PUBLICATION):
+        with self._profiler_main.track("policy_publication"):
             if self._policy_store is None:
                 self._policy_store = SharedPolicyStore.create(
                     initial_version=next_version,
@@ -262,10 +227,10 @@ class AsyncAgentInjector:
                 )
                 policy_stats = self._policy_store.get_stats()
                 self._logger.info(
-                    SHARED_POLICY_STARTUP_LOG.format(
-                        payload_bytes=policy_stats.payload_bytes,
-                        slot_capacity_bytes=policy_stats.slot_capacity_bytes,
-                    )
+                    "Shared policy initialized: payload_bytes=%s, "
+                    "slot_capacity_bytes=%s",
+                    policy_stats.payload_bytes,
+                    policy_stats.slot_capacity_bytes,
                 )
             else:
                 self._policy_store.publish(next_version, weights_bytes)
@@ -328,12 +293,12 @@ class AsyncAgentInjector:
         worker_env_fns = self.get_indexable_env().env_fns
         worker_count = len(worker_env_fns)
         if self._policy_store is None:
-            raise RuntimeError(POLICY_MISSING_INITIAL_SNAPSHOT_ERROR)
+            raise RuntimeError("Workers require an initial shared policy snapshot")
         policy_descriptor = self._policy_store.get_descriptor()
         for worker_index, env_func in enumerate(worker_env_fns):
             with patched_env(**worker_env) if self.use_mp else contextlib.nullcontext():
                 worker = (self.mp_ctx.Process if self.use_mp else threading.Thread)(
-                    name=f"{ASYNC_AGENT_WORKER_NAME_PREFIX}-{worker_index}",
+                    name=f"async-agent-worker-{worker_index}",
                     target=AsyncAgentInjector._run_worker,
                     kwargs=dict(
                         worker_class=self.get_worker_class(),
@@ -373,27 +338,23 @@ class AsyncAgentInjector:
             if exit_code is None or exit_code == 0:
                 continue
             failures.append(
-                WORKER_FAILURE_DETAIL.format(
-                    worker_index=worker_index,
-                    exit_reason=self._format_worker_exit_reason(exit_code),
-                )
+                f"worker {worker_index} exited with "
+                f"{self._format_worker_exit_reason(exit_code)}"
             )
 
         if failures:
-            raise RuntimeError(
-                WORKER_FAILURE_ERROR.format(failures=", ".join(failures))
-            )
+            raise RuntimeError(f"Async workers failed: {', '.join(failures)}")
 
     @staticmethod
     def _format_worker_exit_reason(exit_code: int) -> str:
         if exit_code > 0:
-            return WORKER_EXIT_CODE_REASON.format(exit_code=exit_code)
+            return f"exit code {exit_code}"
 
         signal_number = -exit_code
         try:
             return signal.Signals(signal_number).name
         except ValueError:
-            return WORKER_UNKNOWN_SIGNAL_REASON.format(signal_number=signal_number)
+            return f"signal {signal_number}"
 
     def _excluded_save_params(self) -> List[str]:
         return super()._excluded_save_params() + [
@@ -419,18 +380,18 @@ class AsyncAgentInjector:
         ]
 
     def _fetch_transitions(self, buffer_was_empty: bool) -> List[Transition]:
-        phase = PROFILE_PHASE_WAITING if buffer_was_empty else PROFILE_PHASE_TRANSPORT
+        phase = "waiting" if buffer_was_empty else "transport"
         with self._profiler_main.track(phase):
             packet: EpisodePacket = self._episode_transport.receive()
 
         self._record_policy_lag(packet.policy_version, packet.transition_count)
-        with self._profiler_main.track(PROFILE_PHASE_EPISODE_DESERIALIZATION):
+        with self._profiler_main.track("episode_deserialization"):
             episode_batch = decode_episode_packet(packet)
 
         reconstruction_start_ns = time.perf_counter_ns()
         transitions = unpack_episode(episode_batch)
         self._profiler_main.record(
-            PROFILE_PHASE_TRANSITION_RECONSTRUCTION,
+            "transition_reconstruction",
             time.perf_counter_ns() - reconstruction_start_ns,
             count=packet.transition_count,
         )
@@ -554,16 +515,16 @@ class AsyncAgentInjector:
         stats = self._episode_transport.get_stats()
         capacity = self._episode_transport.max_pending_episodes
         return {
-            TRANSPORT_PENDING_EPISODES_KEY: stats.pending_episodes,
-            TRANSPORT_MAX_PENDING_EPISODES_KEY: stats.max_pending_episodes,
-            TRANSPORT_CAPACITY_EPISODES_KEY: capacity,
-            TRANSPORT_UTILIZATION_KEY: stats.pending_episodes / capacity,
-            TRANSPORT_PENDING_BYTES_KEY: stats.pending_bytes,
-            TRANSPORT_MAX_PENDING_BYTES_KEY: stats.max_pending_bytes,
-            TRANSPORT_SENT_EPISODES_KEY: stats.sent_episodes,
-            TRANSPORT_SENT_BYTES_KEY: stats.sent_bytes,
-            TRANSPORT_RECEIVED_EPISODES_KEY: stats.received_episodes,
-            TRANSPORT_RECEIVED_BYTES_KEY: stats.received_bytes,
+            "pending_episodes": stats.pending_episodes,
+            "max_pending_episodes": stats.max_pending_episodes,
+            "capacity_episodes": capacity,
+            "utilization": stats.pending_episodes / capacity,
+            "pending_bytes": stats.pending_bytes,
+            "max_pending_bytes": stats.max_pending_bytes,
+            "sent_episodes": stats.sent_episodes,
+            "sent_bytes": stats.sent_bytes,
+            "received_episodes": stats.received_episodes,
+            "received_bytes": stats.received_bytes,
         }
 
     def _build_assembly_report(self) -> Dict[str, float | int]:
@@ -575,11 +536,11 @@ class AsyncAgentInjector:
 
         stats = self._policy_store.get_stats()
         return {
-            POLICY_PUBLISHED_VERSION_KEY: stats.published_version,
-            POLICY_PAYLOAD_BYTES_KEY: stats.payload_bytes,
-            POLICY_SLOT_CAPACITY_BYTES_KEY: stats.slot_capacity_bytes,
-            POLICY_PUBLICATION_COUNT_KEY: stats.publication_count,
-            POLICY_PUBLICATION_FAILURES_KEY: stats.publication_failures,
+            "published_version": stats.published_version,
+            "payload_bytes": stats.payload_bytes,
+            "slot_capacity_bytes": stats.slot_capacity_bytes,
+            "publication_count": stats.publication_count,
+            "publication_failures": stats.publication_failures,
         }
 
     def _get_worker_profiler_stats(self) -> ProfileStats:
@@ -647,7 +608,7 @@ class AsyncAgentInjector:
             if self._state is None or self._state.queue_put_attempts == 0
             else self._state.total_queue_put_wait_ns
             / self._state.queue_put_attempts
-            / NANOSECONDS_PER_SECOND
+            / constants.NANOSECONDS_PER_SECOND
         )
 
     @property
@@ -715,12 +676,12 @@ class InjectorWorkerBase:
             self.policy = self.policy_class(**self.policy_data)
 
         retries_before_copy = self._policy_reader.retry_count
-        with self._profiler.track(PROFILE_PHASE_POLICY_SNAPSHOT_COPY):
+        with self._profiler.track("policy_snapshot_copy"):
             snapshot = self._policy_reader.read_if_new(self._policy_version)
         retry_count = self._policy_reader.retry_count - retries_before_copy
         if retry_count > 0:
             self._profiler.record(
-                PROFILE_PHASE_POLICY_SNAPSHOT_RETRY,
+                "policy_snapshot_retry",
                 0,
                 count=retry_count,
             )
@@ -728,7 +689,7 @@ class InjectorWorkerBase:
         if snapshot is None:
             return
 
-        with self._profiler.track(PROFILE_PHASE_POLICY_LOADING):
+        with self._profiler.track("policy_loading"):
             weights = torch.load(
                 io.BytesIO(snapshot.payload),
                 map_location="cpu",
@@ -743,9 +704,9 @@ class InjectorWorkerBase:
             )
 
     def _put_episode_with_timeout(self, episode):
-        with self._profiler.track(PROFILE_PHASE_EPISODE_PACKING):
+        with self._profiler.track("episode_packing"):
             episode_batch = pack_episode(episode)
-        with self._profiler.track(PROFILE_PHASE_EPISODE_SERIALIZATION):
+        with self._profiler.track("episode_serialization"):
             packet = encode_episode_batch(
                 self.worker_index,
                 self._policy_version,
@@ -764,14 +725,14 @@ class InjectorWorkerBase:
                 self._state.discarded_episodes += 1
         if submission.waiting_ns > 0:
             self._profiler.record(
-                PROFILE_PHASE_WAITING,
+                "waiting",
                 submission.waiting_ns,
             )
         if not submission and not self._stop.is_set():
             self._logger.info("Dropped episode after transport timeout")
 
     def _record_episode_send_result(self, result: EpisodeSendResult) -> None:
-        self._profiler.record(PROFILE_PHASE_TRANSPORT, result.transport_ns)
+        self._profiler.record("transport", result.transport_ns)
         if result or self._stop.is_set():
             return
         with self._state_lock:

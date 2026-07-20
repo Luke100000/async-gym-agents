@@ -2,9 +2,7 @@ import threading
 from dataclasses import replace
 
 import numpy as np
-from stable_baselines3 import PPO
 
-from async_gym_agents.agents.async_agent import get_injected_agent
 from async_gym_agents.agents.on_policy_injector import (
     bootstrap_truncated_rewards,
 )
@@ -25,7 +23,7 @@ class TestAsyncOnPolicyRolloutAssembler:
         on_policy_packet,
         on_policy_rollout_buffer,
     ):
-        """The acquired buffer is immediately ready for PPO training."""
+        """The acquired buffer is immediately ready for on-policy training."""
         transport = EpisodeTransport(
             worker_count=1,
             max_pending_episodes=1,
@@ -141,38 +139,30 @@ class TestAsyncOnPolicyRolloutAssembler:
 
 
 class TestOnPolicyCompleteEpisodeAssembly:
-    """PPO consumes assembled episodes without introducing partial trajectories."""
+    """On-policy training consumes complete assembled episodes."""
 
     def test_resizes_rollout_buffer_to_complete_episode_total(
         self,
-        short_cartpole_multi_env,
+        short_episode_on_policy_agent,
     ):
-        """A three-row PPO target is rounded up to two complete two-row episodes."""
-        model = get_injected_agent(PPO)(
-            "MlpPolicy",
-            short_cartpole_multi_env,
-            batch_size=2,
-            device="cpu",
-            n_epochs=1,
-            n_steps=3,
-        )
+        """A three-row target is rounded up to two complete two-row episodes."""
+        short_episode_on_policy_agent.learn(total_timesteps=3)
 
-        model.learn(total_timesteps=3)
-
-        assert model.rollout_buffer.buffer_size == 4
-        assert model.rollout_buffer.episode_starts[:, 0].tolist() == [
+        assert short_episode_on_policy_agent.rollout_buffer.buffer_size == 4
+        assert short_episode_on_policy_agent.rollout_buffer.episode_starts[
+            :, 0
+        ].tolist() == [
             1.0,
             0.0,
             1.0,
             0.0,
         ]
-        model.shutdown()
 
     def test_streams_complete_episodes_from_process_workers(
         self,
         short_episode_on_policy_mp_agent,
     ):
-        """Multiprocessing workers stream complete episodes into the PPO buffer."""
+        """Process workers stream complete episodes into the on-policy buffer."""
         short_episode_on_policy_mp_agent.learn(total_timesteps=3)
 
         assert short_episode_on_policy_mp_agent.rollout_buffer.buffer_size == 4

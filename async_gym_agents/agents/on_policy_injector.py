@@ -12,20 +12,6 @@ from stable_baselines3.common.utils import obs_as_tensor
 from stable_baselines3.common.vec_env import VecEnv
 
 from async_gym_agents.agents.injector import AsyncAgentInjector, InjectorWorkerBase
-from async_gym_agents.constants import (
-    ASSEMBLY_COMPLETED_BUFFERS_KEY,
-    ASSEMBLY_FILLING_TRANSITIONS_KEY,
-    ASSEMBLY_LAST_PAYLOAD_BYTES_KEY,
-    ASSEMBLY_LAST_TRANSITIONS_KEY,
-    ASSEMBLY_MAX_PAYLOAD_BYTES_KEY,
-    ASSEMBLY_MAX_TRANSITIONS_KEY,
-    ASSEMBLY_TARGET_TRANSITIONS_KEY,
-    EPISODE_DONES_FIELD,
-    EPISODE_LAST_OBSERVATION_FIELD,
-    EPISODE_NEW_OBSERVATION_FIELD,
-    PROFILE_PHASE_ASSEMBLER_ACQUIRE,
-    PROFILE_PHASE_TRANSITION_PROCESSING,
-)
 from async_gym_agents.data_classes import OnPolicyTransition as Transition
 from async_gym_agents.episode_codec import (
     get_episode_infos,
@@ -116,7 +102,7 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
         self.pre_collect_preparation(self.policy)
         self._initialize_rollout_assembler(n_rollout_steps)
         try:
-            with self._profiler_main.track(PROFILE_PHASE_ASSEMBLER_ACQUIRE):
+            with self._profiler_main.track("assembler_acquire"):
                 prepared_rollout = self._rollout_assembler.acquire()
         except RuntimeError:
             self.raise_for_failed_workers()
@@ -138,7 +124,7 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
         new_obs = None
         dones = None
         buffer_index = 0
-        with self._profiler_main.track(PROFILE_PHASE_TRANSITION_PROCESSING):
+        with self._profiler_main.track("transition_processing"):
             for assembled_episode in prepared_rollout.episodes:
                 batch = assembled_episode.batch
                 for transition_index in range(batch.transition_count):
@@ -151,12 +137,12 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
 
                     new_obs = slice_episode_field(
                         batch,
-                        EPISODE_NEW_OBSERVATION_FIELD,
+                        "new_obs",
                         transition_index,
                     )
                     self._last_obs = slice_episode_field(
                         batch,
-                        EPISODE_LAST_OBSERVATION_FIELD,
+                        "last_obs",
                         transition_index,
                     )
                     actions = rollout_buffer.actions[buffer_index]
@@ -168,7 +154,7 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
                     log_probs = torch.from_numpy(rollout_buffer.log_probs[buffer_index])
                     dones = slice_episode_field(
                         batch,
-                        EPISODE_DONES_FIELD,
+                        "dones",
                         transition_index,
                     )
                     infos = get_episode_infos(batch, transition_index)
@@ -215,13 +201,13 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
 
         stats = self._rollout_assembler.get_stats()
         return {
-            ASSEMBLY_TARGET_TRANSITIONS_KEY: stats.target_transition_count,
-            ASSEMBLY_FILLING_TRANSITIONS_KEY: stats.filling_transition_count,
-            ASSEMBLY_COMPLETED_BUFFERS_KEY: stats.completed_assemblies,
-            ASSEMBLY_LAST_TRANSITIONS_KEY: stats.last_transition_count,
-            ASSEMBLY_MAX_TRANSITIONS_KEY: stats.max_transition_count,
-            ASSEMBLY_LAST_PAYLOAD_BYTES_KEY: stats.last_payload_bytes,
-            ASSEMBLY_MAX_PAYLOAD_BYTES_KEY: stats.max_payload_bytes,
+            "target_transitions": stats.target_transition_count,
+            "filling_transitions": stats.filling_transition_count,
+            "completed_buffers": stats.completed_assemblies,
+            "last_transitions": stats.last_transition_count,
+            "max_transitions": stats.max_transition_count,
+            "last_payload_bytes": stats.last_payload_bytes,
+            "max_payload_bytes": stats.max_payload_bytes,
         }
 
     def shutdown(self):

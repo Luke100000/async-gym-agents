@@ -1,19 +1,8 @@
 # Async Gym Agents
 
-Wrapper environments and agent injectors for drop-in asynchronous Stable
-Baselines 3 training.
+Drop-in asynchronous data collection for Stable Baselines 3 agents.
 
-Workers send complete episodes through dedicated unidirectional pipes. Numeric
-transition fields are packed into contiguous arrays, empty `info` dictionaries
-are omitted, and a feeder thread overlaps pipe delivery with the next episode.
-`max_episodes_in_buffer` applies globally to queued and in-flight episodes, so
-it bounds transport memory and applies backpressure across all workers.
-
-PPO uses a background assembler to build the next rollout buffer while the
-current buffer trains. Episodes are never split, so a rollout may exceed
-`n_steps` by the final complete episode. Workers load the latest policy at
-episode boundaries from a versioned shared-memory snapshot; the trainer writes
-each policy only once, regardless of worker count.
+## Usage
 
 ```python
 from functools import partial
@@ -38,10 +27,10 @@ model.learn(total_timesteps=10)
 model.shutdown()
 ```
 
-`queue_put_timeout` defaults to `None`, which keeps workers under backpressure
-until capacity becomes available or shutdown starts. Set a finite timeout only
-when dropping an episode is preferable to waiting.
+Workers send complete episodes, so on-policy rollouts may exceed `n_steps` by
+the final episode. `max_episodes_in_buffer` limits buffered episodes across all
+workers. `queue_put_timeout` defaults to `None`; set a finite timeout to allow
+episode drops instead of waiting for buffer capacity.
 
-`get_profiler_report()` exposes main and worker timings, policy lag, bounded
-transport usage, rollout assembly progress, and shared-policy publication
-statistics for external logging callbacks.
+Use `get_profiler_report()` to inspect trainer, worker, buffer, transport, and
+policy statistics.

@@ -11,12 +11,11 @@ import gymnasium as gym
 import numpy as np
 import pytest
 import torch
-from stable_baselines3 import PPO
+from stable_baselines3 import PPO, SAC
 from stable_baselines3.common.buffers import RolloutBuffer
 from stable_baselines3.common.monitor import Monitor
 
 from async_gym_agents.agents.async_agent import get_injected_agent
-from async_gym_agents.constants import BYTES_PER_MEBIBYTE
 from async_gym_agents.data_classes import OffPolicyTransition, OnPolicyTransition
 from async_gym_agents.envs.buggy_lunar_lander import BuggyLunarLander
 from async_gym_agents.envs.multi_env import IndexableMultiEnv
@@ -25,7 +24,7 @@ from async_gym_agents.episode_transport import EpisodeFeeder, EpisodeTransport
 from async_gym_agents.policy_transport import SharedPolicyReader, SharedPolicyStore
 
 PROCESSES = 8
-DIRECT_TRANSPORT_PAYLOAD_BYTES = 8 * BYTES_PER_MEBIBYTE
+DIRECT_TRANSPORT_PAYLOAD_BYTES = 8 * 1024 * 1024
 DIRECT_TRANSPORT_PROCESS_TIMEOUT_SECONDS = 5.0
 TEST_EPISODE_SEND_TIMEOUT_SECONDS = 1.0
 POLICY_TEST_TIMEOUT_SECONDS = 5.0
@@ -134,7 +133,7 @@ def short_cartpole_multi_env():
 
 @pytest.fixture
 def short_episode_on_policy_agent(short_cartpole_multi_env):
-    """Create a PPO agent whose workers complete two-transition episodes."""
+    """Create an on-policy agent whose workers complete two-transition episodes."""
     agent = get_injected_agent(PPO)(
         "MlpPolicy",
         short_cartpole_multi_env,
@@ -149,7 +148,7 @@ def short_episode_on_policy_agent(short_cartpole_multi_env):
 
 @pytest.fixture
 def short_episode_on_policy_mp_agent(short_cartpole_multi_env):
-    """Create a PPO agent with short episodes in multiprocessing workers."""
+    """Create an on-policy agent with short multiprocessing episodes."""
     agent = get_injected_agent(PPO)(
         "MlpPolicy",
         short_cartpole_multi_env,
@@ -182,6 +181,20 @@ def initialized_on_policy_agent():
         batch_size=2,
         device="cpu",
         n_steps=2,
+    )
+    agent._init_collect_state()
+    yield agent
+    agent.shutdown()
+
+
+@pytest.fixture
+def initialized_off_policy_agent():
+    """Create an off-policy agent with initialized transport and no workers."""
+    env = IndexableMultiEnv([partial(gym.make, "Pendulum-v1")])
+    agent = get_injected_agent(SAC)(
+        "MlpPolicy",
+        env,
+        device="cpu",
     )
     agent._init_collect_state()
     yield agent

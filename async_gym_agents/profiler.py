@@ -3,22 +3,7 @@ from contextlib import contextmanager
 from time import perf_counter_ns, time
 from typing import Any, Dict, Iterator, Mapping, MutableMapping, Optional, Tuple
 
-from async_gym_agents.constants import (
-    ASSEMBLY_FILLING_TRANSITIONS_KEY,
-    ASSEMBLY_LAST_TRANSITIONS_KEY,
-    ASSEMBLY_MAX_PAYLOAD_BYTES_KEY,
-    ASSEMBLY_TARGET_TRANSITIONS_KEY,
-    BUFFER_AVG_POLICY_LAG_KEY,
-    BUFFER_AVG_PUSH_TIME_SECONDS_KEY,
-    BUFFER_AVG_PUSH_WAIT_SECONDS_KEY,
-    BUFFER_MAX_POLICY_LAG_KEY,
-    MILLISECONDS_PER_SECOND,
-    NANOSECONDS_PER_SECOND,
-    TRANSPORT_MAX_PENDING_BYTES_KEY,
-    TRANSPORT_MAX_PENDING_EPISODES_KEY,
-    TRANSPORT_PENDING_BYTES_KEY,
-    TRANSPORT_PENDING_EPISODES_KEY,
-)
+from async_gym_agents import constants
 
 ProfileStats = Dict[str, Dict[str, int]]
 
@@ -100,11 +85,11 @@ def build_profiler_report(
             "utilization": buffer_utilization,
             "emptiness": buffer_emptiness,
             "full_push_fraction": buffer_full_push_fraction,
-            BUFFER_AVG_PUSH_WAIT_SECONDS_KEY: buffer_avg_push_wait_time,
-            BUFFER_AVG_PUSH_TIME_SECONDS_KEY: buffer_avg_push_wait_time,
+            "avg_push_wait_seconds": buffer_avg_push_wait_time,
+            "avg_push_time_seconds": buffer_avg_push_wait_time,
             "discarded_episodes_fraction": discarded_episodes_fraction,
-            BUFFER_AVG_POLICY_LAG_KEY: avg_policy_lag,
-            BUFFER_MAX_POLICY_LAG_KEY: max_policy_lag,
+            constants.BUFFER_AVG_POLICY_LAG_KEY: avg_policy_lag,
+            constants.BUFFER_MAX_POLICY_LAG_KEY: max_policy_lag,
         },
         "worker_sync": {
             "last_sync_unix_time": worker_last_sync_time,
@@ -124,16 +109,16 @@ def render_profiler_report(report: Mapping[str, Any]) -> str:
     lines.extend(_render_profile_section("Worker", report.get("worker", {})))
 
     buffer = report.get("buffer", {})
-    avg_push_wait_seconds = buffer.get(BUFFER_AVG_PUSH_WAIT_SECONDS_KEY, 0.0)
+    avg_push_wait_seconds = buffer.get("avg_push_wait_seconds", 0.0)
     lines.append(
         "Buffer: "
         f"util={buffer.get('utilization', 0.0):.2f}, "
         f"empty={buffer.get('emptiness', 0.0):.2f}, "
         f"full_push={buffer.get('full_push_fraction', 0.0):.2f}, "
-        f"push_wait_ms={avg_push_wait_seconds * MILLISECONDS_PER_SECOND:.2f}, "
+        f"push_wait_ms={avg_push_wait_seconds * constants.MILLISECONDS_PER_SECOND:.2f}, "
         f"dropped={buffer.get('discarded_episodes_fraction', 0.0):.2f}, "
-        f"policy_lag_avg={buffer.get(BUFFER_AVG_POLICY_LAG_KEY, 0.0):.2f}, "
-        f"policy_lag_max={int(buffer.get(BUFFER_MAX_POLICY_LAG_KEY, 0))}"
+        f"policy_lag_avg={buffer.get(constants.BUFFER_AVG_POLICY_LAG_KEY, 0.0):.2f}, "
+        f"policy_lag_max={int(buffer.get(constants.BUFFER_MAX_POLICY_LAG_KEY, 0))}"
     )
 
     worker_sync = report.get("worker_sync", {})
@@ -149,20 +134,20 @@ def render_profiler_report(report: Mapping[str, Any]) -> str:
     if transport:
         lines.append(
             "Transport: "
-            f"pending={int(transport.get(TRANSPORT_PENDING_EPISODES_KEY, 0))}, "
-            f"peak={int(transport.get(TRANSPORT_MAX_PENDING_EPISODES_KEY, 0))}, "
-            f"pending_bytes={int(transport.get(TRANSPORT_PENDING_BYTES_KEY, 0))}, "
-            f"peak_bytes={int(transport.get(TRANSPORT_MAX_PENDING_BYTES_KEY, 0))}"
+            f"pending={int(transport.get('pending_episodes', 0))}, "
+            f"peak={int(transport.get('max_pending_episodes', 0))}, "
+            f"pending_bytes={int(transport.get('pending_bytes', 0))}, "
+            f"peak_bytes={int(transport.get('max_pending_bytes', 0))}"
         )
 
     assembly = report.get("assembly", {})
     if assembly:
         lines.append(
             "Assembly: "
-            f"filling={int(assembly.get(ASSEMBLY_FILLING_TRANSITIONS_KEY, 0))}, "
-            f"last={int(assembly.get(ASSEMBLY_LAST_TRANSITIONS_KEY, 0))}, "
-            f"target={int(assembly.get(ASSEMBLY_TARGET_TRANSITIONS_KEY, 0))}, "
-            f"peak_bytes={int(assembly.get(ASSEMBLY_MAX_PAYLOAD_BYTES_KEY, 0))}"
+            f"filling={int(assembly.get('filling_transitions', 0))}, "
+            f"last={int(assembly.get('last_transitions', 0))}, "
+            f"target={int(assembly.get('target_transitions', 0))}, "
+            f"peak_bytes={int(assembly.get('max_payload_bytes', 0))}"
         )
 
     return "\n".join(lines)
@@ -184,11 +169,13 @@ def iterate_profiler_metrics(
 def summarize_duration(total_ns: int, count: int) -> Dict[str, float | int]:
     """Convert cumulative nanoseconds into standard profiler report fields."""
     return {
-        "total_seconds": total_ns / NANOSECONDS_PER_SECOND,
+        "total_seconds": total_ns / constants.NANOSECONDS_PER_SECOND,
         "count": count,
         "avg_milliseconds": 0.0
         if count == 0
-        else total_ns / count / (NANOSECONDS_PER_SECOND / MILLISECONDS_PER_SECOND),
+        else total_ns
+        / count
+        / (constants.NANOSECONDS_PER_SECOND / constants.MILLISECONDS_PER_SECOND),
     }
 
 

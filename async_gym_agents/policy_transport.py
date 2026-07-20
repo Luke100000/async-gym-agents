@@ -3,18 +3,7 @@ from multiprocessing.context import BaseContext
 from multiprocessing.shared_memory import SharedMemory
 from typing import Optional
 
-from async_gym_agents.constants import (
-    POLICY_CLOSED_READER_ERROR,
-    POLICY_CLOSED_STORE_ERROR,
-    POLICY_INITIAL_SLOT_INDEX,
-    POLICY_OVERSIZED_PAYLOAD_ERROR,
-    POLICY_SNAPSHOT_SLOT_COUNT,
-    POLICY_UNPUBLISHED_VERSION,
-    POLICY_VERSION_ORDER_ERROR,
-    SHARED_COUNTER_TYPE_CODE,
-    SHARED_SIZE_TYPE_CODE,
-    SHARED_SLOT_INDEX_TYPE_CODE,
-)
+from async_gym_agents import constants
 from async_gym_agents.data_classes import (
     PolicySnapshot,
     SharedPolicyDescriptor,
@@ -57,33 +46,33 @@ class SharedPolicyStore:
         slot_capacity = _calculate_slot_capacity(len(initial_payload))
         shared_memory = SharedMemory(
             create=True,
-            size=POLICY_SNAPSHOT_SLOT_COUNT * slot_capacity,
+            size=constants.POLICY_SNAPSHOT_SLOT_COUNT * slot_capacity,
         )
         descriptor = SharedPolicyDescriptor(
             shared_memory_name=shared_memory.name,
             slot_capacity=slot_capacity,
             active_slot=mp_ctx.Value(
-                SHARED_SLOT_INDEX_TYPE_CODE,
-                POLICY_INITIAL_SLOT_INDEX,
+                constants.SHARED_SLOT_INDEX_TYPE_CODE,
+                constants.POLICY_INITIAL_SLOT_INDEX,
                 lock=False,
             ),
             published_version=mp_ctx.Value(
-                SHARED_COUNTER_TYPE_CODE,
+                constants.SHARED_COUNTER_TYPE_CODE,
                 initial_version,
                 lock=False,
             ),
             slot_sizes=mp_ctx.Array(
-                SHARED_SIZE_TYPE_CODE,
-                POLICY_SNAPSHOT_SLOT_COUNT,
+                constants.SHARED_SIZE_TYPE_CODE,
+                constants.POLICY_SNAPSHOT_SLOT_COUNT,
                 lock=False,
             ),
             slot_versions=mp_ctx.Array(
-                SHARED_COUNTER_TYPE_CODE,
-                [initial_version, POLICY_UNPUBLISHED_VERSION],
+                constants.SHARED_COUNTER_TYPE_CODE,
+                [initial_version, constants.POLICY_UNPUBLISHED_VERSION],
                 lock=False,
             ),
             slot_sequences=mp_ctx.Array(
-                SHARED_COUNTER_TYPE_CODE,
+                constants.SHARED_COUNTER_TYPE_CODE,
                 [2, 0],
                 lock=False,
             ),
@@ -91,8 +80,10 @@ class SharedPolicyStore:
         )
         store = cls(shared_memory, descriptor)
         try:
-            store._copy_payload(POLICY_INITIAL_SLOT_INDEX, initial_payload)
-            descriptor.slot_sizes[POLICY_INITIAL_SLOT_INDEX] = len(initial_payload)
+            store._copy_payload(constants.POLICY_INITIAL_SLOT_INDEX, initial_payload)
+            descriptor.slot_sizes[constants.POLICY_INITIAL_SLOT_INDEX] = len(
+                initial_payload
+            )
         except BaseException:
             shared_memory.close()
             shared_memory.unlink()
@@ -124,14 +115,12 @@ class SharedPolicyStore:
     def publish(self, version: int, payload: bytes) -> None:
         """Copy a policy into the inactive slot and atomically publish it."""
         if self._closed:
-            raise RuntimeError(POLICY_CLOSED_STORE_ERROR)
+            raise RuntimeError("Cannot publish to a closed shared policy store")
         if len(payload) > self._descriptor.slot_capacity:
             self._publication_failures += 1
             raise ValueError(
-                POLICY_OVERSIZED_PAYLOAD_ERROR.format(
-                    payload_size=len(payload),
-                    slot_capacity=self._descriptor.slot_capacity,
-                )
+                f"Policy payload size {len(payload)} exceeds shared policy slot "
+                f"capacity {self._descriptor.slot_capacity}"
             )
 
         with self._writer_lock:
@@ -140,13 +129,13 @@ class SharedPolicyStore:
                 if version <= published_version:
                     self._publication_failures += 1
                     raise ValueError(
-                        POLICY_VERSION_ORDER_ERROR.format(
-                            version=version,
-                            published_version=published_version,
-                        )
+                        f"Policy version {version} must be newer than published "
+                        f"version {published_version}"
                     )
                 inactive_slot = (
-                    POLICY_SNAPSHOT_SLOT_COUNT - 1 - self._descriptor.active_slot.value
+                    constants.POLICY_SNAPSHOT_SLOT_COUNT
+                    - 1
+                    - self._descriptor.active_slot.value
                 )
                 write_sequence = _calculate_write_sequence(
                     self._descriptor.slot_sequences[inactive_slot]
@@ -203,7 +192,7 @@ class SharedPolicyReader:
     def read_if_new(self, local_version: Optional[int]) -> Optional[PolicySnapshot]:
         """Copy and validate the latest snapshot when the worker is behind."""
         if self._closed:
-            raise RuntimeError(POLICY_CLOSED_READER_ERROR)
+            raise RuntimeError("Cannot read from a closed shared policy reader")
 
         while True:
             with self._descriptor.metadata_lock:

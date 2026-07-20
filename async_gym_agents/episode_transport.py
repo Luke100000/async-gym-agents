@@ -6,26 +6,7 @@ import time
 from multiprocessing.connection import Connection, wait
 from typing import Any, Callable, Dict, Optional, Set, Tuple, TypeAlias
 
-from async_gym_agents.constants import (
-    CLOSED_EPISODE_FEEDER_ERROR,
-    EPISODE_FEEDER_FAILURE_ERROR,
-    EPISODE_FEEDER_THREAD_NAME_PREFIX,
-    EPISODE_KIND_OFF_POLICY_CODE,
-    EPISODE_KIND_ON_POLICY_CODE,
-    EPISODE_PACKET_HEADER,
-    INVALID_EPISODE_HEADER_ERROR,
-    INVALID_POLICY_MARKER_ERROR,
-    INVALID_TRANSPORT_CAPACITY_ERROR,
-    MISSING_EPISODE_RESERVATION_ERROR,
-    MISSING_TRANSPORT_WORKER_ERROR,
-    SHARED_COUNTER_TYPE_CODE,
-    TRANSPORT_ACQUIRE_RETRY_TIMEOUT_SECONDS,
-    UNKNOWN_EPISODE_KIND_CODE_ERROR,
-    UNRESOLVED_READY_WORKER_ERROR,
-    UNSUPPORTED_EPISODE_KIND_ERROR,
-    WRONG_WORKER_CHANNEL_ERROR,
-    WRONG_WORKER_RESERVATION_ERROR,
-)
+from async_gym_agents import constants
 from async_gym_agents.data_classes import (
     EpisodePacket,
     EpisodeReservation,
@@ -43,19 +24,15 @@ GenericStopEvent: TypeAlias = Any
 def _encode_episode_packet_header(packet: EpisodePacket) -> bytes:
     """Encode fixed-size packet metadata without copying the episode payload."""
     if packet.episode_kind is EpisodeKind.ON_POLICY:
-        episode_kind_code = EPISODE_KIND_ON_POLICY_CODE
+        episode_kind_code = constants.EPISODE_KIND_ON_POLICY_CODE
     elif packet.episode_kind is EpisodeKind.OFF_POLICY:
-        episode_kind_code = EPISODE_KIND_OFF_POLICY_CODE
+        episode_kind_code = constants.EPISODE_KIND_OFF_POLICY_CODE
     else:
-        raise ValueError(
-            UNSUPPORTED_EPISODE_KIND_ERROR.format(
-                episode_kind=packet.episode_kind,
-            )
-        )
+        raise ValueError(f"Unsupported episode kind: {packet.episode_kind!r}")
 
     has_policy_version = packet.policy_version is not None
     policy_version = 0 if packet.policy_version is None else packet.policy_version
-    return EPISODE_PACKET_HEADER.pack(
+    return constants.EPISODE_PACKET_HEADER.pack(
         has_policy_version,
         policy_version,
         episode_kind_code,
@@ -75,22 +52,20 @@ def _decode_pipe_packet(
             policy_version,
             episode_kind_code,
             transition_count,
-        ) = EPISODE_PACKET_HEADER.unpack(header)
+        ) = constants.EPISODE_PACKET_HEADER.unpack(header)
     except struct.error as error:
-        raise ValueError(INVALID_EPISODE_HEADER_ERROR) from error
+        raise ValueError("Received an invalid episode packet header") from error
 
     if has_policy_version not in (0, 1):
-        raise ValueError(INVALID_POLICY_MARKER_ERROR)
+        raise ValueError("Episode packet header has an invalid policy marker")
 
-    if episode_kind_code == EPISODE_KIND_ON_POLICY_CODE:
+    if episode_kind_code == constants.EPISODE_KIND_ON_POLICY_CODE:
         episode_kind = EpisodeKind.ON_POLICY
-    elif episode_kind_code == EPISODE_KIND_OFF_POLICY_CODE:
+    elif episode_kind_code == constants.EPISODE_KIND_OFF_POLICY_CODE:
         episode_kind = EpisodeKind.OFF_POLICY
     else:
         raise ValueError(
-            UNKNOWN_EPISODE_KIND_CODE_ERROR.format(
-                episode_kind_code=episode_kind_code,
-            )
+            f"Episode packet header has unknown kind code {episode_kind_code}"
         )
 
     return EpisodePacket(
@@ -143,7 +118,7 @@ class EpisodeSender:
                 transport_ns=0,
             )
         if submission.reservation is None:
-            raise RuntimeError(MISSING_EPISODE_RESERVATION_ERROR)
+            raise RuntimeError("Successful episode submission has no reservation")
         return self.send_reserved(submission.reservation, stop)
 
     def reserve(
@@ -154,7 +129,7 @@ class EpisodeSender:
     ) -> EpisodeSubmissionResult:
         """Reserve global capacity before an asynchronous feeder accepts a packet."""
         if packet.worker_index != self.worker_index:
-            raise ValueError(WRONG_WORKER_CHANNEL_ERROR)
+            raise ValueError("Episode packet was sent through the wrong worker channel")
 
         if stop.is_set():
             return EpisodeSubmissionResult(submitted=False, waiting_ns=0)
@@ -191,7 +166,7 @@ class EpisodeSender:
         """Write an already bounded episode reservation to this worker's pipe."""
         packet = reservation.packet
         if packet.worker_index != self.worker_index:
-            raise ValueError(WRONG_WORKER_RESERVATION_ERROR)
+            raise ValueError("Episode reservation belongs to another worker channel")
         if stop.is_set():
             return self.cancel(reservation)
 
@@ -241,11 +216,11 @@ class EpisodeSender:
     @staticmethod
     def _calculate_retry_timeout(deadline: Optional[float]) -> Optional[float]:
         if deadline is None:
-            return TRANSPORT_ACQUIRE_RETRY_TIMEOUT_SECONDS
+            return constants.TRANSPORT_ACQUIRE_RETRY_TIMEOUT_SECONDS
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             return None
-        return min(TRANSPORT_ACQUIRE_RETRY_TIMEOUT_SECONDS, remaining)
+        return min(constants.TRANSPORT_ACQUIRE_RETRY_TIMEOUT_SECONDS, remaining)
 
     def _record_reservation(self, payload_size: int) -> None:
         with self._pending_episodes.get_lock():
@@ -307,7 +282,7 @@ class EpisodeFeeder:
         self._closed = False
         self._thread = threading.Thread(
             target=self._run,
-            name=f"{EPISODE_FEEDER_THREAD_NAME_PREFIX}-{sender.worker_index}",
+            name=f"episode-feeder-{sender.worker_index}",
             daemon=True,
         )
         self._thread.start()
@@ -319,12 +294,12 @@ class EpisodeFeeder:
     ) -> EpisodeSubmissionResult:
         """Accept a globally bounded packet without waiting for pipe delivery."""
         if self._closed:
-            raise RuntimeError(CLOSED_EPISODE_FEEDER_ERROR)
+            raise RuntimeError("Cannot submit an episode to a closed feeder")
         self.raise_if_failed()
         submission = self._sender.reserve(packet, self._stop, timeout)
         if submission:
             if submission.reservation is None:
-                raise RuntimeError(MISSING_EPISODE_RESERVATION_ERROR)
+                raise RuntimeError("Successful episode submission has no reservation")
             self._reservations.put_nowait(submission.reservation)
         return submission
 
@@ -342,7 +317,7 @@ class EpisodeFeeder:
         with self._error_lock:
             error = self._error
         if error is not None:
-            raise RuntimeError(EPISODE_FEEDER_FAILURE_ERROR) from error
+            raise RuntimeError("Episode feeder failed") from error
 
     def _run(self) -> None:
         while True:
@@ -351,16 +326,13 @@ class EpisodeFeeder:
                 return
             try:
                 result = self._sender.send_reserved(reservation, self._stop)
-                self._notify_send_complete(result)
+                if self._on_send_complete is not None:
+                    self._on_send_complete(result)
             except BaseException as error:
                 with self._error_lock:
                     if self._error is None:
                         self._error = error
                 self._stop.set()
-
-    def _notify_send_complete(self, result: EpisodeSendResult) -> None:
-        if self._on_send_complete is not None:
-            self._on_send_complete(result)
 
 
 class EpisodeTransport:
@@ -373,9 +345,9 @@ class EpisodeTransport:
         clock: Callable[[], int] = time.monotonic_ns,
     ) -> None:
         if worker_count <= 0:
-            raise ValueError(MISSING_TRANSPORT_WORKER_ERROR)
+            raise ValueError("Episode transport requires at least one worker")
         if max_pending_episodes <= 0:
-            raise ValueError(INVALID_TRANSPORT_CAPACITY_ERROR)
+            raise ValueError("Episode transport capacity must be positive")
 
         self.worker_count = worker_count
         self.max_pending_episodes = max_pending_episodes
@@ -389,12 +361,13 @@ class EpisodeTransport:
             for worker_index, connection in enumerate(self._receive_connections)
         }
         self._capacity = self._mp_ctx.BoundedSemaphore(max_pending_episodes)
-        self._pending_episodes = self._mp_ctx.Value(SHARED_COUNTER_TYPE_CODE, 0)
-        self._max_pending_episodes = self._mp_ctx.Value(SHARED_COUNTER_TYPE_CODE, 0)
-        self._pending_bytes = self._mp_ctx.Value(SHARED_COUNTER_TYPE_CODE, 0)
-        self._max_pending_bytes = self._mp_ctx.Value(SHARED_COUNTER_TYPE_CODE, 0)
-        self._sent_episodes = self._mp_ctx.Value(SHARED_COUNTER_TYPE_CODE, 0)
-        self._sent_bytes = self._mp_ctx.Value(SHARED_COUNTER_TYPE_CODE, 0)
+        counter_type = constants.SHARED_COUNTER_TYPE_CODE
+        self._pending_episodes = self._mp_ctx.Value(counter_type, 0)
+        self._max_pending_episodes = self._mp_ctx.Value(counter_type, 0)
+        self._pending_bytes = self._mp_ctx.Value(counter_type, 0)
+        self._max_pending_bytes = self._mp_ctx.Value(counter_type, 0)
+        self._sent_episodes = self._mp_ctx.Value(counter_type, 0)
+        self._sent_bytes = self._mp_ctx.Value(counter_type, 0)
         self._senders = [
             EpisodeSender(
                 worker_index=worker_index,
@@ -489,7 +462,7 @@ class EpisodeTransport:
             if worker_index in self._ready_workers:
                 self._ready_workers.remove(worker_index)
                 return worker_index
-        raise RuntimeError(UNRESOLVED_READY_WORKER_ERROR)
+        raise RuntimeError("Readable pipe did not identify a worker")
 
     def _receive_packet(
         self,

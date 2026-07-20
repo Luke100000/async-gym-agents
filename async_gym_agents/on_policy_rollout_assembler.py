@@ -7,28 +7,7 @@ import numpy as np
 import torch
 from stable_baselines3.common.buffers import RolloutBuffer
 
-from async_gym_agents.constants import (
-    ASSEMBLER_FAILURE_ERROR,
-    ASSEMBLER_RECEIVE_TIMEOUT_SECONDS,
-    ASSEMBLER_TIMEOUT_ERROR,
-    EPISODE_ACTIONS_FIELD,
-    EPISODE_DONES_FIELD,
-    EPISODE_LAST_DONES_FIELD,
-    EPISODE_LAST_OBSERVATION_FIELD,
-    EPISODE_LOG_PROBABILITIES_FIELD,
-    EPISODE_REWARDS_FIELD,
-    EPISODE_VALUES_FIELD,
-    INVALID_ASSEMBLY_EPISODE_ERROR,
-    INVALID_ASSEMBLY_TARGET_ERROR,
-    MISSING_PREPARED_ROLLOUT_ERROR,
-    ON_POLICY_ROLLOUT_ASSEMBLER_THREAD_NAME,
-    PROFILE_PHASE_ASSEMBLER_TRANSPORT,
-    PROFILE_PHASE_ASSEMBLER_WAITING,
-    PROFILE_PHASE_EPISODE_DESERIALIZATION,
-    PROFILE_PHASE_ROLLOUT_BUFFER_BUILDING,
-    UNSTARTED_ASSEMBLER_ERROR,
-    UNSUPPORTED_ROLLOUT_OBSERVATION_ERROR,
-)
+from async_gym_agents import constants
 from async_gym_agents.data_classes import (
     AssembledEpisode,
     EpisodeAssemblerStats,
@@ -41,7 +20,7 @@ from async_gym_agents.profiler import RuntimeProfiler
 
 
 class AsyncOnPolicyRolloutAssembler:
-    """Build the inactive PPO rollout buffer while the active buffer trains."""
+    """Build the inactive on-policy rollout buffer while the active buffer trains."""
 
     def __init__(
         self,
@@ -51,7 +30,7 @@ class AsyncOnPolicyRolloutAssembler:
         rollout_buffer_template: RolloutBuffer,
     ) -> None:
         if target_transition_count <= 0:
-            raise ValueError(INVALID_ASSEMBLY_TARGET_ERROR)
+            raise ValueError("Episode assembly target must be positive")
 
         self._transport = transport
         self._target_transition_count = target_transition_count
@@ -77,7 +56,7 @@ class AsyncOnPolicyRolloutAssembler:
             return
         self._thread = threading.Thread(
             target=self._run,
-            name=ON_POLICY_ROLLOUT_ASSEMBLER_THREAD_NAME,
+            name="on-policy-rollout-assembler",
             daemon=True,
         )
         self._fill_requested.set()
@@ -86,15 +65,17 @@ class AsyncOnPolicyRolloutAssembler:
     def acquire(self, timeout: Optional[float] = None) -> PreparedOnPolicyRollout:
         """Swap in the prepared buffer and immediately start its replacement."""
         if self._thread is None:
-            raise RuntimeError(UNSTARTED_ASSEMBLER_ERROR)
+            raise RuntimeError("Rollout assembler has not been started")
         if not self._ready.wait(timeout):
-            raise TimeoutError(ASSEMBLER_TIMEOUT_ERROR)
+            raise TimeoutError("Timed out waiting for a prepared rollout buffer")
 
         with self._state_lock:
             if self._error is not None:
-                raise RuntimeError(ASSEMBLER_FAILURE_ERROR) from self._error
+                raise RuntimeError("Rollout assembler failed") from self._error
             if self._prepared_rollout is None:
-                raise RuntimeError(MISSING_PREPARED_ROLLOUT_ERROR)
+                raise RuntimeError(
+                    "Rollout assembler stopped before preparing a buffer"
+                )
             prepared_rollout = self._prepared_rollout
             self._prepared_rollout = None
             self._filled_transition_count = 0
@@ -157,19 +138,21 @@ class AsyncOnPolicyRolloutAssembler:
         ):
             transport_stats = self._transport.get_stats()
             phase = (
-                PROFILE_PHASE_ASSEMBLER_WAITING
+                "assembler_waiting"
                 if transport_stats.pending_episodes == 0
-                else PROFILE_PHASE_ASSEMBLER_TRANSPORT
+                else "assembler_transport"
             )
             try:
                 with self._profiler.track(phase):
-                    packet = self._transport.receive(ASSEMBLER_RECEIVE_TIMEOUT_SECONDS)
+                    packet = self._transport.receive(
+                        constants.ASSEMBLER_RECEIVE_TIMEOUT_SECONDS
+                    )
             except queue.Empty:
                 continue
 
             if packet.episode_kind is not EpisodeKind.ON_POLICY:
-                raise ValueError(INVALID_ASSEMBLY_EPISODE_ERROR)
-            with self._profiler.track(PROFILE_PHASE_EPISODE_DESERIALIZATION):
+                raise ValueError("Assembler received a non-on-policy episode")
+            with self._profiler.track("episode_deserialization"):
                 batch = decode_episode_packet(packet)
             episodes.append(AssembledEpisode(packet=packet, batch=batch))
             transition_count += packet.transition_count
@@ -180,7 +163,7 @@ class AsyncOnPolicyRolloutAssembler:
         if self._stop.is_set():
             return None
 
-        with self._profiler.track(PROFILE_PHASE_ROLLOUT_BUFFER_BUILDING):
+        with self._profiler.track("rollout_buffer_building"):
             rollout_buffer = self._build_rollout_buffer(episodes, transition_count)
 
         with self._state_lock:
@@ -213,34 +196,49 @@ class AsyncOnPolicyRolloutAssembler:
 
         observations = self._concatenate_episode_field(
             episodes,
-            EPISODE_LAST_OBSERVATION_FIELD,
+            "last_obs",
         )
         self._copy_observations(rollout_buffer.observations, observations)
         self._copy_array(
             rollout_buffer.actions,
-            self._concatenate_episode_field(episodes, EPISODE_ACTIONS_FIELD),
+            self._concatenate_episode_field(
+                episodes,
+                "actions",
+            ),
         )
         self._copy_array(
             rollout_buffer.rewards,
-            self._concatenate_episode_field(episodes, EPISODE_REWARDS_FIELD),
+            self._concatenate_episode_field(
+                episodes,
+                "rewards",
+            ),
         )
         self._copy_array(
             rollout_buffer.episode_starts,
-            self._concatenate_episode_field(episodes, EPISODE_LAST_DONES_FIELD),
+            self._concatenate_episode_field(
+                episodes,
+                "last_dones",
+            ),
         )
         self._copy_array(
             rollout_buffer.values,
-            self._concatenate_episode_field(episodes, EPISODE_VALUES_FIELD),
+            self._concatenate_episode_field(
+                episodes,
+                "values",
+            ),
         )
         self._copy_array(
             rollout_buffer.log_probs,
             self._concatenate_episode_field(
                 episodes,
-                EPISODE_LOG_PROBABILITIES_FIELD,
+                "log_probs",
             ),
         )
 
-        dones = self._concatenate_episode_field(episodes, EPISODE_DONES_FIELD)
+        dones = self._concatenate_episode_field(
+            episodes,
+            "dones",
+        )
         final_dones = np.asarray(dones[-1:]).reshape(rollout_buffer.n_envs)
         rollout_buffer.compute_returns_and_advantage(
             last_values=torch.zeros(rollout_buffer.n_envs),
@@ -269,9 +267,7 @@ class AsyncOnPolicyRolloutAssembler:
                 for key in first_value
             }
         raise TypeError(
-            UNSUPPORTED_ROLLOUT_OBSERVATION_ERROR.format(
-                observation_type=type(first_value),
-            )
+            f"Cannot build a rollout buffer from {type(first_value)!r} observations"
         )
 
     def _copy_observations(self, destination: Any, source: Any) -> None:
