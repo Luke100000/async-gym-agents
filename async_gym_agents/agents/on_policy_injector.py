@@ -11,6 +11,7 @@ from stable_baselines3.common.policies import BasePolicy
 from stable_baselines3.common.utils import obs_as_tensor
 from stable_baselines3.common.vec_env import VecEnv
 
+from async_gym_agents import constants
 from async_gym_agents.agents.injector import AsyncAgentInjector, InjectorWorkerBase
 from async_gym_agents.data_classes import OnPolicyTransition as Transition
 from async_gym_agents.episode_codec import (
@@ -45,6 +46,14 @@ def bootstrap_truncated_rewards(
         with torch.inference_mode():
             terminal_value = policy.predict_values(terminal_obs)[0]
         rewards[index] += gamma * terminal_value.item()
+
+
+def repeat_episode_for_throughput_benchmark(
+    episode: list[Transition],
+) -> Generator[list[Transition], None, None]:
+    """Yield one completed on-policy episode repeatedly for throughput profiling."""
+    for _ in range(constants.PPO_THROUGHPUT_EPISODE_REPETITIONS):
+        yield episode
 
 
 class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
@@ -317,6 +326,9 @@ class InjectorWorker(InjectorWorkerBase):
             # Start a new episode
             for idx, done in enumerate(dones):
                 if done:
-                    yield episodes.pop(idx)
+                    completed_episode = episodes.pop(idx)
+                    yield from repeat_episode_for_throughput_benchmark(
+                        completed_episode
+                    )
 
                     self.copy_policy_from_store()
