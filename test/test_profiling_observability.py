@@ -1,16 +1,9 @@
-from stable_baselines3.common.callbacks import StopTrainingOnNoModelImprovement
-
 from async_gym_agents.constants import (
     BUFFER_AVG_POLICY_LAG_KEY,
     BUFFER_MAX_POLICY_LAG_KEY,
     PROFILE_PHASE_TRANSPORT,
-    PROFILER_EXCLUDED_OUTPUT_FORMATS,
-    PROFILER_LOG_PREFIX,
     TRANSPORT_MAX_PENDING_BYTES_KEY,
-    TRANSPORT_PAYLOAD_RECEIVE_PROFILE_KEY,
     TRANSPORT_PENDING_BYTES_KEY,
-    TRANSPORT_PIPE_LATENCY_PROFILE_KEY,
-    TRANSPORT_RECEIVE_ATTEMPTS_KEY,
     TRANSPORT_RECEIVED_BYTES_KEY,
 )
 from async_gym_agents.episode_codec import encode_episode_batch, pack_episode
@@ -83,79 +76,38 @@ class TestPolicyLagProfiling:
         assert transport[TRANSPORT_PENDING_BYTES_KEY] == len(packet.payload)
         assert transport[TRANSPORT_MAX_PENDING_BYTES_KEY] == len(packet.payload)
 
-    def test_reports_receive_delivery_timings(
+    def test_reports_received_payload_bytes(
         self,
         initialized_on_policy_agent,
         on_policy_packet,
         enqueue_episode_packet,
     ):
-        """Delivered episodes expose payload timing, bytes, and pipe latency."""
+        """Delivered episodes contribute their payload size to transport totals."""
         enqueue_episode_packet(initialized_on_policy_agent, on_policy_packet)
 
         initialized_on_policy_agent.fetch_transition()
 
         transport = initialized_on_policy_agent.get_profiler_report()["transport"]
-        assert transport[TRANSPORT_RECEIVE_ATTEMPTS_KEY] == 1
         assert transport[TRANSPORT_RECEIVED_BYTES_KEY] == len(on_policy_packet.payload)
-        assert transport[TRANSPORT_PAYLOAD_RECEIVE_PROFILE_KEY]["count"] == 1
-        assert transport[TRANSPORT_PIPE_LATENCY_PROFILE_KEY]["count"] == 1
 
     def test_flattens_report_into_stable_scalar_names(
         self,
-        logged_on_policy_agent,
+        initialized_on_policy_agent,
         on_policy_episode,
         enqueue_episode_packet,
     ):
-        """Profiler leaves are available to ClearML through the SB3 logger."""
+        """Profiler leaves expose stable names for external logging callbacks."""
         packet = encode_episode_batch(
             worker_index=0,
             policy_version=0,
             batch=pack_episode(on_policy_episode),
         )
-        enqueue_episode_packet(logged_on_policy_agent, packet)
-        logged_on_policy_agent.fetch_transition()
+        enqueue_episode_packet(initialized_on_policy_agent, packet)
+        initialized_on_policy_agent.fetch_transition()
 
-        logged_on_policy_agent.record_profiler_metrics()
-
-        metric_name = f"{PROFILER_LOG_PREFIX}/buffer/{BUFFER_AVG_POLICY_LAG_KEY}"
-        assert metric_name in logged_on_policy_agent.logger.name_to_value
         flattened_metrics = dict(
-            iterate_profiler_metrics(logged_on_policy_agent.get_profiler_report())
+            iterate_profiler_metrics(initialized_on_policy_agent.get_profiler_report())
         )
+        assert f"buffer/{BUFFER_AVG_POLICY_LAG_KEY}" in flattened_metrics
         assert f"transport/{TRANSPORT_MAX_PENDING_BYTES_KEY}" in flattened_metrics
-        assert (
-            f"transport/{TRANSPORT_PAYLOAD_RECEIVE_PROFILE_KEY}/avg_milliseconds"
-            in flattened_metrics
-        )
-
-
-class TestProfilerOutputRouting:
-    """Profiler scalars avoid SB3's width-limited console table."""
-
-    def test_long_callback_metrics_do_not_collide_in_console_output(
-        self,
-        initialized_on_policy_agent,
-        human_output_profiler_logger,
-    ):
-        """Long callback metric suffixes remain logged without console truncation."""
-        logger, output = human_output_profiler_logger
-        initialized_on_policy_agent.set_logger(logger)
-        initialized_on_policy_agent._callback_profiler.instrument(
-            StopTrainingOnNoModelImprovement(
-                max_no_improvement_evals=1,
-                min_evals=1,
-            )
-        )
-
-        initialized_on_policy_agent.record_profiler_metrics()
-        callback_metric_name = (
-            f"{PROFILER_LOG_PREFIX}/callbacks/StopTrainingOnNoModelImprovement/count"
-        )
-        assert (
-            logger.name_to_excluded[callback_metric_name]
-            == PROFILER_EXCLUDED_OUTPUT_FORMATS
-        )
-        logger.record("time/fps", 1)
-        logger.dump(step=1)
-
-        assert "fps" in output.getvalue()
+        assert f"transport/{TRANSPORT_RECEIVED_BYTES_KEY}" in flattened_metrics

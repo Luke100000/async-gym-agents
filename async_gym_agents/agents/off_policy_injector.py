@@ -94,7 +94,7 @@ class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithm):
             infos,
         )
 
-    # must be updated from SB3 (!)
+    # This implementation mirrors SB3's rollout lifecycle and must track upgrades.
     def collect_rollouts(
         self,
         env: VecEnv,
@@ -226,7 +226,6 @@ class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithm):
                         ):
                             self._dump_logs()
 
-        self.record_profiler_metrics()
         callback.on_rollout_end()
 
         return RolloutReturn(

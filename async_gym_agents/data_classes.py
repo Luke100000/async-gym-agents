@@ -49,7 +49,6 @@ class EpisodePacket:
     episode_kind: EpisodeKind
     transition_count: int
     payload: bytes
-    transport_enqueue_ns: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -106,19 +105,6 @@ class EpisodeTransportStats:
     sent_bytes: int
     received_episodes: int
     received_bytes: int
-    receive_attempts: int
-    receive_timeouts: int
-    receive_timeouts_with_pending: int
-    readiness_wait_ns: int
-    readiness_wait_count: int
-    readiness_timeout_ns: int
-    readiness_timeouts: int
-    payload_receive_ns: int
-    payload_receive_count: int
-    payload_receive_timeout_ns: int
-    payload_receive_timeouts: int
-    pipe_latency_ns: int
-    pipe_latency_count: int
 
 
 @dataclass(frozen=True)
@@ -132,7 +118,6 @@ class PreparedOnPolicyRollout:
     rollout_buffer: RolloutBuffer
     episodes: List[AssembledEpisode]
     transition_count: int
-    payload_bytes: int
 
 
 @dataclass(frozen=True)

@@ -7,12 +7,24 @@ from multiprocessing.connection import Connection, wait
 from typing import Any, Callable, Dict, Optional, Set, Tuple, TypeAlias
 
 from async_gym_agents.constants import (
+    CLOSED_EPISODE_FEEDER_ERROR,
+    EPISODE_FEEDER_FAILURE_ERROR,
     EPISODE_FEEDER_THREAD_NAME_PREFIX,
     EPISODE_KIND_OFF_POLICY_CODE,
     EPISODE_KIND_ON_POLICY_CODE,
     EPISODE_PACKET_HEADER,
+    INVALID_EPISODE_HEADER_ERROR,
+    INVALID_POLICY_MARKER_ERROR,
+    INVALID_TRANSPORT_CAPACITY_ERROR,
+    MISSING_EPISODE_RESERVATION_ERROR,
+    MISSING_TRANSPORT_WORKER_ERROR,
     SHARED_COUNTER_TYPE_CODE,
     TRANSPORT_ACQUIRE_RETRY_TIMEOUT_SECONDS,
+    UNKNOWN_EPISODE_KIND_CODE_ERROR,
+    UNRESOLVED_READY_WORKER_ERROR,
+    UNSUPPORTED_EPISODE_KIND_ERROR,
+    WRONG_WORKER_CHANNEL_ERROR,
+    WRONG_WORKER_RESERVATION_ERROR,
 )
 from async_gym_agents.data_classes import (
     EpisodePacket,
@@ -28,14 +40,18 @@ GenericSharedCounter: TypeAlias = Any
 GenericStopEvent: TypeAlias = Any
 
 
-def _encode_episode_packet_header(packet: EpisodePacket, enqueue_ns: int) -> bytes:
+def _encode_episode_packet_header(packet: EpisodePacket) -> bytes:
     """Encode fixed-size packet metadata without copying the episode payload."""
     if packet.episode_kind is EpisodeKind.ON_POLICY:
         episode_kind_code = EPISODE_KIND_ON_POLICY_CODE
     elif packet.episode_kind is EpisodeKind.OFF_POLICY:
         episode_kind_code = EPISODE_KIND_OFF_POLICY_CODE
     else:
-        raise ValueError(f"Unsupported episode kind: {packet.episode_kind!r}")
+        raise ValueError(
+            UNSUPPORTED_EPISODE_KIND_ERROR.format(
+                episode_kind=packet.episode_kind,
+            )
+        )
 
     has_policy_version = packet.policy_version is not None
     policy_version = 0 if packet.policy_version is None else packet.policy_version
@@ -44,7 +60,6 @@ def _encode_episode_packet_header(packet: EpisodePacket, enqueue_ns: int) -> byt
         policy_version,
         episode_kind_code,
         packet.transition_count,
-        enqueue_ns,
     )
 
 
@@ -60,13 +75,12 @@ def _decode_pipe_packet(
             policy_version,
             episode_kind_code,
             transition_count,
-            enqueue_ns,
         ) = EPISODE_PACKET_HEADER.unpack(header)
     except struct.error as error:
-        raise ValueError("Received an invalid episode packet header") from error
+        raise ValueError(INVALID_EPISODE_HEADER_ERROR) from error
 
     if has_policy_version not in (0, 1):
-        raise ValueError("Episode packet header has an invalid policy marker")
+        raise ValueError(INVALID_POLICY_MARKER_ERROR)
 
     if episode_kind_code == EPISODE_KIND_ON_POLICY_CODE:
         episode_kind = EpisodeKind.ON_POLICY
@@ -74,7 +88,9 @@ def _decode_pipe_packet(
         episode_kind = EpisodeKind.OFF_POLICY
     else:
         raise ValueError(
-            f"Episode packet header has unknown kind code {episode_kind_code}"
+            UNKNOWN_EPISODE_KIND_CODE_ERROR.format(
+                episode_kind_code=episode_kind_code,
+            )
         )
 
     return EpisodePacket(
@@ -83,7 +99,6 @@ def _decode_pipe_packet(
         episode_kind=episode_kind,
         transition_count=transition_count,
         payload=payload,
-        transport_enqueue_ns=enqueue_ns,
     )
 
 
@@ -128,7 +143,7 @@ class EpisodeSender:
                 transport_ns=0,
             )
         if submission.reservation is None:
-            raise RuntimeError("Successful episode submission has no reservation")
+            raise RuntimeError(MISSING_EPISODE_RESERVATION_ERROR)
         return self.send_reserved(submission.reservation, stop)
 
     def reserve(
@@ -139,7 +154,7 @@ class EpisodeSender:
     ) -> EpisodeSubmissionResult:
         """Reserve global capacity before an asynchronous feeder accepts a packet."""
         if packet.worker_index != self.worker_index:
-            raise ValueError("Episode packet was sent through the wrong worker channel")
+            raise ValueError(WRONG_WORKER_CHANNEL_ERROR)
 
         if stop.is_set():
             return EpisodeSubmissionResult(submitted=False, waiting_ns=0)
@@ -176,12 +191,12 @@ class EpisodeSender:
         """Write an already bounded episode reservation to this worker's pipe."""
         packet = reservation.packet
         if packet.worker_index != self.worker_index:
-            raise ValueError("Episode reservation belongs to another worker channel")
+            raise ValueError(WRONG_WORKER_RESERVATION_ERROR)
         if stop.is_set():
             return self.cancel(reservation)
 
         try:
-            header = _encode_episode_packet_header(packet, reservation.enqueue_ns)
+            header = _encode_episode_packet_header(packet)
             self._send_connection.send_bytes(header)
             self._send_connection.send_bytes(packet.payload)
         except BaseException as error:
@@ -304,12 +319,12 @@ class EpisodeFeeder:
     ) -> EpisodeSubmissionResult:
         """Accept a globally bounded packet without waiting for pipe delivery."""
         if self._closed:
-            raise RuntimeError("Cannot submit an episode to a closed feeder")
+            raise RuntimeError(CLOSED_EPISODE_FEEDER_ERROR)
         self.raise_if_failed()
         submission = self._sender.reserve(packet, self._stop, timeout)
         if submission:
             if submission.reservation is None:
-                raise RuntimeError("Successful episode submission has no reservation")
+                raise RuntimeError(MISSING_EPISODE_RESERVATION_ERROR)
             self._reservations.put_nowait(submission.reservation)
         return submission
 
@@ -327,7 +342,7 @@ class EpisodeFeeder:
         with self._error_lock:
             error = self._error
         if error is not None:
-            raise RuntimeError("Episode feeder failed") from error
+            raise RuntimeError(EPISODE_FEEDER_FAILURE_ERROR) from error
 
     def _run(self) -> None:
         while True:
@@ -358,15 +373,14 @@ class EpisodeTransport:
         clock: Callable[[], int] = time.monotonic_ns,
     ) -> None:
         if worker_count <= 0:
-            raise ValueError("Episode transport requires at least one worker")
+            raise ValueError(MISSING_TRANSPORT_WORKER_ERROR)
         if max_pending_episodes <= 0:
-            raise ValueError("Episode transport capacity must be positive")
+            raise ValueError(INVALID_TRANSPORT_CAPACITY_ERROR)
 
         self.worker_count = worker_count
         self.max_pending_episodes = max_pending_episodes
         self.use_mp = use_mp
         self._mp_ctx = mp_ctx or multiprocessing.get_context()
-        self._clock = clock
         connections = [self._mp_ctx.Pipe(duplex=False) for _ in range(worker_count)]
         self._receive_connections = [pair[0] for pair in connections]
         send_connections = [pair[1] for pair in connections]
@@ -401,19 +415,6 @@ class EpisodeTransport:
         self._next_worker_index = 0
         self._received_episodes = 0
         self._received_bytes = 0
-        self._receive_attempts = 0
-        self._receive_timeouts = 0
-        self._receive_timeouts_with_pending = 0
-        self._readiness_wait_ns = 0
-        self._readiness_wait_count = 0
-        self._readiness_timeout_ns = 0
-        self._readiness_timeouts = 0
-        self._payload_receive_ns = 0
-        self._payload_receive_count = 0
-        self._payload_receive_timeout_ns = 0
-        self._payload_receive_timeouts = 0
-        self._pipe_latency_ns = 0
-        self._pipe_latency_count = 0
         self._interrupted = False
         self._shutdown = False
 
@@ -430,21 +431,14 @@ class EpisodeTransport:
 
     def receive(self, timeout: Optional[float] = None) -> EpisodePacket:
         """Receive one complete episode from readable worker pipes fairly."""
-        self._receive_attempts += 1
         deadline = None if timeout is None else time.monotonic() + timeout
-        try:
-            self._collect_ready_workers(deadline)
-            worker_index = self._select_ready_worker()
-            packet = self._receive_packet(worker_index, deadline)
-            self._record_receive(packet)
-            self._capacity.release()
-            self._next_worker_index = (worker_index + 1) % self.worker_count
-            return packet
-        except queue.Empty:
-            self._receive_timeouts += 1
-            if self._pending_episodes.value > 0:
-                self._receive_timeouts_with_pending += 1
-            raise
+        self._collect_ready_workers(deadline)
+        worker_index = self._select_ready_worker()
+        packet = self._receive_packet(worker_index, deadline)
+        self._record_receive(packet)
+        self._capacity.release()
+        self._next_worker_index = (worker_index + 1) % self.worker_count
+        return packet
 
     def get_stats(self) -> EpisodeTransportStats:
         """Return current and peak dynamic transport memory usage."""
@@ -457,19 +451,6 @@ class EpisodeTransport:
             sent_bytes=self._sent_bytes.value,
             received_episodes=self._received_episodes,
             received_bytes=self._received_bytes,
-            receive_attempts=self._receive_attempts,
-            receive_timeouts=self._receive_timeouts,
-            receive_timeouts_with_pending=self._receive_timeouts_with_pending,
-            readiness_wait_ns=self._readiness_wait_ns,
-            readiness_wait_count=self._readiness_wait_count,
-            readiness_timeout_ns=self._readiness_timeout_ns,
-            readiness_timeouts=self._readiness_timeouts,
-            payload_receive_ns=self._payload_receive_ns,
-            payload_receive_count=self._payload_receive_count,
-            payload_receive_timeout_ns=self._payload_receive_timeout_ns,
-            payload_receive_timeouts=self._payload_receive_timeouts,
-            pipe_latency_ns=self._pipe_latency_ns,
-            pipe_latency_count=self._pipe_latency_count,
         )
 
     def interrupt(self) -> None:
@@ -494,13 +475,7 @@ class EpisodeTransport:
             return
 
         timeout = self._calculate_remaining_timeout(deadline)
-        readiness_start_ns = self._clock()
         ready_connections = wait(self._receive_connections, timeout=timeout)
-        readiness_ns = self._clock() - readiness_start_ns
-        self._record_readiness_wait(
-            readiness_ns,
-            timed_out=not ready_connections,
-        )
         if not ready_connections:
             raise queue.Empty
 
@@ -514,7 +489,7 @@ class EpisodeTransport:
             if worker_index in self._ready_workers:
                 self._ready_workers.remove(worker_index)
                 return worker_index
-        raise RuntimeError("Readable pipe did not identify a worker")
+        raise RuntimeError(UNRESOLVED_READY_WORKER_ERROR)
 
     def _receive_packet(
         self,
@@ -522,7 +497,6 @@ class EpisodeTransport:
         deadline: Optional[float],
     ) -> EpisodePacket:
         connection = self._receive_connections[worker_index]
-        receive_start_ns = self._clock()
         header = self._pending_headers.pop(worker_index, None)
         if header is None:
             header = connection.recv_bytes()
@@ -531,25 +505,13 @@ class EpisodeTransport:
             remaining = self._calculate_remaining_timeout(deadline)
         except queue.Empty:
             self._pending_headers[worker_index] = header
-            self._record_payload_receive(
-                self._clock() - receive_start_ns,
-                timed_out=True,
-            )
             raise
 
         if remaining is not None and not connection.poll(remaining):
             self._pending_headers[worker_index] = header
-            self._record_payload_receive(
-                self._clock() - receive_start_ns,
-                timed_out=True,
-            )
             raise queue.Empty
 
         payload = connection.recv_bytes()
-        self._record_payload_receive(
-            self._clock() - receive_start_ns,
-            timed_out=False,
-        )
         return _decode_pipe_packet(worker_index, header, payload)
 
     def _calculate_remaining_timeout(
@@ -563,20 +525,6 @@ class EpisodeTransport:
             raise queue.Empty
         return remaining
 
-    def _record_readiness_wait(self, duration_ns: int, timed_out: bool) -> None:
-        self._readiness_wait_ns += max(0, duration_ns)
-        self._readiness_wait_count += 1
-        if timed_out:
-            self._readiness_timeout_ns += max(0, duration_ns)
-            self._readiness_timeouts += 1
-
-    def _record_payload_receive(self, duration_ns: int, timed_out: bool) -> None:
-        self._payload_receive_ns += max(0, duration_ns)
-        self._payload_receive_count += 1
-        if timed_out:
-            self._payload_receive_timeout_ns += max(0, duration_ns)
-            self._payload_receive_timeouts += 1
-
     def _record_receive(self, packet: EpisodePacket) -> None:
         payload_size = len(packet.payload)
         with self._pending_episodes.get_lock():
@@ -585,9 +533,3 @@ class EpisodeTransport:
             self._pending_bytes.value -= payload_size
         self._received_episodes += 1
         self._received_bytes += payload_size
-        if packet.transport_enqueue_ns is not None:
-            self._pipe_latency_ns += max(
-                0,
-                self._clock() - packet.transport_enqueue_ns,
-            )
-            self._pipe_latency_count += 1

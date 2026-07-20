@@ -5,7 +5,6 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from functools import partial
-from io import StringIO
 from unittest.mock import Mock, patch
 
 import gymnasium as gym
@@ -14,8 +13,6 @@ import pytest
 import torch
 from stable_baselines3 import PPO
 from stable_baselines3.common.buffers import RolloutBuffer
-from stable_baselines3.common.callbacks import CallbackList, ConvertCallback
-from stable_baselines3.common.logger import HumanOutputFormat, Logger, configure
 from stable_baselines3.common.monitor import Monitor
 
 from async_gym_agents.agents.async_agent import get_injected_agent
@@ -167,18 +164,6 @@ def short_episode_on_policy_mp_agent(short_cartpole_multi_env):
 
 
 @pytest.fixture
-def single_convert_callback_list():
-    """Create a real SB3 callback list with one no-op leaf callback."""
-    return CallbackList([ConvertCallback(None)])
-
-
-@pytest.fixture
-def deterministic_callback_clock():
-    """Return nanosecond timestamps for two callback invocations."""
-    return Mock(side_effect=[1_000, 2_000, 3_000, 5_000])
-
-
-@pytest.fixture
 def fixed_terminal_value_policy():
     """Create a policy boundary returning a fixed terminal state value."""
     policy = Mock()
@@ -211,21 +196,6 @@ def on_policy_agent_with_signaled_worker(initialized_on_policy_agent):
     worker.is_alive.return_value = False
     initialized_on_policy_agent._workers = [worker]
     return initialized_on_policy_agent
-
-
-@pytest.fixture
-def logged_on_policy_agent(initialized_on_policy_agent):
-    """Configure an initialized agent with an in-memory Stable Baselines logger."""
-    initialized_on_policy_agent.set_logger(configure(format_strings=[]))
-    return initialized_on_policy_agent
-
-
-@pytest.fixture
-def human_output_profiler_logger():
-    """Create an SB3 logger backed by the truncating console-table formatter."""
-    output = StringIO()
-    logger = Logger(folder=None, output_formats=[HumanOutputFormat(output)])
-    return logger, output
 
 
 @pytest.fixture

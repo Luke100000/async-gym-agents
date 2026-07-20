@@ -15,19 +15,10 @@ SHARED_SIZE_TYPE_CODE = "Q"
 POLICY_SNAPSHOT_SLOT_COUNT = 2
 POLICY_INITIAL_SLOT_INDEX = 0
 POLICY_UNPUBLISHED_VERSION = -1
-PPO_THROUGHPUT_EPISODE_REPETITIONS = 10
-EPISODE_PACKET_HEADER = struct.Struct("!BqBQQ")
+EPISODE_PACKET_HEADER = struct.Struct("!BqBQ")
 EPISODE_KIND_ON_POLICY_CODE = 0
 EPISODE_KIND_OFF_POLICY_CODE = 1
 
-CALLBACK_PROFILE_HOOK_NAMES = (
-    "on_training_start",
-    "on_rollout_start",
-    "on_step",
-    "on_rollout_end",
-    "on_training_end",
-)
-CALLBACK_PROFILER_REPORT_KEY = "callbacks"
 EPISODE_ACTIONS_FIELD = "actions"
 EPISODE_DONES_FIELD = "dones"
 EPISODE_LAST_DONES_FIELD = "last_dones"
@@ -36,8 +27,51 @@ EPISODE_LOG_PROBABILITIES_FIELD = "log_probs"
 EPISODE_NEW_OBSERVATION_FIELD = "new_obs"
 EPISODE_REWARDS_FIELD = "rewards"
 EPISODE_VALUES_FIELD = "values"
+EPISODE_INFOS_FIELD = "infos"
+EPISODE_RESET_INFOS_FIELD = "reset_infos"
+EPISODE_SPARSE_INFO_FIELDS = {
+    EPISODE_INFOS_FIELD,
+    EPISODE_RESET_INFOS_FIELD,
+}
 
-PROFILE_PHASE_POLICY_BROADCAST = "policy_broadcast"
+EMPTY_EPISODE_ERROR = "Cannot pack an empty episode"
+INVALID_EPISODE_BATCH_ERROR = "Episode payload did not contain an EpisodeBatch"
+EPISODE_KIND_MISMATCH_ERROR = "Episode payload kind does not match its packet metadata"
+EPISODE_LENGTH_MISMATCH_ERROR = (
+    "Episode payload length does not match its packet metadata"
+)
+UNSUPPORTED_TRANSITION_TYPE_ERROR = "Unsupported transition type: {transition_type!r}"
+UNSUPPORTED_EPISODE_KIND_ERROR = "Unsupported episode kind: {episode_kind!r}"
+UNPACKABLE_EPISODE_FIELD_ERROR = "Cannot pack field value of type {field_type!r}"
+UNSLICEABLE_EPISODE_FIELD_ERROR = (
+    "Cannot slice packed field value of type {field_type!r}"
+)
+
+INVALID_EPISODE_HEADER_ERROR = "Received an invalid episode packet header"
+INVALID_POLICY_MARKER_ERROR = "Episode packet header has an invalid policy marker"
+UNKNOWN_EPISODE_KIND_CODE_ERROR = (
+    "Episode packet header has unknown kind code {episode_kind_code}"
+)
+MISSING_EPISODE_RESERVATION_ERROR = "Successful episode submission has no reservation"
+WRONG_WORKER_CHANNEL_ERROR = "Episode packet was sent through the wrong worker channel"
+WRONG_WORKER_RESERVATION_ERROR = "Episode reservation belongs to another worker channel"
+CLOSED_EPISODE_FEEDER_ERROR = "Cannot submit an episode to a closed feeder"
+EPISODE_FEEDER_FAILURE_ERROR = "Episode feeder failed"
+MISSING_TRANSPORT_WORKER_ERROR = "Episode transport requires at least one worker"
+INVALID_TRANSPORT_CAPACITY_ERROR = "Episode transport capacity must be positive"
+UNRESOLVED_READY_WORKER_ERROR = "Readable pipe did not identify a worker"
+
+INVALID_ASSEMBLY_TARGET_ERROR = "Episode assembly target must be positive"
+UNSTARTED_ASSEMBLER_ERROR = "Rollout assembler has not been started"
+ASSEMBLER_TIMEOUT_ERROR = "Timed out waiting for a prepared rollout buffer"
+ASSEMBLER_FAILURE_ERROR = "Rollout assembler failed"
+MISSING_PREPARED_ROLLOUT_ERROR = "Rollout assembler stopped before preparing a buffer"
+INVALID_ASSEMBLY_EPISODE_ERROR = "Assembler received a non-PPO episode"
+UNSUPPORTED_ROLLOUT_OBSERVATION_ERROR = (
+    "Cannot build a rollout buffer from {observation_type!r} observations"
+)
+
+PROFILE_PHASE_POLICY_PUBLICATION = "policy_publication"
 PROFILE_PHASE_POLICY_LOADING = "policy_loading"
 PROFILE_PHASE_POLICY_SNAPSHOT_COPY = "policy_snapshot_copy"
 PROFILE_PHASE_POLICY_SNAPSHOT_RETRY = "policy_snapshot_retry"
@@ -48,10 +82,8 @@ PROFILE_PHASE_EPISODE_SERIALIZATION = "episode_serialization"
 PROFILE_PHASE_ASSEMBLER_TRANSPORT = "assembler_transport"
 PROFILE_PHASE_ASSEMBLER_WAITING = "assembler_waiting"
 PROFILE_PHASE_ASSEMBLER_ACQUIRE = "assembler_acquire"
-PROFILE_PHASE_CALLBACK_PROCESSING = "callback_processing"
+PROFILE_PHASE_TRANSITION_PROCESSING = "transition_processing"
 PROFILE_PHASE_ROLLOUT_BUFFER_BUILDING = "rollout_buffer_building"
-PROFILE_PHASE_PROFILER_REPORTING = "profiler_reporting"
-PROFILE_PHASE_LOGGER_DUMP = "logger_dump"
 PROFILE_PHASE_TRANSPORT = "transport"
 PROFILE_PHASE_TRANSITION_RECONSTRUCTION = "transition_reconstruction"
 PROFILE_PHASE_WAITING = "waiting"
@@ -89,9 +121,6 @@ WORKER_FAILURE_DETAIL = "worker {worker_index} exited with {exit_reason}"
 WORKER_EXIT_CODE_REASON = "exit code {exit_code}"
 WORKER_UNKNOWN_SIGNAL_REASON = "signal {signal_number}"
 
-PROFILER_LOG_PREFIX = "profiler"
-PROFILER_EXCLUDED_OUTPUT_FORMATS = ("stdout", "log")
-
 TRANSPORT_PENDING_EPISODES_KEY = "pending_episodes"
 TRANSPORT_MAX_PENDING_EPISODES_KEY = "max_pending_episodes"
 TRANSPORT_CAPACITY_EPISODES_KEY = "capacity_episodes"
@@ -102,20 +131,6 @@ TRANSPORT_SENT_EPISODES_KEY = "sent_episodes"
 TRANSPORT_SENT_BYTES_KEY = "sent_bytes"
 TRANSPORT_RECEIVED_EPISODES_KEY = "received_episodes"
 TRANSPORT_RECEIVED_BYTES_KEY = "received_bytes"
-TRANSPORT_RECEIVE_ATTEMPTS_KEY = "receive_attempts"
-TRANSPORT_RECEIVE_TIMEOUTS_KEY = "receive_timeouts"
-TRANSPORT_RECEIVE_TIMEOUT_FRACTION_KEY = "receive_timeout_fraction"
-TRANSPORT_RECEIVE_TIMEOUTS_WITH_PENDING_KEY = "receive_timeouts_with_pending"
-TRANSPORT_RECEIVE_TIMEOUTS_WITH_PENDING_FRACTION_KEY = (
-    "receive_timeouts_with_pending_fraction"
-)
-TRANSPORT_READINESS_WAIT_PROFILE_KEY = "readiness_wait"
-TRANSPORT_READINESS_TIMEOUT_PROFILE_KEY = "readiness_timeout"
-TRANSPORT_PAYLOAD_RECEIVE_PROFILE_KEY = "payload_receive"
-TRANSPORT_PAYLOAD_RECEIVE_TIMEOUT_PROFILE_KEY = "payload_receive_timeout"
-TRANSPORT_PAYLOAD_MEBIBYTES_PER_SECOND_KEY = "payload_mib_per_second"
-TRANSPORT_PIPE_LATENCY_PROFILE_KEY = "pipe_latency"
-
 ASSEMBLY_TARGET_TRANSITIONS_KEY = "target_transitions"
 ASSEMBLY_FILLING_TRANSITIONS_KEY = "filling_transitions"
 ASSEMBLY_COMPLETED_BUFFERS_KEY = "completed_buffers"

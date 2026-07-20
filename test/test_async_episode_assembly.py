@@ -7,7 +7,6 @@ from stable_baselines3 import PPO
 from async_gym_agents.agents.async_agent import get_injected_agent
 from async_gym_agents.agents.on_policy_injector import (
     bootstrap_truncated_rewards,
-    repeat_episode_for_throughput_benchmark,
 )
 from async_gym_agents.episode_transport import EpisodeTransport
 from async_gym_agents.on_policy_rollout_assembler import (
@@ -16,20 +15,6 @@ from async_gym_agents.on_policy_rollout_assembler import (
 from async_gym_agents.profiler import RuntimeProfiler
 
 ASSEMBLY_TEST_TIMEOUT_SECONDS = 1.0
-EXPECTED_THROUGHPUT_EPISODE_REPETITIONS = 10
-
-
-class TestPpoThroughputEpisodeReplay:
-    """The throughput benchmark multiplies completed episodes near the worker env."""
-
-    def test_repeats_the_same_completed_episode_ten_times(self, on_policy_episode):
-        """One environment episode is yielded repeatedly without copying it."""
-        repeated_episodes = list(
-            repeat_episode_for_throughput_benchmark(on_policy_episode)
-        )
-
-        assert len(repeated_episodes) == EXPECTED_THROUGHPUT_EPISODE_REPETITIONS
-        assert all(episode is on_policy_episode for episode in repeated_episodes)
 
 
 class TestAsyncOnPolicyRolloutAssembler:
@@ -203,8 +188,7 @@ class TestOnPolicyCompleteEpisodeAssembly:
         policy_report = short_episode_on_policy_agent.get_profiler_report()["policy"]
         assert policy_report["published_version"] >= 1
         assert policy_report["payload_bytes"] > 0
-        assert policy_report["publication_count"] >= 1
-        assert not hasattr(short_episode_on_policy_agent, "_update_queues")
+        assert policy_report["publication_count"] == 1
 
 
 class TestTruncatedRewardBootstrap:

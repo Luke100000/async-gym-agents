@@ -1,4 +1,4 @@
-from typing import Any, Dict, Generator, Optional, Type
+from typing import Generator, Optional, Type
 
 import gymnasium as gym
 import numpy as np
@@ -8,12 +8,10 @@ from stable_baselines3.common.buffers import RolloutBuffer
 from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.on_policy_algorithm import OnPolicyAlgorithm
 from stable_baselines3.common.policies import BasePolicy
-from stable_baselines3.common.type_aliases import MaybeCallback
 from stable_baselines3.common.utils import obs_as_tensor
 from stable_baselines3.common.vec_env import VecEnv
 
 from async_gym_agents.agents.injector import AsyncAgentInjector, InjectorWorkerBase
-from async_gym_agents.callback_profiler import CallbackRuntimeProfiler
 from async_gym_agents.constants import (
     ASSEMBLY_COMPLETED_BUFFERS_KEY,
     ASSEMBLY_FILLING_TRANSITIONS_KEY,
@@ -22,15 +20,11 @@ from async_gym_agents.constants import (
     ASSEMBLY_MAX_PAYLOAD_BYTES_KEY,
     ASSEMBLY_MAX_TRANSITIONS_KEY,
     ASSEMBLY_TARGET_TRANSITIONS_KEY,
-    CALLBACK_PROFILER_REPORT_KEY,
     EPISODE_DONES_FIELD,
     EPISODE_LAST_OBSERVATION_FIELD,
     EPISODE_NEW_OBSERVATION_FIELD,
-    PPO_THROUGHPUT_EPISODE_REPETITIONS,
     PROFILE_PHASE_ASSEMBLER_ACQUIRE,
-    PROFILE_PHASE_CALLBACK_PROCESSING,
-    PROFILE_PHASE_LOGGER_DUMP,
-    PROFILE_PHASE_PROFILER_REPORTING,
+    PROFILE_PHASE_TRANSITION_PROCESSING,
 )
 from async_gym_agents.data_classes import OnPolicyTransition as Transition
 from async_gym_agents.episode_codec import (
@@ -67,14 +61,6 @@ def bootstrap_truncated_rewards(
         rewards[index] += gamma * terminal_value.item()
 
 
-def repeat_episode_for_throughput_benchmark(
-    episode: list[Transition],
-) -> Generator[list[Transition], None, None]:
-    """Yield one completed PPO episode repeatedly to benchmark downstream throughput."""
-    for _ in range(PPO_THROUGHPUT_EPISODE_REPETITIONS):
-        yield episode
-
-
 class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
     def __init__(
         self,
@@ -102,9 +88,8 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
         super(AsyncAgentInjector, self).__init__(*args, **kwargs)
         self._rollout_assembler = None
         self._final_assembly_report = {}
-        self._callback_profiler = CallbackRuntimeProfiler()
 
-    # must be updated from SB3 (!)
+    # This implementation mirrors SB3's rollout lifecycle and must track upgrades.
     def collect_rollouts(
         self,
         env: VecEnv,
@@ -153,7 +138,7 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
         new_obs = None
         dones = None
         buffer_index = 0
-        with self._profiler_main.track(PROFILE_PHASE_CALLBACK_PROCESSING):
+        with self._profiler_main.track(PROFILE_PHASE_TRANSITION_PROCESSING):
             for assembled_episode in prepared_rollout.episodes:
                 batch = assembled_episode.batch
                 for transition_index in range(batch.transition_count):
@@ -203,8 +188,6 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
 
         callback.update_locals(locals())
 
-        with self._profiler_main.track(PROFILE_PHASE_PROFILER_REPORTING):
-            self.record_profiler_metrics()
         callback.on_rollout_end()
 
         return True
@@ -224,27 +207,7 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
         return super()._excluded_save_params() + [
             "_rollout_assembler",
             "_final_assembly_report",
-            "_callback_profiler",
         ]
-
-    def _init_callback(
-        self,
-        callback: MaybeCallback,
-        progress_bar: bool = False,
-    ) -> BaseCallback:
-        initialized_callback = super()._init_callback(callback, progress_bar)
-        self._callback_profiler.instrument(initialized_callback)
-        return initialized_callback
-
-    def get_profiler_report(self) -> Dict[str, Any]:
-        """Include leaf callback timings in the standard profiler report."""
-        report = super().get_profiler_report()
-        report[CALLBACK_PROFILER_REPORT_KEY] = self._callback_profiler.get_report()
-        return report
-
-    def _dump_logs(self, iteration: int) -> None:
-        with self._profiler_main.track(PROFILE_PHASE_LOGGER_DUMP):
-            super()._dump_logs(iteration)
 
     def _build_assembly_report(self):
         if self._rollout_assembler is None:
@@ -368,9 +331,6 @@ class InjectorWorker(InjectorWorkerBase):
             # Start a new episode
             for idx, done in enumerate(dones):
                 if done:
-                    completed_episode = episodes.pop(idx)
-                    yield from repeat_episode_for_throughput_benchmark(
-                        completed_episode
-                    )
+                    yield episodes.pop(idx)
 
                     self.copy_policy_from_store()

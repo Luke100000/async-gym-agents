@@ -1,5 +1,4 @@
 import contextlib
-import faulthandler
 import io
 import logging
 import multiprocessing
@@ -20,7 +19,6 @@ from stable_baselines3.common.base_class import BasePolicy
 
 from async_gym_agents.constants import (
     ASYNC_AGENT_WORKER_NAME_PREFIX,
-    BYTES_PER_MEBIBYTE,
     NANOSECONDS_PER_SECOND,
     POLICY_MISSING_INITIAL_SNAPSHOT_ERROR,
     POLICY_PAYLOAD_BYTES_KEY,
@@ -31,33 +29,20 @@ from async_gym_agents.constants import (
     PROFILE_PHASE_EPISODE_DESERIALIZATION,
     PROFILE_PHASE_EPISODE_PACKING,
     PROFILE_PHASE_EPISODE_SERIALIZATION,
-    PROFILE_PHASE_POLICY_BROADCAST,
     PROFILE_PHASE_POLICY_LOADING,
+    PROFILE_PHASE_POLICY_PUBLICATION,
     PROFILE_PHASE_POLICY_SERIALIZATION,
     PROFILE_PHASE_POLICY_SNAPSHOT_COPY,
     PROFILE_PHASE_POLICY_SNAPSHOT_RETRY,
     PROFILE_PHASE_TRANSITION_RECONSTRUCTION,
     PROFILE_PHASE_TRANSPORT,
     PROFILE_PHASE_WAITING,
-    PROFILER_EXCLUDED_OUTPUT_FORMATS,
-    PROFILER_LOG_PREFIX,
     SHARED_POLICY_STARTUP_LOG,
     TRANSPORT_CAPACITY_EPISODES_KEY,
     TRANSPORT_MAX_PENDING_BYTES_KEY,
     TRANSPORT_MAX_PENDING_EPISODES_KEY,
-    TRANSPORT_PAYLOAD_MEBIBYTES_PER_SECOND_KEY,
-    TRANSPORT_PAYLOAD_RECEIVE_PROFILE_KEY,
-    TRANSPORT_PAYLOAD_RECEIVE_TIMEOUT_PROFILE_KEY,
     TRANSPORT_PENDING_BYTES_KEY,
     TRANSPORT_PENDING_EPISODES_KEY,
-    TRANSPORT_PIPE_LATENCY_PROFILE_KEY,
-    TRANSPORT_READINESS_TIMEOUT_PROFILE_KEY,
-    TRANSPORT_READINESS_WAIT_PROFILE_KEY,
-    TRANSPORT_RECEIVE_ATTEMPTS_KEY,
-    TRANSPORT_RECEIVE_TIMEOUT_FRACTION_KEY,
-    TRANSPORT_RECEIVE_TIMEOUTS_KEY,
-    TRANSPORT_RECEIVE_TIMEOUTS_WITH_PENDING_FRACTION_KEY,
-    TRANSPORT_RECEIVE_TIMEOUTS_WITH_PENDING_KEY,
     TRANSPORT_RECEIVED_BYTES_KEY,
     TRANSPORT_RECEIVED_EPISODES_KEY,
     TRANSPORT_SENT_BYTES_KEY,
@@ -91,9 +76,7 @@ from async_gym_agents.profiler import (
     ProfileStats,
     RuntimeProfiler,
     build_profiler_report,
-    iterate_profiler_metrics,
     merge_profile_stats,
-    summarize_duration,
 )
 from async_gym_agents.types import EnvFactory, Transition
 from async_gym_agents.utils import make_venv
@@ -149,7 +132,6 @@ class AsyncAgentInjector:
         self.use_mp = use_mp
         self.worker_start_interval_seconds = worker_start_interval_seconds
 
-        # noinspection PyTypeChecker
         self.mp_ctx = multiprocessing.get_context(mp_method)
 
         self._skip_truncated = skip_truncated
@@ -158,12 +140,10 @@ class AsyncAgentInjector:
         self._profiler_sync_interval = profiler_sync_interval
         self.mp_threads = mp_threads
 
-        # shared memory
         self._episode_transport: EpisodeTransport | None = None
         self._policy_store: Optional[SharedPolicyStore] = None
         self._transitions: Deque[Transition] = deque()
 
-        # shared object (!)
         self._manager: Optional[multiprocessing.Manager] = None
         self._state: GenericState | None = None
         self._state_lock: GenericStateLock | None = None
@@ -175,7 +155,6 @@ class AsyncAgentInjector:
         self._initialized_workers = False
         self._workers: List[GenericWorker] = []
 
-        # Metrics
         self._buffer_utilization = 0.0
         self._buffer_emptiness = 0.0
         self._buffer_stat_count = 0
@@ -205,7 +184,6 @@ class AsyncAgentInjector:
         mp_threads: int = 1,
     ):
         if use_mp:
-            faulthandler.enable()
             try:
                 torch.set_num_threads(mp_threads)
                 torch.set_num_interop_threads(mp_threads)
@@ -257,7 +235,6 @@ class AsyncAgentInjector:
             profiler_sync_interval=self._profiler_sync_interval,
         )
 
-    # noinspection PyUnresolvedReferences
     def get_indexable_env(self) -> IndexableMultiEnv:
         """
         Asserts whether a correct environment is supplied
@@ -276,7 +253,7 @@ class AsyncAgentInjector:
             weights_bytes = weights_buf.getvalue()
 
         next_version = self._version + 1
-        with self._profiler_main.track(PROFILE_PHASE_POLICY_BROADCAST):
+        with self._profiler_main.track(PROFILE_PHASE_POLICY_PUBLICATION):
             if self._policy_store is None:
                 self._policy_store = SharedPolicyStore.create(
                     initial_version=next_version,
@@ -314,7 +291,6 @@ class AsyncAgentInjector:
             use_mp=self.use_mp,
             mp_ctx=self.mp_ctx,
         )
-        # Shared state for metrics
         self._manager = self.mp_ctx.Manager() if self.use_mp else None
         self._state = self._manager.Namespace() if self.use_mp else SimpleNamespace()
 
@@ -326,7 +302,6 @@ class AsyncAgentInjector:
         self._state.worker_profiler_stats = self._manager.dict() if self.use_mp else {}
         self._state.worker_profiler_last_sync = None
 
-        # Stop signal
         self._stop = self.mp_ctx.Event() if self.use_mp else threading.Event()
 
         self._initialized = True
@@ -335,11 +310,9 @@ class AsyncAgentInjector:
         if self._initialized_workers:
             return
 
-        # Start workers
         self._workers = []
 
         policy_class = type(policy)
-        # noinspection PyProtectedMember
         policy_data = policy._get_constructor_parameters()
 
         worker_env = dict(
@@ -380,7 +353,6 @@ class AsyncAgentInjector:
                 )
                 worker.start()
 
-            # noinspection PyTypeChecker
             self._workers.append(worker)
 
             if (
@@ -424,7 +396,6 @@ class AsyncAgentInjector:
             return WORKER_UNKNOWN_SIGNAL_REASON.format(signal_number=signal_number)
 
     def _excluded_save_params(self) -> List[str]:
-        # noinspection PyUnresolvedReferences
         return super()._excluded_save_params() + [
             "_envs",
             "_episode_transport",
@@ -530,7 +501,6 @@ class AsyncAgentInjector:
             self._policy_store.unlink()
             self._policy_store = None
 
-        # release a shared object: manager
         if self._manager is not None:
             worker_profiler_stats = cast(
                 ProfileStats, dict(self._state.worker_profiler_stats)
@@ -554,7 +524,6 @@ class AsyncAgentInjector:
 
     def train(self, *args, **kwargs):
         with self._profiler_main.track("training"):
-            # noinspection PyUnresolvedReferences
             return super().train(*args, **kwargs)
 
     def get_profiler_report(self) -> Dict[str, Any]:
@@ -578,28 +547,12 @@ class AsyncAgentInjector:
             policy_stats=self._build_policy_report(),
         )
 
-    def record_profiler_metrics(self) -> None:
-        """Record profiler report leaves through the Stable Baselines logger."""
-        for metric_name, value in iterate_profiler_metrics(self.get_profiler_report()):
-            self.logger.record(
-                f"{PROFILER_LOG_PREFIX}/{metric_name}",
-                value,
-                exclude=PROFILER_EXCLUDED_OUTPUT_FORMATS,
-            )
-
     def _build_transport_report(self) -> Dict[str, Any]:
         if self._episode_transport is None:
             return dict(self._final_transport_report)
 
         stats = self._episode_transport.get_stats()
         capacity = self._episode_transport.max_pending_episodes
-        successful_payload_count = (
-            stats.payload_receive_count - stats.payload_receive_timeouts
-        )
-        successful_payload_ns = (
-            stats.payload_receive_ns - stats.payload_receive_timeout_ns
-        )
-        payload_seconds = successful_payload_ns / NANOSECONDS_PER_SECOND
         return {
             TRANSPORT_PENDING_EPISODES_KEY: stats.pending_episodes,
             TRANSPORT_MAX_PENDING_EPISODES_KEY: stats.max_pending_episodes,
@@ -611,46 +564,6 @@ class AsyncAgentInjector:
             TRANSPORT_SENT_BYTES_KEY: stats.sent_bytes,
             TRANSPORT_RECEIVED_EPISODES_KEY: stats.received_episodes,
             TRANSPORT_RECEIVED_BYTES_KEY: stats.received_bytes,
-            TRANSPORT_RECEIVE_ATTEMPTS_KEY: stats.receive_attempts,
-            TRANSPORT_RECEIVE_TIMEOUTS_KEY: stats.receive_timeouts,
-            TRANSPORT_RECEIVE_TIMEOUT_FRACTION_KEY: (
-                0.0
-                if stats.receive_attempts == 0
-                else stats.receive_timeouts / stats.receive_attempts
-            ),
-            TRANSPORT_RECEIVE_TIMEOUTS_WITH_PENDING_KEY: (
-                stats.receive_timeouts_with_pending
-            ),
-            TRANSPORT_RECEIVE_TIMEOUTS_WITH_PENDING_FRACTION_KEY: (
-                0.0
-                if stats.receive_timeouts == 0
-                else stats.receive_timeouts_with_pending / stats.receive_timeouts
-            ),
-            TRANSPORT_READINESS_WAIT_PROFILE_KEY: summarize_duration(
-                stats.readiness_wait_ns,
-                stats.readiness_wait_count,
-            ),
-            TRANSPORT_READINESS_TIMEOUT_PROFILE_KEY: summarize_duration(
-                stats.readiness_timeout_ns,
-                stats.readiness_timeouts,
-            ),
-            TRANSPORT_PAYLOAD_RECEIVE_PROFILE_KEY: summarize_duration(
-                successful_payload_ns,
-                successful_payload_count,
-            ),
-            TRANSPORT_PAYLOAD_RECEIVE_TIMEOUT_PROFILE_KEY: summarize_duration(
-                stats.payload_receive_timeout_ns,
-                stats.payload_receive_timeouts,
-            ),
-            TRANSPORT_PAYLOAD_MEBIBYTES_PER_SECOND_KEY: (
-                0.0
-                if payload_seconds == 0.0
-                else stats.received_bytes / BYTES_PER_MEBIBYTE / payload_seconds
-            ),
-            TRANSPORT_PIPE_LATENCY_PROFILE_KEY: summarize_duration(
-                stats.pipe_latency_ns,
-                stats.pipe_latency_count,
-            ),
         }
 
     def _build_assembly_report(self) -> Dict[str, float | int]:
@@ -799,7 +712,6 @@ class InjectorWorkerBase:
 
     def copy_policy_from_store(self) -> None:
         if self.policy is None:
-            # noinspection PyArgumentList
             self.policy = self.policy_class(**self.policy_data)
 
         retries_before_copy = self._policy_reader.retry_count

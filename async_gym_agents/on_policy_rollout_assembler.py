@@ -8,7 +8,9 @@ import torch
 from stable_baselines3.common.buffers import RolloutBuffer
 
 from async_gym_agents.constants import (
+    ASSEMBLER_FAILURE_ERROR,
     ASSEMBLER_RECEIVE_TIMEOUT_SECONDS,
+    ASSEMBLER_TIMEOUT_ERROR,
     EPISODE_ACTIONS_FIELD,
     EPISODE_DONES_FIELD,
     EPISODE_LAST_DONES_FIELD,
@@ -16,11 +18,16 @@ from async_gym_agents.constants import (
     EPISODE_LOG_PROBABILITIES_FIELD,
     EPISODE_REWARDS_FIELD,
     EPISODE_VALUES_FIELD,
+    INVALID_ASSEMBLY_EPISODE_ERROR,
+    INVALID_ASSEMBLY_TARGET_ERROR,
+    MISSING_PREPARED_ROLLOUT_ERROR,
     ON_POLICY_ROLLOUT_ASSEMBLER_THREAD_NAME,
     PROFILE_PHASE_ASSEMBLER_TRANSPORT,
     PROFILE_PHASE_ASSEMBLER_WAITING,
     PROFILE_PHASE_EPISODE_DESERIALIZATION,
     PROFILE_PHASE_ROLLOUT_BUFFER_BUILDING,
+    UNSTARTED_ASSEMBLER_ERROR,
+    UNSUPPORTED_ROLLOUT_OBSERVATION_ERROR,
 )
 from async_gym_agents.data_classes import (
     AssembledEpisode,
@@ -44,7 +51,7 @@ class AsyncOnPolicyRolloutAssembler:
         rollout_buffer_template: RolloutBuffer,
     ) -> None:
         if target_transition_count <= 0:
-            raise ValueError("Episode assembly target must be positive")
+            raise ValueError(INVALID_ASSEMBLY_TARGET_ERROR)
 
         self._transport = transport
         self._target_transition_count = target_transition_count
@@ -79,17 +86,15 @@ class AsyncOnPolicyRolloutAssembler:
     def acquire(self, timeout: Optional[float] = None) -> PreparedOnPolicyRollout:
         """Swap in the prepared buffer and immediately start its replacement."""
         if self._thread is None:
-            raise RuntimeError("Rollout assembler has not been started")
+            raise RuntimeError(UNSTARTED_ASSEMBLER_ERROR)
         if not self._ready.wait(timeout):
-            raise TimeoutError("Timed out waiting for a prepared rollout buffer")
+            raise TimeoutError(ASSEMBLER_TIMEOUT_ERROR)
 
         with self._state_lock:
             if self._error is not None:
-                raise RuntimeError("Rollout assembler failed") from self._error
+                raise RuntimeError(ASSEMBLER_FAILURE_ERROR) from self._error
             if self._prepared_rollout is None:
-                raise RuntimeError(
-                    "Rollout assembler stopped before preparing a buffer"
-                )
+                raise RuntimeError(MISSING_PREPARED_ROLLOUT_ERROR)
             prepared_rollout = self._prepared_rollout
             self._prepared_rollout = None
             self._filled_transition_count = 0
@@ -163,7 +168,7 @@ class AsyncOnPolicyRolloutAssembler:
                 continue
 
             if packet.episode_kind is not EpisodeKind.ON_POLICY:
-                raise ValueError("Assembler received a non-PPO episode")
+                raise ValueError(INVALID_ASSEMBLY_EPISODE_ERROR)
             with self._profiler.track(PROFILE_PHASE_EPISODE_DESERIALIZATION):
                 batch = decode_episode_packet(packet)
             episodes.append(AssembledEpisode(packet=packet, batch=batch))
@@ -194,7 +199,6 @@ class AsyncOnPolicyRolloutAssembler:
             rollout_buffer=rollout_buffer,
             episodes=episodes,
             transition_count=transition_count,
-            payload_bytes=payload_bytes,
         )
 
     def _build_rollout_buffer(
@@ -265,7 +269,9 @@ class AsyncOnPolicyRolloutAssembler:
                 for key in first_value
             }
         raise TypeError(
-            f"Cannot build a rollout buffer from {type(first_value)!r} observations"
+            UNSUPPORTED_ROLLOUT_OBSERVATION_ERROR.format(
+                observation_type=type(first_value),
+            )
         )
 
     def _copy_observations(self, destination: Any, source: Any) -> None:
