@@ -1,5 +1,6 @@
 import multiprocessing
 import queue
+import signal
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
@@ -200,6 +201,16 @@ def initialized_on_policy_agent():
     agent._init_collect_state()
     yield agent
     agent.shutdown()
+
+
+@pytest.fixture
+def on_policy_agent_with_signaled_worker(initialized_on_policy_agent):
+    """Attach a worker terminated by a cross-platform fatal signal."""
+    worker = Mock()
+    worker.exitcode = -signal.SIGTERM
+    worker.is_alive.return_value = False
+    initialized_on_policy_agent._workers = [worker]
+    return initialized_on_policy_agent
 
 
 @pytest.fixture

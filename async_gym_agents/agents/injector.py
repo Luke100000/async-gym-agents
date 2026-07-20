@@ -1,8 +1,10 @@
 import contextlib
+import faulthandler
 import io
 import logging
 import multiprocessing
 import os
+import signal
 import threading
 import time
 from collections import deque
@@ -17,6 +19,7 @@ import torch
 from stable_baselines3.common.base_class import BasePolicy
 
 from async_gym_agents.constants import (
+    ASYNC_AGENT_WORKER_NAME_PREFIX,
     BYTES_PER_MEBIBYTE,
     NANOSECONDS_PER_SECOND,
     POLICY_MISSING_INITIAL_SNAPSHOT_ERROR,
@@ -38,6 +41,7 @@ from async_gym_agents.constants import (
     PROFILE_PHASE_WAITING,
     PROFILER_EXCLUDED_OUTPUT_FORMATS,
     PROFILER_LOG_PREFIX,
+    SHARED_POLICY_STARTUP_LOG,
     TRANSPORT_CAPACITY_EPISODES_KEY,
     TRANSPORT_MAX_PENDING_BYTES_KEY,
     TRANSPORT_MAX_PENDING_EPISODES_KEY,
@@ -59,6 +63,11 @@ from async_gym_agents.constants import (
     TRANSPORT_SENT_BYTES_KEY,
     TRANSPORT_SENT_EPISODES_KEY,
     TRANSPORT_UTILIZATION_KEY,
+    WORKER_EXCEPTION_LOG,
+    WORKER_EXIT_CODE_REASON,
+    WORKER_FAILURE_DETAIL,
+    WORKER_FAILURE_ERROR,
+    WORKER_UNKNOWN_SIGNAL_REASON,
 )
 from async_gym_agents.data_classes import (
     EpisodePacket,
@@ -196,6 +205,7 @@ class AsyncAgentInjector:
         mp_threads: int = 1,
     ):
         if use_mp:
+            faulthandler.enable()
             try:
                 torch.set_num_threads(mp_threads)
                 torch.set_num_interop_threads(mp_threads)
@@ -204,8 +214,9 @@ class AsyncAgentInjector:
                     "Failed to set torch threads, make sure to never call torch.set_num_threads() unconditional!"
                 )
 
-        policy_reader = SharedPolicyReader(policy_descriptor)
+        policy_reader = None
         try:
+            policy_reader = SharedPolicyReader(policy_descriptor)
             worker = worker_class(
                 worker_index=worker_index,
                 env_func=env_func,
@@ -225,8 +236,14 @@ class AsyncAgentInjector:
                 )
 
             worker.run()
+        except BaseException:
+            logging.getLogger("async_gym_agents").exception(
+                WORKER_EXCEPTION_LOG.format(worker_index=worker_index)
+            )
+            raise
         finally:
-            policy_reader.close()
+            if policy_reader is not None:
+                policy_reader.close()
             if use_mp:
                 episode_sender.close()
 
@@ -265,6 +282,13 @@ class AsyncAgentInjector:
                     initial_version=next_version,
                     initial_payload=weights_bytes,
                     mp_ctx=self.mp_ctx,
+                )
+                policy_stats = self._policy_store.get_stats()
+                self._logger.info(
+                    SHARED_POLICY_STARTUP_LOG.format(
+                        payload_bytes=policy_stats.payload_bytes,
+                        slot_capacity_bytes=policy_stats.slot_capacity_bytes,
+                    )
                 )
             else:
                 self._policy_store.publish(next_version, weights_bytes)
@@ -336,6 +360,7 @@ class AsyncAgentInjector:
         for worker_index, env_func in enumerate(worker_env_fns):
             with patched_env(**worker_env) if self.use_mp else contextlib.nullcontext():
                 worker = (self.mp_ctx.Process if self.use_mp else threading.Thread)(
+                    name=f"{ASYNC_AGENT_WORKER_NAME_PREFIX}-{worker_index}",
                     target=AsyncAgentInjector._run_worker,
                     kwargs=dict(
                         worker_class=self.get_worker_class(),
@@ -367,6 +392,36 @@ class AsyncAgentInjector:
         self._episode_transport.close_parent_senders()
 
         self._initialized_workers = True
+
+    def raise_for_failed_workers(self) -> None:
+        """Raise a trainer-side error identifying terminated worker processes."""
+        failures = []
+        for worker_index, worker in enumerate(self._workers):
+            exit_code = getattr(worker, "exitcode", None)
+            if exit_code is None or exit_code == 0:
+                continue
+            failures.append(
+                WORKER_FAILURE_DETAIL.format(
+                    worker_index=worker_index,
+                    exit_reason=self._format_worker_exit_reason(exit_code),
+                )
+            )
+
+        if failures:
+            raise RuntimeError(
+                WORKER_FAILURE_ERROR.format(failures=", ".join(failures))
+            )
+
+    @staticmethod
+    def _format_worker_exit_reason(exit_code: int) -> str:
+        if exit_code > 0:
+            return WORKER_EXIT_CODE_REASON.format(exit_code=exit_code)
+
+        signal_number = -exit_code
+        try:
+            return signal.Signals(signal_number).name
+        except ValueError:
+            return WORKER_UNKNOWN_SIGNAL_REASON.format(signal_number=signal_number)
 
     def _excluded_save_params(self) -> List[str]:
         # noinspection PyUnresolvedReferences

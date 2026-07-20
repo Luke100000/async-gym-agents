@@ -121,8 +121,12 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
         self.policy.set_training_mode(False)
         self.pre_collect_preparation(self.policy)
         self._initialize_rollout_assembler(n_rollout_steps)
-        with self._profiler_main.track(PROFILE_PHASE_ASSEMBLER_ACQUIRE):
-            prepared_rollout = self._rollout_assembler.acquire()
+        try:
+            with self._profiler_main.track(PROFILE_PHASE_ASSEMBLER_ACQUIRE):
+                prepared_rollout = self._rollout_assembler.acquire()
+        except RuntimeError:
+            self.raise_for_failed_workers()
+            raise
         self.rollout_buffer = prepared_rollout.rollout_buffer
         rollout_buffer = prepared_rollout.rollout_buffer
         for assembled_episode in prepared_rollout.episodes:

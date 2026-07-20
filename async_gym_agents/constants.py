@@ -8,6 +8,7 @@ TRANSPORT_ACQUIRE_RETRY_TIMEOUT_SECONDS = 0.1
 ASSEMBLER_RECEIVE_TIMEOUT_SECONDS = 0.1
 ON_POLICY_ROLLOUT_ASSEMBLER_THREAD_NAME = "on-policy-rollout-assembler"
 EPISODE_FEEDER_THREAD_NAME_PREFIX = "episode-feeder"
+ASYNC_AGENT_WORKER_NAME_PREFIX = "async-agent-worker"
 SHARED_COUNTER_TYPE_CODE = "q"
 SHARED_SLOT_INDEX_TYPE_CODE = "i"
 SHARED_SIZE_TYPE_CODE = "Q"
@@ -77,6 +78,15 @@ POLICY_OVERSIZED_PAYLOAD_ERROR = (
 POLICY_VERSION_ORDER_ERROR = (
     "Policy version {version} must be newer than published version {published_version}"
 )
+SHARED_POLICY_STARTUP_LOG = (
+    "Shared policy initialized: payload_bytes={payload_bytes}, "
+    "slot_capacity_bytes={slot_capacity_bytes}"
+)
+WORKER_EXCEPTION_LOG = "Async worker {worker_index} failed"
+WORKER_FAILURE_ERROR = "Async workers failed: {failures}"
+WORKER_FAILURE_DETAIL = "worker {worker_index} exited with {exit_reason}"
+WORKER_EXIT_CODE_REASON = "exit code {exit_code}"
+WORKER_UNKNOWN_SIGNAL_REASON = "signal {signal_number}"
 
 PROFILER_LOG_PREFIX = "profiler"
 PROFILER_EXCLUDED_OUTPUT_FORMATS = ("stdout", "log")
