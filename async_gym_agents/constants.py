@@ -9,6 +9,11 @@ ASSEMBLER_RECEIVE_TIMEOUT_SECONDS = 0.1
 ON_POLICY_ROLLOUT_ASSEMBLER_THREAD_NAME = "on-policy-rollout-assembler"
 EPISODE_FEEDER_THREAD_NAME_PREFIX = "episode-feeder"
 SHARED_COUNTER_TYPE_CODE = "q"
+SHARED_SLOT_INDEX_TYPE_CODE = "i"
+SHARED_SIZE_TYPE_CODE = "Q"
+POLICY_SNAPSHOT_SLOT_COUNT = 2
+POLICY_INITIAL_SLOT_INDEX = 0
+POLICY_UNPUBLISHED_VERSION = -1
 EPISODE_PACKET_HEADER = struct.Struct("!BqBQQ")
 EPISODE_KIND_ON_POLICY_CODE = 0
 EPISODE_KIND_OFF_POLICY_CODE = 1
@@ -32,6 +37,8 @@ EPISODE_VALUES_FIELD = "values"
 
 PROFILE_PHASE_POLICY_BROADCAST = "policy_broadcast"
 PROFILE_PHASE_POLICY_LOADING = "policy_loading"
+PROFILE_PHASE_POLICY_SNAPSHOT_COPY = "policy_snapshot_copy"
+PROFILE_PHASE_POLICY_SNAPSHOT_RETRY = "policy_snapshot_retry"
 PROFILE_PHASE_POLICY_SERIALIZATION = "policy_serialization"
 PROFILE_PHASE_EPISODE_DESERIALIZATION = "episode_deserialization"
 PROFILE_PHASE_EPISODE_PACKING = "episode_packing"
@@ -51,6 +58,22 @@ BUFFER_AVG_POLICY_LAG_KEY = "avg_policy_lag"
 BUFFER_AVG_PUSH_TIME_SECONDS_KEY = "avg_push_time_seconds"
 BUFFER_AVG_PUSH_WAIT_SECONDS_KEY = "avg_push_wait_seconds"
 BUFFER_MAX_POLICY_LAG_KEY = "max_policy_lag"
+
+POLICY_PUBLISHED_VERSION_KEY = "published_version"
+POLICY_PAYLOAD_BYTES_KEY = "payload_bytes"
+POLICY_SLOT_CAPACITY_BYTES_KEY = "slot_capacity_bytes"
+POLICY_PUBLICATION_COUNT_KEY = "publication_count"
+POLICY_PUBLICATION_FAILURES_KEY = "publication_failures"
+
+POLICY_CLOSED_STORE_ERROR = "Cannot publish to a closed shared policy store"
+POLICY_CLOSED_READER_ERROR = "Cannot read from a closed shared policy reader"
+POLICY_OVERSIZED_PAYLOAD_ERROR = (
+    "Policy payload size {payload_size} exceeds shared policy slot capacity "
+    "{slot_capacity}"
+)
+POLICY_VERSION_ORDER_ERROR = (
+    "Policy version {version} must be newer than published version {published_version}"
+)
 
 PROFILER_LOG_PREFIX = "profiler"
 PROFILER_EXCLUDED_OUTPUT_FORMATS = ("stdout", "log")

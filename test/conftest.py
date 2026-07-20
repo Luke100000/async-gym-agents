@@ -1,10 +1,11 @@
 import multiprocessing
 import queue
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from functools import partial
 from io import StringIO
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import gymnasium as gym
 import numpy as np
@@ -23,11 +24,13 @@ from async_gym_agents.envs.buggy_lunar_lander import BuggyLunarLander
 from async_gym_agents.envs.multi_env import IndexableMultiEnv
 from async_gym_agents.episode_codec import encode_episode_batch, pack_episode
 from async_gym_agents.episode_transport import EpisodeFeeder, EpisodeTransport
+from async_gym_agents.policy_transport import SharedPolicyReader, SharedPolicyStore
 
 PROCESSES = 8
 DIRECT_TRANSPORT_PAYLOAD_BYTES = 8 * BYTES_PER_MEBIBYTE
 DIRECT_TRANSPORT_PROCESS_TIMEOUT_SECONDS = 5.0
 TEST_EPISODE_SEND_TIMEOUT_SECONDS = 1.0
+POLICY_TEST_TIMEOUT_SECONDS = 5.0
 
 
 def send_episode_and_signal(
@@ -41,6 +44,72 @@ def send_episode_and_signal(
     send_started.set()
     if sender.send(packet, stop, DIRECT_TRANSPORT_PROCESS_TIMEOUT_SECONDS):
         send_completed.set()
+
+
+def read_policy_snapshot_in_process(descriptor, result_queue):
+    """Read one shared policy snapshot in a spawned child process."""
+    reader = SharedPolicyReader(descriptor)
+    try:
+        snapshot = reader.read_if_new(None)
+        result_queue.put((snapshot.version, snapshot.payload))
+    finally:
+        reader.close()
+
+
+@pytest.fixture
+def shared_policy_store():
+    """Create a spawn-compatible shared policy store with an initial snapshot."""
+    store = SharedPolicyStore.create(
+        initial_version=7,
+        initial_payload=b"initial-policy-padding",
+        mp_ctx=multiprocessing.get_context("spawn"),
+    )
+    yield store
+    store.close()
+    store.unlink()
+
+
+@pytest.fixture
+def shared_policy_reader(shared_policy_store):
+    """Open a worker-style reader for the shared policy store."""
+    reader = SharedPolicyReader(shared_policy_store.get_descriptor())
+    yield reader
+    reader.close()
+
+
+@pytest.fixture
+def paused_policy_copy(shared_policy_store):
+    """Pause a reader after metadata capture to force an overwritten-slot retry."""
+    copy_started = threading.Event()
+    allow_copy = threading.Event()
+    original_copy = SharedPolicyReader._copy_payload
+
+    def copy_payload_after_signal(reader, slot_index, payload_size):
+        copy_started.set()
+        if not allow_copy.wait(POLICY_TEST_TIMEOUT_SECONDS):
+            raise TimeoutError("Timed out waiting to resume shared policy copy")
+        return original_copy(reader, slot_index, payload_size)
+
+    with patch.object(
+        SharedPolicyReader,
+        "_copy_payload",
+        new=copy_payload_after_signal,
+    ):
+        reader = SharedPolicyReader(shared_policy_store.get_descriptor())
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            yield shared_policy_store, reader, copy_started, allow_copy, executor
+        reader.close()
+
+
+@pytest.fixture
+def failing_policy_publication(shared_policy_store):
+    """Make the inactive shared-memory slot fail during its payload copy."""
+    with patch.object(
+        SharedPolicyStore,
+        "_copy_payload",
+        side_effect=OSError("injected shared-memory write failure"),
+    ):
+        yield shared_policy_store
 
 
 @pytest.fixture

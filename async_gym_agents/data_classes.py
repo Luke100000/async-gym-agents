@@ -53,6 +53,33 @@ class EpisodePacket:
 
 
 @dataclass(frozen=True)
+class SharedPolicyDescriptor:
+    shared_memory_name: str
+    slot_capacity: int
+    active_slot: Any
+    published_version: Any
+    slot_sizes: Any
+    slot_versions: Any
+    slot_sequences: Any
+    metadata_lock: Any
+
+
+@dataclass(frozen=True)
+class PolicySnapshot:
+    version: int
+    payload: bytes
+
+
+@dataclass(frozen=True)
+class SharedPolicyStats:
+    published_version: int
+    payload_bytes: int
+    slot_capacity_bytes: int
+    publication_count: int
+    publication_failures: int
+
+
+@dataclass(frozen=True)
 class EpisodeReservation:
     packet: EpisodePacket
     enqueue_ns: int
