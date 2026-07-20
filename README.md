@@ -2,6 +2,13 @@
 
 Wrapper environments and agent injectors to allow for drop-in async training.
 
+This comparison branch deliberately yields every completed PPO episode ten
+times before advancing its worker environment. Each repetition shallow-copies
+the episode list because main's thread-mode consumer mutates that container; the
+underlying transition objects are reused. This invalidates training data but
+isolates downstream throughput from environment-step latency under the
+main-branch queue transport.
+
 ```py
 import gymnasium as gym
 from functools import partial

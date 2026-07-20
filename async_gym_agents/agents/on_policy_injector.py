@@ -13,6 +13,7 @@ from stable_baselines3.common.vec_env import VecEnv
 from stable_baselines3.common.vec_env.base_vec_env import VecEnvObs
 
 from async_gym_agents.agents.injector import AsyncAgentInjector, InjectorWorkerBase
+from async_gym_agents.constants import PPO_THROUGHPUT_EPISODE_REPETITIONS
 from async_gym_agents.utils import copy_obs, single_slice
 
 
@@ -28,6 +29,14 @@ class Transition:
     last_dones: np.ndarray
     infos: list[Dict]
     reset_infos: list[Dict]
+
+
+def repeat_episode_for_throughput_benchmark(
+    episode: list[Transition],
+) -> Generator[list[Transition], None, None]:
+    """Yield shallow episode copies while reusing their transition objects."""
+    for _ in range(PPO_THROUGHPUT_EPISODE_REPETITIONS):
+        yield list(episode)
 
 
 class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
@@ -261,7 +270,9 @@ class InjectorWorker(InjectorWorkerBase):
             # Start a new episode
             for idx, done in enumerate(dones):
                 if done:
-                    yield episodes[idx]
-                    del episodes[idx]
+                    completed_episode = episodes.pop(idx)
+                    yield from repeat_episode_for_throughput_benchmark(
+                        completed_episode
+                    )
 
                     self.copy_policy_from_queue()
