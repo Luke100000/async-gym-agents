@@ -91,6 +91,7 @@ def build_profiler_report(
     max_policy_lag: int,
     transport_stats: Optional[Mapping[str, Any]] = None,
     assembly_stats: Optional[Mapping[str, float | int]] = None,
+    policy_stats: Optional[Mapping[str, int]] = None,
 ) -> Dict[str, object]:
     return {
         "main": _summarize_stats(main_stats),
@@ -113,6 +114,7 @@ def build_profiler_report(
         },
         "transport": dict(transport_stats or {}),
         "assembly": dict(assembly_stats or {}),
+        "policy": dict(policy_stats or {}),
     }
 
 

@@ -67,6 +67,9 @@ POLICY_PUBLICATION_FAILURES_KEY = "publication_failures"
 
 POLICY_CLOSED_STORE_ERROR = "Cannot publish to a closed shared policy store"
 POLICY_CLOSED_READER_ERROR = "Cannot read from a closed shared policy reader"
+POLICY_MISSING_INITIAL_SNAPSHOT_ERROR = (
+    "Workers require an initial shared policy snapshot"
+)
 POLICY_OVERSIZED_PAYLOAD_ERROR = (
     "Policy payload size {payload_size} exceeds shared policy slot capacity "
     "{slot_capacity}"

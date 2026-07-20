@@ -358,4 +358,4 @@ class InjectorWorker(InjectorWorkerBase):
                     yield episodes[idx]
                     del episodes[idx]
 
-                    self.copy_policy_from_queue()
+                    self.copy_policy_from_store()

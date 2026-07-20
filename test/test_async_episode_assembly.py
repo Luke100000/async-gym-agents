@@ -176,6 +176,19 @@ class TestOnPolicyCompleteEpisodeAssembly:
         assert short_episode_on_policy_mp_agent.rollout_buffer.buffer_size == 4
         assert short_episode_on_policy_mp_agent.rollout_buffer.full is True
 
+    def test_reports_single_shared_policy_publication(
+        self,
+        short_episode_on_policy_agent,
+    ):
+        """Training publishes one shared snapshot instead of per-worker queues."""
+        short_episode_on_policy_agent.learn(total_timesteps=3)
+
+        policy_report = short_episode_on_policy_agent.get_profiler_report()["policy"]
+        assert policy_report["published_version"] >= 1
+        assert policy_report["payload_bytes"] > 0
+        assert policy_report["publication_count"] >= 1
+        assert not hasattr(short_episode_on_policy_agent, "_update_queues")
+
 
 class TestTruncatedRewardBootstrap:
     """Time-limit rewards are finalized before background buffer construction."""

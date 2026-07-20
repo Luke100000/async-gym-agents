@@ -3,14 +3,12 @@ import io
 import logging
 import multiprocessing
 import os
-import queue
 import threading
 import time
 from collections import deque
 from contextlib import contextmanager
 from multiprocessing.context import Process as MPProcess
 from multiprocessing.managers import Namespace
-from multiprocessing.queues import Queue as MPQueue
 from multiprocessing.synchronize import Event as MPEvent
 from types import SimpleNamespace
 from typing import Any, Deque, Dict, Generator, List, Optional, Type, TypeAlias, cast
@@ -21,12 +19,20 @@ from stable_baselines3.common.base_class import BasePolicy
 from async_gym_agents.constants import (
     BYTES_PER_MEBIBYTE,
     NANOSECONDS_PER_SECOND,
+    POLICY_MISSING_INITIAL_SNAPSHOT_ERROR,
+    POLICY_PAYLOAD_BYTES_KEY,
+    POLICY_PUBLICATION_COUNT_KEY,
+    POLICY_PUBLICATION_FAILURES_KEY,
+    POLICY_PUBLISHED_VERSION_KEY,
+    POLICY_SLOT_CAPACITY_BYTES_KEY,
     PROFILE_PHASE_EPISODE_DESERIALIZATION,
     PROFILE_PHASE_EPISODE_PACKING,
     PROFILE_PHASE_EPISODE_SERIALIZATION,
     PROFILE_PHASE_POLICY_BROADCAST,
     PROFILE_PHASE_POLICY_LOADING,
     PROFILE_PHASE_POLICY_SERIALIZATION,
+    PROFILE_PHASE_POLICY_SNAPSHOT_COPY,
+    PROFILE_PHASE_POLICY_SNAPSHOT_RETRY,
     PROFILE_PHASE_TRANSITION_RECONSTRUCTION,
     PROFILE_PHASE_TRANSPORT,
     PROFILE_PHASE_WAITING,
@@ -54,7 +60,11 @@ from async_gym_agents.constants import (
     TRANSPORT_SENT_EPISODES_KEY,
     TRANSPORT_UTILIZATION_KEY,
 )
-from async_gym_agents.data_classes import EpisodePacket, EpisodeSendResult
+from async_gym_agents.data_classes import (
+    EpisodePacket,
+    EpisodeSendResult,
+    SharedPolicyDescriptor,
+)
 from async_gym_agents.envs.multi_env import IndexableMultiEnv
 from async_gym_agents.episode_codec import (
     decode_episode_packet,
@@ -67,6 +77,7 @@ from async_gym_agents.episode_transport import (
     EpisodeSender,
     EpisodeTransport,
 )
+from async_gym_agents.policy_transport import SharedPolicyReader, SharedPolicyStore
 from async_gym_agents.profiler import (
     ProfileStats,
     RuntimeProfiler,
@@ -81,7 +92,6 @@ from async_gym_agents.utils import make_venv
 GenericState: TypeAlias = Namespace | SimpleNamespace
 GenericStateLock: TypeAlias = Any
 GenericEvent: TypeAlias = MPEvent | threading.Event
-GenericUpdateQueue: TypeAlias = MPQueue | queue.Queue
 GenericWorker: TypeAlias = MPProcess | threading.Thread
 
 
@@ -141,7 +151,7 @@ class AsyncAgentInjector:
 
         # shared memory
         self._episode_transport: EpisodeTransport | None = None
-        self._update_queues: List[GenericUpdateQueue] = []
+        self._policy_store: Optional[SharedPolicyStore] = None
         self._transitions: Deque[Transition] = deque()
 
         # shared object (!)
@@ -164,6 +174,7 @@ class AsyncAgentInjector:
         self._policy_lag_count = 0
         self._policy_lag_max = 0
         self._final_transport_report = {}
+        self._final_policy_report = {}
 
         self._profiler_main = RuntimeProfiler()
         self._logger = logging.getLogger("async_gym_agents")
@@ -174,7 +185,7 @@ class AsyncAgentInjector:
         worker_index: int,
         env_func: EnvFactory,
         episode_sender: EpisodeSender,
-        update_queue: GenericUpdateQueue,
+        policy_descriptor: SharedPolicyDescriptor,
         state: GenericState,
         state_lock: GenericStateLock,
         stop: GenericEvent,
@@ -193,32 +204,31 @@ class AsyncAgentInjector:
                     "Failed to set torch threads, make sure to never call torch.set_num_threads() unconditional!"
                 )
 
-        worker = worker_class(
-            worker_index=worker_index,
-            env_func=env_func,
-            episode_sender=episode_sender,
-            update_queue=update_queue,
-            state=state,
-            state_lock=state_lock,
-            stop=stop,
-            policy_class=policy_class,
-            policy_data=policy_data,
-            **worker_kwargs,
-        )
-
-        if use_mp:
-            logging.getLogger("async_gym_agents").info(
-                f"Worker has {torch.get_num_threads()} threads and {torch.get_num_interop_threads()} interop threads"
+        policy_reader = SharedPolicyReader(policy_descriptor)
+        try:
+            worker = worker_class(
+                worker_index=worker_index,
+                env_func=env_func,
+                episode_sender=episode_sender,
+                policy_reader=policy_reader,
+                state=state,
+                state_lock=state_lock,
+                stop=stop,
+                policy_class=policy_class,
+                policy_data=policy_data,
+                **worker_kwargs,
             )
 
-        worker.run()
+            if use_mp:
+                logging.getLogger("async_gym_agents").info(
+                    f"Worker has {torch.get_num_threads()} threads and {torch.get_num_interop_threads()} interop threads"
+                )
 
-        # Only close process-owned handles here. Thread workers share the
-        # parent's transport and update queue handles.
-        if use_mp:
-            episode_sender.close()
-            update_queue.close()
-            update_queue.cancel_join_thread()
+            worker.run()
+        finally:
+            policy_reader.close()
+            if use_mp:
+                episode_sender.close()
 
     def get_worker_class(self) -> Type["InjectorWorkerBase"]:
         raise NotImplementedError()
@@ -248,9 +258,17 @@ class AsyncAgentInjector:
             torch.save(policy.state_dict(), weights_buf)
             weights_bytes = weights_buf.getvalue()
 
-        self._version += 1
+        next_version = self._version + 1
         with self._profiler_main.track(PROFILE_PHASE_POLICY_BROADCAST):
-            self._push_policy_update(self._version, weights_bytes)
+            if self._policy_store is None:
+                self._policy_store = SharedPolicyStore.create(
+                    initial_version=next_version,
+                    initial_payload=weights_bytes,
+                    mp_ctx=self.mp_ctx,
+                )
+            else:
+                self._policy_store.publish(next_version, weights_bytes)
+        self._version = next_version
 
         self._logger.debug(f"update policy to the version: {self._version}")
 
@@ -272,11 +290,6 @@ class AsyncAgentInjector:
             use_mp=self.use_mp,
             mp_ctx=self.mp_ctx,
         )
-        self._update_queues = [
-            self.mp_ctx.Queue() if self.use_mp else queue.Queue()
-            for _ in self.get_indexable_env().env_fns
-        ]
-
         # Shared state for metrics
         self._manager = self.mp_ctx.Manager() if self.use_mp else None
         self._state = self._manager.Namespace() if self.use_mp else SimpleNamespace()
@@ -317,9 +330,10 @@ class AsyncAgentInjector:
 
         worker_env_fns = self.get_indexable_env().env_fns
         worker_count = len(worker_env_fns)
-        for worker_index, (env_func, update_queue) in enumerate(
-            zip(worker_env_fns, self._update_queues, strict=True)
-        ):
+        if self._policy_store is None:
+            raise RuntimeError(POLICY_MISSING_INITIAL_SNAPSHOT_ERROR)
+        policy_descriptor = self._policy_store.get_descriptor()
+        for worker_index, env_func in enumerate(worker_env_fns):
             with patched_env(**worker_env) if self.use_mp else contextlib.nullcontext():
                 worker = (self.mp_ctx.Process if self.use_mp else threading.Thread)(
                     target=AsyncAgentInjector._run_worker,
@@ -328,7 +342,7 @@ class AsyncAgentInjector:
                         worker_index=worker_index,
                         env_func=env_func,
                         episode_sender=self._episode_transport.get_sender(worker_index),
-                        update_queue=update_queue,
+                        policy_descriptor=policy_descriptor,
                         state=self._state,
                         state_lock=self._state_lock,
                         stop=self._stop,
@@ -359,7 +373,7 @@ class AsyncAgentInjector:
         return super()._excluded_save_params() + [
             "_envs",
             "_episode_transport",
-            "_update_queues",
+            "_policy_store",
             "_transitions",
             "_manager",
             "_state",
@@ -375,20 +389,8 @@ class AsyncAgentInjector:
             "_policy_lag_count",
             "_policy_lag_max",
             "_final_transport_report",
+            "_final_policy_report",
         ]
-
-    @staticmethod
-    def _clear_queue(target_queue: GenericUpdateQueue) -> None:
-        while True:
-            try:
-                target_queue.get_nowait()
-            except queue.Empty:
-                return
-
-    def _push_policy_update(self, version: int, weights: bytes) -> None:
-        for update_queue in self._update_queues:
-            self._clear_queue(update_queue)
-            update_queue.put((version, weights))
 
     def _fetch_transitions(self, buffer_was_empty: bool) -> List[Transition]:
         phase = PROFILE_PHASE_WAITING if buffer_was_empty else PROFILE_PHASE_TRANSPORT
@@ -453,9 +455,13 @@ class AsyncAgentInjector:
 
             worker.join(timeout=self._worker_join_timeout)
 
+            if not worker.is_alive():
+                continue
+
             if self.use_mp:
                 try:
                     worker.kill()
+                    worker.join(timeout=self._worker_join_timeout)
                 except PermissionError:
                     self._logger.warning("cannot kill process due to permission error")
 
@@ -463,11 +469,11 @@ class AsyncAgentInjector:
             self._final_transport_report = self._build_transport_report()
             self._episode_transport.shutdown()
             self._episode_transport = None
-        for update_queue in self._update_queues:
-            if self.use_mp:
-                update_queue.close()
-                update_queue.cancel_join_thread()
-        self._update_queues = []
+        if self._policy_store is not None:
+            self._final_policy_report = self._build_policy_report()
+            self._policy_store.close()
+            self._policy_store.unlink()
+            self._policy_store = None
 
         # release a shared object: manager
         if self._manager is not None:
@@ -514,6 +520,7 @@ class AsyncAgentInjector:
             max_policy_lag=self.max_policy_lag,
             transport_stats=self._build_transport_report(),
             assembly_stats=self._build_assembly_report(),
+            policy_stats=self._build_policy_report(),
         )
 
     def record_profiler_metrics(self) -> None:
@@ -593,6 +600,19 @@ class AsyncAgentInjector:
 
     def _build_assembly_report(self) -> Dict[str, float | int]:
         return {}
+
+    def _build_policy_report(self) -> Dict[str, int]:
+        if self._policy_store is None:
+            return dict(self._final_policy_report)
+
+        stats = self._policy_store.get_stats()
+        return {
+            POLICY_PUBLISHED_VERSION_KEY: stats.published_version,
+            POLICY_PAYLOAD_BYTES_KEY: stats.payload_bytes,
+            POLICY_SLOT_CAPACITY_BYTES_KEY: stats.slot_capacity_bytes,
+            POLICY_PUBLICATION_COUNT_KEY: stats.publication_count,
+            POLICY_PUBLICATION_FAILURES_KEY: stats.publication_failures,
+        }
 
     def _get_worker_profiler_stats(self) -> ProfileStats:
         if self._state is None or not hasattr(self._state, "worker_profiler_stats"):
@@ -683,7 +703,7 @@ class InjectorWorkerBase:
         worker_index: int,
         env_func: EnvFactory,
         episode_sender: EpisodeSender,
-        update_queue: GenericUpdateQueue,
+        policy_reader: SharedPolicyReader,
         state: GenericState,
         state_lock: GenericStateLock,
         stop: GenericEvent,
@@ -704,7 +724,7 @@ class InjectorWorkerBase:
         self._policy_version = None
 
         self._episode_sender = episode_sender
-        self._update_queue = update_queue
+        self._policy_reader = policy_reader
         self._state = state
         self._state_lock = state_lock
         self._stop = stop
@@ -722,42 +742,37 @@ class InjectorWorkerBase:
             on_send_complete=self._record_episode_send_result,
         )
 
-    def copy_policy_from_queue(self, block: bool = False):
+    def copy_policy_from_store(self) -> None:
         if self.policy is None:
             # noinspection PyArgumentList
             self.policy = self.policy_class(**self.policy_data)
 
-        latest_update = None
-        while not self._stop.is_set():
-            try:
-                if latest_update is None and block:
-                    latest_update = self._update_queue.get(timeout=0.1)
-                else:
-                    latest_update = self._update_queue.get_nowait()
-            except queue.Empty:
-                if block and latest_update is None:
-                    continue
-                break
+        retries_before_copy = self._policy_reader.retry_count
+        with self._profiler.track(PROFILE_PHASE_POLICY_SNAPSHOT_COPY):
+            snapshot = self._policy_reader.read_if_new(self._policy_version)
+        retry_count = self._policy_reader.retry_count - retries_before_copy
+        if retry_count > 0:
+            self._profiler.record(
+                PROFILE_PHASE_POLICY_SNAPSHOT_RETRY,
+                0,
+                count=retry_count,
+            )
 
-        if latest_update is None:
-            return
-
-        version, weights_bytes = latest_update
-        if self._policy_version == version:
+        if snapshot is None:
             return
 
         with self._profiler.track(PROFILE_PHASE_POLICY_LOADING):
             weights = torch.load(
-                io.BytesIO(weights_bytes),
+                io.BytesIO(snapshot.payload),
                 map_location="cpu",
                 weights_only=True,
             )
             self.policy.load_state_dict(weights)
             self.policy.to("cpu")
             self.policy.set_training_mode(False)
-            self._policy_version = version
+            self._policy_version = snapshot.version
             self._logger.debug(
-                f"policy loaded from queue: version={self._policy_version}"
+                f"policy loaded from shared store: version={self._policy_version}"
             )
 
     def _put_episode_with_timeout(self, episode):
@@ -813,7 +828,7 @@ class InjectorWorkerBase:
 
     def run(self):
         try:
-            self.copy_policy_from_queue(block=True)
+            self.copy_policy_from_store()
 
             for episode in self.generate():
                 with self._state_lock:
