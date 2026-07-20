@@ -21,6 +21,11 @@ through its worker's unidirectional pipe. A global capacity semaphore provides
 backpressure after B is full and prevents workers from running arbitrarily far
 ahead of the trainer.
 
+The trainer publishes each serialized policy once into an A/B shared-memory
+snapshot. Workers check its version at episode boundaries, copy only a stable
+latest snapshot, and load it into their CPU policy. This removes the previous
+per-worker policy queues and their O(worker count) trainer-side broadcast.
+
 ```py
 import gymnasium as gym
 from functools import partial
@@ -64,6 +69,8 @@ under `profiler/`. Useful series include:
   `profiler/transport/max_pending_bytes`
 - `profiler/assembly/filling_transitions` and
   `profiler/assembly/last_transitions`
+- `profiler/policy/published_version`, `profiler/policy/payload_bytes`, and
+  `profiler/policy/publication_failures`
 - phase timings such as
   `profiler/main/rollout_buffer_building/avg_milliseconds`,
   `profiler/main/callback_processing/avg_milliseconds`, and
@@ -85,8 +92,8 @@ worker starvation from payload transfer delays. Worker-side `transport` timing
 covers local feeder queueing and pipe delivery, while worker-side `waiting`
 covers global-capacity backpressure.
 
-The deferred shared latest-policy replacement for per-worker policy queues is
-specified in [docs/shared_policy_distribution.md](docs/shared_policy_distribution.md).
+The shared latest-policy transport and its concurrency protocol are documented
+in [docs/shared_policy_distribution.md](docs/shared_policy_distribution.md).
 
 The standalone payload benchmark compares legacy transition-object pickling
 with the packed whole-episode path:
@@ -109,4 +116,11 @@ Use smaller dimensions for a quick smoke test:
 
 ```shell
 python benchmarks/ipc_transport_benchmark.py --workers 4 --packets-per-worker 1 --payload-mib 0.25
+```
+
+The policy-distribution benchmark compares legacy queue fan-out with the
+shared snapshot using the production default of 128 workers:
+
+```shell
+python benchmarks/policy_distribution_benchmark.py
 ```

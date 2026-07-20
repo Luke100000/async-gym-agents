@@ -1,10 +1,10 @@
 # Shared Latest-Policy Distribution
 
-Status: deferred design; not implemented by the episode-feeder change.
+Status: implemented; final training throughput validation pending.
 
 ## Context
 
-The trainer currently distributes every policy update through one
+The trainer previously distributed every policy update through one
 `multiprocessing.Queue` per worker. With 128 workers, `_push_policy_update()`
 clears and writes 128 queues from the trainer thread. The policy is serialized
 only once, but each queue has its own feeder and pipe, so publication performs
@@ -22,8 +22,8 @@ drains its update queue, discards superseded versions, and loads only the newest
 one. Episode packets retain the policy version used to generate them, and the
 trainer calculates policy lag from that version.
 
-The replacement should preserve these semantics while removing synchronous
-O(worker count) publication from the trainer.
+The shared snapshot implementation preserves these semantics while removing
+synchronous O(worker count) publication from the trainer.
 
 ## Requirements
 
@@ -45,7 +45,7 @@ It does not need to share live PyTorch tensors. Workers may continue using
 `torch.load(..., map_location="cpu", weights_only=True)` after copying stable
 serialized bytes into process-local memory.
 
-## Recommended architecture
+## Implemented architecture
 
 Use a single shared-memory segment containing two fixed-capacity slots, A and
 B. A small set of multiprocessing metadata values identifies the active slot.
@@ -59,7 +59,7 @@ This provides non-blocking publication without reader counts, reader locks, or
 
 ### Production types and placement
 
-Add the following modules and types when implementing the design:
+The implementation uses the following modules and types:
 
 - `async_gym_agents/policy_transport.py`
   - `SharedPolicyStore`: trainer-owned writer and lifecycle owner.
@@ -73,7 +73,7 @@ Add the following modules and types when implementing the design:
   - `POLICY_SNAPSHOT_SLOT_COUNT = 2`.
   - Shared counter type codes used by the descriptor.
 
-The store API should be:
+The store API is:
 
 ```python
 from typing import Optional
@@ -193,7 +193,7 @@ workers may copy concurrently and cannot block trainer publication.
 
 ## Agent integration
 
-Replace the current policy queues in these steps:
+The agent integration follows these steps:
 
 1. In `pre_collect_preparation()`, serialize the trainer state dictionary as it
    does today.
@@ -206,8 +206,7 @@ Replace the current policy queues in these steps:
 6. Keep the existing episode-boundary update point. The worker compares its
    local version, copies the latest stable snapshot, loads it on CPU, and then
    updates `_policy_version`.
-7. Remove `_update_queues`, `_clear_queue()`, `_push_policy_update()`, and their
-   save-exclusion and shutdown handling.
+7. Per-worker update queues and their clear/push/shutdown handling are removed.
 8. Close each worker reader in the worker `finally` block.
 9. During trainer shutdown, stop and join workers first, close the trainer
    mapping second, and unlink the shared-memory segment last.
@@ -248,9 +247,9 @@ The current `policy_broadcast` metric may remain as a compatibility alias for
 `policy_publication` for one release, but it must no longer include worker-side
 copy or loading time.
 
-## Tests required before rollout
+## Regression coverage
 
-Add behavior-focused tests proving:
+Behavior-focused tests cover:
 
 1. Every worker reader obtains the initial snapshot.
 2. A newer publication replaces the active slot and version.
@@ -265,10 +264,10 @@ Add behavior-focused tests proving:
 10. Worker shutdown closes mappings and trainer shutdown unlinks the segment.
 11. Episode policy versions and existing policy-lag metrics remain correct.
 
-The integration benchmark should compare the old 128-queue publication with
-the shared store using the real serialized policy size. Success means trainer
-publication time no longer grows linearly with worker count, workers load the
-same version, and training policy-lag behavior does not regress.
+`benchmarks/policy_distribution_benchmark.py` compares the old 128-queue
+publication with the shared store for a configurable serialized policy size.
+The final training run must confirm that trainer publication time no longer
+grows linearly with worker count and policy-lag behavior does not regress.
 
 ## Operational risks
 
