@@ -13,7 +13,11 @@ from stable_baselines3.common.vec_env import VecEnv
 
 from async_gym_agents import constants
 from async_gym_agents.agents.injector import AsyncAgentInjector, InjectorWorkerBase
-from async_gym_agents.data_classes import OnPolicyTransition as Transition
+from async_gym_agents.callback_batching import CallbackBatchDispatcher
+from async_gym_agents.data_classes import (
+    OnPolicyEpisodeCallbackContext,
+    OnPolicyTransition,
+)
 from async_gym_agents.episode_codec import (
     get_episode_infos,
     get_episode_reset_infos,
@@ -49,8 +53,8 @@ def bootstrap_truncated_rewards(
 
 
 def repeat_episode_for_throughput_benchmark(
-    episode: list[Transition],
-) -> Generator[list[Transition], None, None]:
+    episode: list[OnPolicyTransition],
+) -> Generator[list[OnPolicyTransition], None, None]:
     """Yield one completed on-policy episode repeatedly for throughput profiling."""
     for _ in range(constants.PPO_THROUGHPUT_EPISODE_REPETITIONS):
         yield episode
@@ -129,6 +133,7 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
             self.policy.reset_noise(1)
 
         callback.on_rollout_start()
+        callback_dispatcher = CallbackBatchDispatcher(callback)
 
         new_obs = None
         dones = None
@@ -136,14 +141,73 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
         with self._profiler_main.track("transition_processing"):
             for assembled_episode in prepared_rollout.episodes:
                 batch = assembled_episode.batch
-                for transition_index in range(batch.transition_count):
-                    if (
-                        self.use_sde
-                        and self.sde_sample_freq > 0
-                        and n_steps % self.sde_sample_freq == 0
-                    ):
-                        self.policy.reset_noise(1)
+                episode_start_timestep = self.num_timesteps
+                if callback_dispatcher.needs_step_callbacks:
+                    for transition_index in range(batch.transition_count):
+                        if (
+                            self.use_sde
+                            and self.sde_sample_freq > 0
+                            and n_steps % self.sde_sample_freq == 0
+                        ):
+                            self.policy.reset_noise(1)
 
+                        new_obs = slice_episode_field(
+                            batch,
+                            "new_obs",
+                            transition_index,
+                        )
+                        self._last_obs = slice_episode_field(
+                            batch,
+                            "last_obs",
+                            transition_index,
+                        )
+                        actions = rollout_buffer.actions[buffer_index]
+                        rewards = rollout_buffer.rewards[buffer_index]
+                        self._last_episode_starts = rollout_buffer.episode_starts[
+                            buffer_index
+                        ]
+                        values = torch.from_numpy(rollout_buffer.values[buffer_index])
+                        log_probs = torch.from_numpy(
+                            rollout_buffer.log_probs[buffer_index]
+                        )
+                        dones = slice_episode_field(
+                            batch,
+                            "dones",
+                            transition_index,
+                        )
+                        infos = get_episode_infos(batch, transition_index)
+                        reset_infos = get_episode_reset_infos(
+                            batch,
+                            transition_index,
+                        )
+
+                        self.num_timesteps += 1
+                        if not callback_dispatcher.process_step(locals()):
+                            return False
+
+                        self._update_info_buffer(infos, dones)
+                        n_steps += 1
+                        buffer_index += 1
+                else:
+                    if self.use_sde and self.sde_sample_freq > 0:
+                        first_reset_offset = (-n_steps) % self.sde_sample_freq
+                        for _ in range(
+                            first_reset_offset,
+                            batch.transition_count,
+                            self.sde_sample_freq,
+                        ):
+                            self.policy.reset_noise(1)
+
+                    for transition_index, infos in batch.infos.items():
+                        dones = slice_episode_field(
+                            batch,
+                            "dones",
+                            transition_index,
+                        )
+                        self._update_info_buffer(infos, dones)
+
+                    transition_index = batch.transition_count - 1
+                    final_buffer_index = buffer_index + transition_index
                     new_obs = slice_episode_field(
                         batch,
                         "new_obs",
@@ -154,13 +218,15 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
                         "last_obs",
                         transition_index,
                     )
-                    actions = rollout_buffer.actions[buffer_index]
-                    rewards = rollout_buffer.rewards[buffer_index]
+                    actions = rollout_buffer.actions[final_buffer_index]
+                    rewards = rollout_buffer.rewards[final_buffer_index]
                     self._last_episode_starts = rollout_buffer.episode_starts[
-                        buffer_index
+                        final_buffer_index
                     ]
-                    values = torch.from_numpy(rollout_buffer.values[buffer_index])
-                    log_probs = torch.from_numpy(rollout_buffer.log_probs[buffer_index])
+                    values = torch.from_numpy(rollout_buffer.values[final_buffer_index])
+                    log_probs = torch.from_numpy(
+                        rollout_buffer.log_probs[final_buffer_index]
+                    )
                     dones = slice_episode_field(
                         batch,
                         "dones",
@@ -171,15 +237,17 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
                         batch,
                         transition_index,
                     )
+                    self.num_timesteps += batch.transition_count
+                    n_steps += batch.transition_count
+                    buffer_index += batch.transition_count
 
-                    self.num_timesteps += 1
-                    callback.update_locals(locals())
-                    if not callback.on_step():
-                        return False
-
-                    self._update_info_buffer(infos, dones)
-                    n_steps += 1
-                    buffer_index += 1
+                callback_context = OnPolicyEpisodeCallbackContext(
+                    batch=batch,
+                    start_timestep=episode_start_timestep,
+                    end_timestep=self.num_timesteps,
+                )
+                if not callback_dispatcher.process_episode(callback_context):
+                    return False
 
         callback.update_locals(locals())
 
@@ -249,7 +317,7 @@ class InjectorWorker(InjectorWorkerBase):
         self.action_space = action_space
         self.gamma = gamma
 
-    def generate(self) -> Generator[list[Transition], None, None]:
+    def generate(self) -> Generator[list[OnPolicyTransition], None, None]:
         """
         Continuously plays the game and returns episodes of Transitions
         """
@@ -306,7 +374,7 @@ class InjectorWorker(InjectorWorkerBase):
                     if idx not in episodes:
                         episodes[idx] = []
                     episodes[idx].append(
-                        Transition(
+                        OnPolicyTransition(
                             single_slice(actions, idx),
                             single_slice(values, idx),
                             single_slice(log_probs, idx),

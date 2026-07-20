@@ -4,6 +4,9 @@ Drop-in asynchronous data collection for Stable Baselines 3 agents.
 
 This benchmark branch repeats every completed on-policy episode 100 times.
 Training data is intentionally invalid; use it only for trainer-throughput profiling.
+Framework logging, saving, pruning, reset-info, and utilization callbacks are
+processed from complete episode batches. Unrecognized Stable Baselines callbacks
+keep their normal `on_step()` behavior for compatibility.
 
 ## Usage
 

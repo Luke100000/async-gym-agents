@@ -2,6 +2,7 @@ import multiprocessing
 import queue
 import signal
 import threading
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from functools import partial
@@ -13,6 +14,7 @@ import pytest
 import torch
 from stable_baselines3 import PPO, SAC
 from stable_baselines3.common.buffers import RolloutBuffer
+from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.monitor import Monitor
 
 from async_gym_agents.agents.async_agent import get_injected_agent
@@ -28,6 +30,98 @@ DIRECT_TRANSPORT_PAYLOAD_BYTES = 8 * 1024 * 1024
 DIRECT_TRANSPORT_PROCESS_TIMEOUT_SECONDS = 5.0
 TEST_EPISODE_SEND_TIMEOUT_SECONDS = 1.0
 POLICY_TEST_TIMEOUT_SECONDS = 5.0
+
+
+class LoggingCallback(BaseCallback):
+    """Represent the external logging callback contract used by benchmark tests."""
+
+    def __init__(self, connector, metric_aggregator):
+        super().__init__()
+        self.connector = connector
+        self.logging_frequency = 1
+        self.log_distributions = False
+        self.episode_counter = {}
+        self.metric_aggregator = metric_aggregator
+        self.step_call_count = 0
+
+    def _on_step(self) -> bool:
+        self.step_call_count += 1
+        return True
+
+
+class SavingCallback(BaseCallback):
+    """Represent the external checkpoint callback contract used by tests."""
+
+    def __init__(self, agent, connector, checkpoint_frequency):
+        super().__init__()
+        self.agent = agent
+        self.connector = connector
+        self.checkpoint_frequency = checkpoint_frequency
+        self.next_upload = checkpoint_frequency
+        self.step_call_count = 0
+
+    def _on_step(self) -> bool:
+        self.step_call_count += 1
+        return True
+
+
+class ExperimentPruningCallback(BaseCallback):
+    """Represent the external reward-pruning callback contract used by tests."""
+
+    def __init__(self, episode_reward_threshold, pruning_start_at, reward_window):
+        super().__init__()
+        self.episode_reward_threshold = episode_reward_threshold
+        self.pruning_start_at = pruning_start_at
+        self.episode_reward = None
+        self.episode_rewards = deque(maxlen=reward_window)
+        self.step_call_count = 0
+
+    def _on_step(self) -> bool:
+        self.step_call_count += 1
+        return True
+
+
+class ResetInfoCallback(BaseCallback):
+    """Represent the external reset-info callback contract used by tests."""
+
+    def __init__(self, connector):
+        super().__init__()
+        self.connector = connector
+        self.episode_counter = {}
+        self.first_step_tracker = []
+        self.step_call_count = 0
+
+    def _on_step(self) -> bool:
+        self.step_call_count += 1
+        return True
+
+
+class AsyncSBUtilizationLoggingCallback(BaseCallback):
+    """Represent the external terminal-only utilization callback contract."""
+
+    def __init__(self):
+        super().__init__()
+        self.logging_frequency = 1
+        self.shared_episode_counter = 0
+        self.step_call_count = 0
+        self.terminal_dones = []
+
+    def _on_step(self) -> bool:
+        self.step_call_count += 1
+        self.terminal_dones.append(self.locals["dones"].copy())
+        return True
+
+
+class StepCountingCallback(BaseCallback):
+    """Represent an unrecognized callback that requires SB3 step dispatch."""
+
+    def __init__(self):
+        super().__init__()
+        self.step_call_count = 0
+
+    def _on_step(self) -> bool:
+        self.step_call_count += 1
+        return True
 
 
 def send_episode_and_signal(
@@ -64,6 +158,53 @@ def shared_policy_store():
     yield store
     store.close()
     store.unlink()
+
+
+@pytest.fixture
+def external_logging_callback():
+    """Create the external logging callback shape with mocked output boundaries."""
+    return LoggingCallback(
+        connector=Mock(),
+        metric_aggregator=Mock(),
+    )
+
+
+@pytest.fixture
+def external_saving_callback():
+    """Create the external checkpoint callback shape with mocked boundaries."""
+    return SavingCallback(
+        agent=Mock(),
+        connector=Mock(),
+        checkpoint_frequency=2,
+    )
+
+
+@pytest.fixture
+def external_pruning_callback():
+    """Create a pruning callback whose second short episode stops training."""
+    return ExperimentPruningCallback(
+        episode_reward_threshold=4.0,
+        pruning_start_at=0,
+        reward_window=2,
+    )
+
+
+@pytest.fixture
+def external_reset_info_callback():
+    """Create the external reset-info callback shape with a mocked connector."""
+    return ResetInfoCallback(connector=Mock())
+
+
+@pytest.fixture
+def external_utilization_callback():
+    """Create the external terminal-only utilization callback shape."""
+    return AsyncSBUtilizationLoggingCallback()
+
+
+@pytest.fixture
+def unrecognized_step_callback():
+    """Create a callback that must retain Stable Baselines step semantics."""
+    return StepCountingCallback()
 
 
 @pytest.fixture
