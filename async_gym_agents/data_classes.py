@@ -53,6 +53,23 @@ class EpisodePacket:
 
 
 @dataclass(frozen=True)
+class EpisodeReservation:
+    packet: EpisodePacket
+    enqueue_ns: int
+    waiting_ns: int
+
+
+@dataclass(frozen=True)
+class EpisodeSubmissionResult:
+    submitted: bool
+    waiting_ns: int
+    reservation: Optional[EpisodeReservation] = None
+
+    def __bool__(self) -> bool:
+        return self.submitted
+
+
+@dataclass(frozen=True)
 class EpisodeTransportStats:
     pending_episodes: int
     max_pending_episodes: int

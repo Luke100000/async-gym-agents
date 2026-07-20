@@ -54,7 +54,7 @@ from async_gym_agents.constants import (
     TRANSPORT_SENT_EPISODES_KEY,
     TRANSPORT_UTILIZATION_KEY,
 )
-from async_gym_agents.data_classes import EpisodePacket
+from async_gym_agents.data_classes import EpisodePacket, EpisodeSendResult
 from async_gym_agents.envs.multi_env import IndexableMultiEnv
 from async_gym_agents.episode_codec import (
     decode_episode_packet,
@@ -62,7 +62,11 @@ from async_gym_agents.episode_codec import (
     pack_episode,
     unpack_episode,
 )
-from async_gym_agents.episode_transport import EpisodeSender, EpisodeTransport
+from async_gym_agents.episode_transport import (
+    EpisodeFeeder,
+    EpisodeSender,
+    EpisodeTransport,
+)
 from async_gym_agents.profiler import (
     ProfileStats,
     RuntimeProfiler,
@@ -712,6 +716,11 @@ class InjectorWorkerBase:
         self._profiler = RuntimeProfiler()
         self._profiler_sync_interval = profiler_sync_interval
         self._last_profiler_sync = time.time()
+        self._episode_feeder = EpisodeFeeder(
+            sender=self._episode_sender,
+            stop=self._stop,
+            on_send_complete=self._record_episode_send_result,
+        )
 
     def copy_policy_from_queue(self, block: bool = False):
         if self.policy is None:
@@ -760,26 +769,31 @@ class InjectorWorkerBase:
                 self._policy_version,
                 episode_batch,
             )
-        send_result = self._episode_sender.send(
+        submission = self._episode_feeder.submit(
             packet,
-            self._stop,
             self._queue_put_timeout,
         )
         with self._state_lock:
             self._state.queue_put_attempts += 1
-            self._state.total_queue_put_wait_ns += send_result.waiting_ns
-            if send_result.waiting_ns > 0:
+            self._state.total_queue_put_wait_ns += submission.waiting_ns
+            if submission.waiting_ns > 0:
                 self._state.full_queue_put_attempts += 1
-            if not send_result:
+            if not submission:
                 self._state.discarded_episodes += 1
-        if send_result.waiting_ns > 0:
+        if submission.waiting_ns > 0:
             self._profiler.record(
                 PROFILE_PHASE_WAITING,
-                send_result.waiting_ns,
+                submission.waiting_ns,
             )
-        self._profiler.record(PROFILE_PHASE_TRANSPORT, send_result.transport_ns)
-        if not send_result and not self._stop.is_set():
+        if not submission and not self._stop.is_set():
             self._logger.info("Dropped episode after transport timeout")
+
+    def _record_episode_send_result(self, result: EpisodeSendResult) -> None:
+        self._profiler.record(PROFILE_PHASE_TRANSPORT, result.transport_ns)
+        if result or self._stop.is_set():
+            return
+        with self._state_lock:
+            self._state.discarded_episodes += 1
 
     def _flush_profiler(self, force: bool = False):
         now = time.time()
@@ -820,9 +834,12 @@ class InjectorWorkerBase:
                 if self._stop.is_set():
                     break
         finally:
-            self._flush_profiler(force=True)
-            self.env.close()
-            self._logger.info("Generator cycle is completed")
+            try:
+                self._episode_feeder.shutdown()
+            finally:
+                self._flush_profiler(force=True)
+                self.env.close()
+                self._logger.info("Generator cycle is completed")
 
     def generate(self) -> Generator[list[Transition], None, None]:
         raise NotImplementedError()

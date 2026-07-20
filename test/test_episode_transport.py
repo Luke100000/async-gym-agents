@@ -79,8 +79,8 @@ class TestEpisodeTransport:
         assert transport.get_stats().sent_episodes == 3
         transport.shutdown()
 
-    def test_allows_one_pending_episode_per_worker(self, on_policy_packet):
-        """One fast worker cannot occupy multiple pending transport slots."""
+    def test_one_worker_can_use_available_global_capacity(self, on_policy_packet):
+        """A worker may reserve multiple slots until global capacity is full."""
         transport = EpisodeTransport(
             worker_count=2,
             max_pending_episodes=2,
@@ -93,12 +93,20 @@ class TestEpisodeTransport:
             stop,
             TRANSPORT_TEST_TIMEOUT_SECONDS,
         )
-        assert not transport.get_sender(0).send(
+        assert transport.get_sender(0).send(
             on_policy_packet,
             stop,
             TRANSPORT_TEST_TIMEOUT_SECONDS,
         )
-        assert transport.get_stats().pending_episodes == 1
+        blocked_result = transport.get_sender(0).send(
+            on_policy_packet,
+            stop,
+            TRANSPORT_TEST_TIMEOUT_SECONDS,
+        )
+
+        assert not blocked_result
+        assert blocked_result.waiting_ns > 0
+        assert transport.get_stats().pending_episodes == 2
         transport.shutdown()
 
     def test_unblocks_indefinite_backpressure_on_shutdown(self, on_policy_packet):
@@ -184,6 +192,41 @@ class TestEpisodeTransport:
         assert not process.is_alive()
         assert process.exitcode == 0
         assert not send_completed.is_set()
+
+
+class TestEpisodeFeeder:
+    """Worker feeders overlap bounded episode delivery with environment rollout."""
+
+    def test_accepts_episodes_until_global_capacity_is_full(
+        self,
+        active_episode_feeder,
+    ):
+        """Large sends return to the worker while globally reserved packets wait."""
+        transport, feeder, packet, _, completed_sends = active_episode_feeder
+
+        first_submission = feeder.submit(packet, TRANSPORT_TEST_TIMEOUT_SECONDS)
+        second_submission = feeder.submit(packet, TRANSPORT_TEST_TIMEOUT_SECONDS)
+        blocked_submission = feeder.submit(packet, TRANSPORT_TEST_TIMEOUT_SECONDS)
+
+        assert first_submission
+        assert second_submission
+        assert not blocked_submission
+        assert blocked_submission.waiting_ns > 0
+        assert completed_sends.empty()
+        assert transport.get_stats().pending_episodes == 2
+
+        transport.receive(TRANSPORT_PROCESS_COMPLETION_TIMEOUT_SECONDS)
+        transport.receive(TRANSPORT_PROCESS_COMPLETION_TIMEOUT_SECONDS)
+        first_send = completed_sends.get(
+            timeout=TRANSPORT_PROCESS_COMPLETION_TIMEOUT_SECONDS
+        )
+        second_send = completed_sends.get(
+            timeout=TRANSPORT_PROCESS_COMPLETION_TIMEOUT_SECONDS
+        )
+
+        assert first_send
+        assert second_send
+        assert transport.get_stats().pending_episodes == 0
 
 
 class TestEpisodeTransportProfiling:

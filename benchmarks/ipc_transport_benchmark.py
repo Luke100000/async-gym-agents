@@ -15,7 +15,11 @@ from async_gym_agents.constants import (
 )
 from async_gym_agents.data_classes import EpisodePacket
 from async_gym_agents.enums import EpisodeKind
-from async_gym_agents.episode_transport import EpisodeSender, EpisodeTransport
+from async_gym_agents.episode_transport import (
+    EpisodeFeeder,
+    EpisodeSender,
+    EpisodeTransport,
+)
 
 DEFAULT_MAX_PENDING_EPISODES = 120
 DEFAULT_PACKETS_PER_WORKER = 2
@@ -34,11 +38,15 @@ def send_production_packets(
     stop: Any,
 ) -> None:
     """Send representative packets through the production pipe transport."""
-    ready.release()
-    start.wait()
-    for _ in range(packet_count):
-        if not sender.send(packet, stop, timeout=None):
-            raise RuntimeError("Pipe benchmark sender stopped before completion")
+    feeder = EpisodeFeeder(sender=sender, stop=stop)
+    try:
+        ready.release()
+        start.wait()
+        for _ in range(packet_count):
+            if not feeder.submit(packet, timeout=None):
+                raise RuntimeError("Pipe benchmark feeder stopped before completion")
+    finally:
+        feeder.shutdown()
 
 
 def send_pipe_payloads(

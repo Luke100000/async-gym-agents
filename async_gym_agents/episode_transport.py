@@ -1,21 +1,24 @@
 import multiprocessing
 import queue
 import struct
+import threading
 import time
 from multiprocessing.connection import Connection, wait
 from typing import Any, Callable, Dict, Optional, Set, Tuple, TypeAlias
 
 from async_gym_agents.constants import (
+    EPISODE_FEEDER_THREAD_NAME_PREFIX,
     EPISODE_KIND_OFF_POLICY_CODE,
     EPISODE_KIND_ON_POLICY_CODE,
     EPISODE_PACKET_HEADER,
-    PER_WORKER_PENDING_EPISODE_CAPACITY,
     SHARED_COUNTER_TYPE_CODE,
     TRANSPORT_ACQUIRE_RETRY_TIMEOUT_SECONDS,
 )
 from async_gym_agents.data_classes import (
     EpisodePacket,
+    EpisodeReservation,
     EpisodeSendResult,
+    EpisodeSubmissionResult,
     EpisodeTransportStats,
 )
 from async_gym_agents.enums import EpisodeKind
@@ -89,7 +92,6 @@ class EpisodeSender:
         self,
         worker_index: int,
         send_connection: Connection,
-        worker_capacity: GenericSemaphore,
         capacity: GenericSemaphore,
         pending_episodes: GenericSharedCounter,
         max_pending_episodes: GenericSharedCounter,
@@ -101,7 +103,6 @@ class EpisodeSender:
     ) -> None:
         self.worker_index = worker_index
         self._send_connection = send_connection
-        self._worker_capacity = worker_capacity
         self._capacity = capacity
         self._pending_episodes = pending_episodes
         self._max_pending_episodes = max_pending_episodes
@@ -119,55 +120,83 @@ class EpisodeSender:
         timeout: Optional[float],
     ) -> EpisodeSendResult:
         """Stream one complete episode while respecting global backpressure."""
+        submission = self.reserve(packet, stop, timeout)
+        if not submission:
+            return EpisodeSendResult(
+                sent=False,
+                waiting_ns=submission.waiting_ns,
+                transport_ns=0,
+            )
+        if submission.reservation is None:
+            raise RuntimeError("Successful episode submission has no reservation")
+        return self.send_reserved(submission.reservation, stop)
+
+    def reserve(
+        self,
+        packet: EpisodePacket,
+        stop: GenericStopEvent,
+        timeout: Optional[float],
+    ) -> EpisodeSubmissionResult:
+        """Reserve global capacity before an asynchronous feeder accepts a packet."""
         if packet.worker_index != self.worker_index:
             raise ValueError("Episode packet was sent through the wrong worker channel")
 
-        start_ns = self._clock()
         if stop.is_set():
-            return self._build_result(False, 0, start_ns)
+            return EpisodeSubmissionResult(submitted=False, waiting_ns=0)
 
         deadline = None if timeout is None else time.monotonic() + timeout
-        waiting_ns = 0
-        worker_capacity_acquired, worker_waiting_ns = self._acquire_slot(
-            self._worker_capacity,
-            stop,
-            deadline,
-        )
-        waiting_ns += worker_waiting_ns
-        if not worker_capacity_acquired:
-            return self._build_result(False, waiting_ns, start_ns)
-
-        capacity_acquired, capacity_waiting_ns = self._acquire_slot(
+        capacity_acquired, waiting_ns = self._acquire_slot(
             self._capacity,
             stop,
             deadline,
         )
-        waiting_ns += capacity_waiting_ns
         if not capacity_acquired:
-            self._worker_capacity.release()
-            return self._build_result(False, waiting_ns, start_ns)
+            return EpisodeSubmissionResult(
+                submitted=False,
+                waiting_ns=waiting_ns,
+            )
 
         enqueue_ns = self._clock()
-        payload_size = len(packet.payload)
+        self._record_reservation(len(packet.payload))
+        return EpisodeSubmissionResult(
+            submitted=True,
+            waiting_ns=waiting_ns,
+            reservation=EpisodeReservation(
+                packet=packet,
+                enqueue_ns=enqueue_ns,
+                waiting_ns=waiting_ns,
+            ),
+        )
+
+    def send_reserved(
+        self,
+        reservation: EpisodeReservation,
+        stop: GenericStopEvent,
+    ) -> EpisodeSendResult:
+        """Write an already bounded episode reservation to this worker's pipe."""
+        packet = reservation.packet
+        if packet.worker_index != self.worker_index:
+            raise ValueError("Episode reservation belongs to another worker channel")
+        if stop.is_set():
+            return self.cancel(reservation)
+
         try:
-            header = _encode_episode_packet_header(packet, enqueue_ns)
-        except BaseException:
-            self._capacity.release()
-            self._worker_capacity.release()
-            raise
-        self._record_send_started(payload_size)
-        try:
+            header = _encode_episode_packet_header(packet, reservation.enqueue_ns)
             self._send_connection.send_bytes(header)
             self._send_connection.send_bytes(packet.payload)
         except BaseException as error:
-            self._rollback_send(payload_size)
-            self._capacity.release()
-            self._worker_capacity.release()
+            result = self.cancel(reservation)
             if stop.is_set() and isinstance(error, (EOFError, OSError)):
-                return self._build_result(False, waiting_ns, start_ns)
+                return result
             raise
 
-        return self._build_result(True, waiting_ns, start_ns)
+        return self._build_send_result(True, reservation)
+
+    def cancel(self, reservation: EpisodeReservation) -> EpisodeSendResult:
+        """Release one accepted episode that cannot be delivered."""
+        self._rollback_reservation(len(reservation.packet.payload))
+        self._capacity.release()
+        return self._build_send_result(False, reservation)
 
     def close(self) -> None:
         """Close this worker's sending endpoint."""
@@ -203,7 +232,7 @@ class EpisodeSender:
             return None
         return min(TRANSPORT_ACQUIRE_RETRY_TIMEOUT_SECONDS, remaining)
 
-    def _record_send_started(self, payload_size: int) -> None:
+    def _record_reservation(self, payload_size: int) -> None:
         with self._pending_episodes.get_lock():
             self._pending_episodes.value += 1
             pending_episodes = self._pending_episodes.value
@@ -225,7 +254,7 @@ class EpisodeSender:
         with self._sent_bytes.get_lock():
             self._sent_bytes.value += payload_size
 
-    def _rollback_send(self, payload_size: int) -> None:
+    def _rollback_reservation(self, payload_size: int) -> None:
         with self._pending_episodes.get_lock():
             self._pending_episodes.value -= 1
         with self._pending_bytes.get_lock():
@@ -235,18 +264,88 @@ class EpisodeSender:
         with self._sent_bytes.get_lock():
             self._sent_bytes.value -= payload_size
 
-    def _build_result(
+    def _build_send_result(
         self,
         sent: bool,
-        waiting_ns: int,
-        start_ns: int,
+        reservation: EpisodeReservation,
     ) -> EpisodeSendResult:
-        total_ns = self._clock() - start_ns
         return EpisodeSendResult(
             sent=sent,
-            waiting_ns=max(0, waiting_ns),
-            transport_ns=max(0, total_ns - waiting_ns),
+            waiting_ns=max(0, reservation.waiting_ns),
+            transport_ns=max(0, self._clock() - reservation.enqueue_ns),
         )
+
+
+class EpisodeFeeder:
+    def __init__(
+        self,
+        sender: EpisodeSender,
+        stop: GenericStopEvent,
+        on_send_complete: Optional[Callable[[EpisodeSendResult], None]] = None,
+    ) -> None:
+        self._sender = sender
+        self._stop = stop
+        self._on_send_complete = on_send_complete
+        self._reservations = queue.Queue()
+        self._error_lock = threading.Lock()
+        self._error: Optional[BaseException] = None
+        self._closed = False
+        self._thread = threading.Thread(
+            target=self._run,
+            name=f"{EPISODE_FEEDER_THREAD_NAME_PREFIX}-{sender.worker_index}",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def submit(
+        self,
+        packet: EpisodePacket,
+        timeout: Optional[float],
+    ) -> EpisodeSubmissionResult:
+        """Accept a globally bounded packet without waiting for pipe delivery."""
+        if self._closed:
+            raise RuntimeError("Cannot submit an episode to a closed feeder")
+        self.raise_if_failed()
+        submission = self._sender.reserve(packet, self._stop, timeout)
+        if submission:
+            if submission.reservation is None:
+                raise RuntimeError("Successful episode submission has no reservation")
+            self._reservations.put_nowait(submission.reservation)
+        return submission
+
+    def shutdown(self) -> None:
+        """Drain or cancel accepted episodes and stop the feeder thread."""
+        if self._closed:
+            return
+        self._closed = True
+        self._reservations.put_nowait(None)
+        self._thread.join()
+        self.raise_if_failed()
+
+    def raise_if_failed(self) -> None:
+        """Raise a worker-visible error when asynchronous delivery failed."""
+        with self._error_lock:
+            error = self._error
+        if error is not None:
+            raise RuntimeError("Episode feeder failed") from error
+
+    def _run(self) -> None:
+        while True:
+            reservation = self._reservations.get()
+            if reservation is None:
+                return
+            try:
+                result = self._sender.send_reserved(reservation, self._stop)
+                self._notify_send_complete(result)
+            except BaseException as error:
+                with self._error_lock:
+                    if self._error is None:
+                        self._error = error
+                self._stop.set()
+
+    def _notify_send_complete(self, result: EpisodeSendResult) -> None:
+        if self._on_send_complete is not None:
+            self._on_send_complete(result)
 
 
 class EpisodeTransport:
@@ -275,10 +374,6 @@ class EpisodeTransport:
             connection: worker_index
             for worker_index, connection in enumerate(self._receive_connections)
         }
-        self._worker_capacities = [
-            self._mp_ctx.BoundedSemaphore(PER_WORKER_PENDING_EPISODE_CAPACITY)
-            for _ in range(worker_count)
-        ]
         self._capacity = self._mp_ctx.BoundedSemaphore(max_pending_episodes)
         self._pending_episodes = self._mp_ctx.Value(SHARED_COUNTER_TYPE_CODE, 0)
         self._max_pending_episodes = self._mp_ctx.Value(SHARED_COUNTER_TYPE_CODE, 0)
@@ -290,7 +385,6 @@ class EpisodeTransport:
             EpisodeSender(
                 worker_index=worker_index,
                 send_connection=send_connections[worker_index],
-                worker_capacity=self._worker_capacities[worker_index],
                 capacity=self._capacity,
                 pending_episodes=self._pending_episodes,
                 max_pending_episodes=self._max_pending_episodes,
@@ -344,7 +438,6 @@ class EpisodeTransport:
             packet = self._receive_packet(worker_index, deadline)
             self._record_receive(packet)
             self._capacity.release()
-            self._worker_capacities[worker_index].release()
             self._next_worker_index = (worker_index + 1) % self.worker_count
             return packet
         except queue.Empty:

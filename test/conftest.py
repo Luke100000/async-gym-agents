@@ -1,4 +1,6 @@
 import multiprocessing
+import queue
+import threading
 from dataclasses import replace
 from functools import partial
 from io import StringIO
@@ -20,7 +22,7 @@ from async_gym_agents.data_classes import OffPolicyTransition, OnPolicyTransitio
 from async_gym_agents.envs.buggy_lunar_lander import BuggyLunarLander
 from async_gym_agents.envs.multi_env import IndexableMultiEnv
 from async_gym_agents.episode_codec import encode_episode_batch, pack_episode
-from async_gym_agents.episode_transport import EpisodeTransport
+from async_gym_agents.episode_transport import EpisodeFeeder, EpisodeTransport
 
 PROCESSES = 8
 DIRECT_TRANSPORT_PAYLOAD_BYTES = 8 * BYTES_PER_MEBIBYTE
@@ -257,6 +259,34 @@ def active_direct_episode_send(on_policy_packet):
     if process.is_alive():
         process.kill()
         process.join(DIRECT_TRANSPORT_PROCESS_TIMEOUT_SECONDS)
+
+
+@pytest.fixture
+def active_episode_feeder(on_policy_packet):
+    """Create a feeder blocked on payloads larger than its operating-system pipe."""
+    transport = EpisodeTransport(
+        worker_count=1,
+        max_pending_episodes=2,
+        use_mp=False,
+    )
+    stop = threading.Event()
+    completed_sends = queue.Queue()
+    feeder = EpisodeFeeder(
+        sender=transport.get_sender(0),
+        stop=stop,
+        on_send_complete=completed_sends.put,
+    )
+    packet = replace(
+        on_policy_packet,
+        payload=bytes(DIRECT_TRANSPORT_PAYLOAD_BYTES),
+    )
+
+    yield transport, feeder, packet, stop, completed_sends
+
+    stop.set()
+    transport.interrupt()
+    feeder.shutdown()
+    transport.shutdown()
 
 
 @pytest.fixture

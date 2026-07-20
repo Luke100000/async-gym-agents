@@ -4,9 +4,11 @@ Wrapper environments and agent injectors to allow for drop-in async training.
 
 Workers build complete episodes, compact their numeric fields into contiguous
 arrays, and serialize each episode once. Empty per-step `info` dictionaries are
-not stored. The trainer receives at most one pending episode per worker and also
-enforces the global `max_episodes_in_buffer` limit, so transport memory grows
-with real payloads rather than a fixed transition ring.
+not stored. Each worker reserves global capacity before handing an episode to a
+local feeder thread, so pipe delivery overlaps the worker's next rollout. The
+shared `max_episodes_in_buffer` limit bounds all locally queued and in-flight
+episodes, so transport memory grows with real payloads rather than a fixed
+transition ring.
 
 For PPO and other on-policy algorithms, a background assembler decodes complete
 episodes, bulk-populates the inactive Stable Baselines rollout buffer B, and
@@ -14,10 +16,10 @@ computes its advantages while Stable Baselines trains buffer A. Acquiring the
 prepared B immediately starts construction of its replacement; no trainer-side
 transition insertion or return pass is required. The final episode is never
 split, so an `n_steps` target may produce a slightly larger rollout buffer.
-Episode-start markers still separate trajectories for GAE. Each worker streams
-through its own unidirectional pipe. Per-worker and global capacity semaphores
-provide backpressure after B is full and prevent workers from running
-arbitrarily far ahead of the trainer.
+Episode-start markers still separate trajectories for GAE. Each feeder streams
+through its worker's unidirectional pipe. A global capacity semaphore provides
+backpressure after B is full and prevents workers from running arbitrarily far
+ahead of the trainer.
 
 ```py
 import gymnasium as gym
@@ -80,8 +82,11 @@ A high `receive_timeouts_with_pending_fraction` means workers have reserved
 transport capacity but no complete pipe frame became readable. Compare
 readiness time, payload-receive time, and end-to-end pipe latency to distinguish
 worker starvation from payload transfer delays. Worker-side `transport` timing
-now covers the synchronous pipe send through trainer receipt, so long samples
-also expose backpressure while the inactive PPO buffer is full.
+covers local feeder queueing and pipe delivery, while worker-side `waiting`
+covers global-capacity backpressure.
+
+The deferred shared latest-policy replacement for per-worker policy queues is
+specified in [docs/shared_policy_distribution.md](docs/shared_policy_distribution.md).
 
 The standalone payload benchmark compares legacy transition-object pickling
 with the packed whole-episode path:
