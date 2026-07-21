@@ -14,7 +14,7 @@ from async_gym_agents.episode_codec import (
 )
 
 
-class EpisodeCallbackPatch(ABC):
+class EpisodeCallbackAdapter(ABC):
     """Process a known callback once per complete episode."""
 
     def __init__(self, callback: BaseCallback) -> None:
@@ -29,16 +29,20 @@ class EpisodeCallbackPatch(ABC):
         self.callback.num_timesteps = context.end_timestep
 
 
-class LoggingCallbackPatch(EpisodeCallbackPatch):
+class LoggingCallbackAdapter(EpisodeCallbackAdapter):
     """Aggregate framework metrics directly from complete episode batches."""
 
     def __init__(self, callback: BaseCallback) -> None:
         super().__init__(callback)
-        logged_metadata = getattr(callback, "async_logged_metadata_by_key", None)
-        if logged_metadata is None:
-            logged_metadata = {}
-            callback.async_logged_metadata_by_key = logged_metadata
-        self.logged_metadata = logged_metadata
+        logged_metadata_by_key = getattr(
+            callback,
+            "_async_logged_metadata_by_key",
+            None,
+        )
+        if logged_metadata_by_key is None:
+            logged_metadata_by_key = {}
+            callback._async_logged_metadata_by_key = logged_metadata_by_key
+        self.logged_metadata_by_key = logged_metadata_by_key
 
     def process_episode(self, context: OnPolicyEpisodeCallbackContext) -> bool:
         callback = self.callback
@@ -156,8 +160,8 @@ class LoggingCallbackPatch(EpisodeCallbackPatch):
                         self._log_metadata(callback, key, value)
 
     def _log_metadata(self, callback: BaseCallback, key: str, value: object) -> None:
-        if key in self.logged_metadata and self._metadata_matches(
-            self.logged_metadata[key],
+        if key in self.logged_metadata_by_key and self._metadata_matches(
+            self.logged_metadata_by_key[key],
             value,
         ):
             return
@@ -166,7 +170,7 @@ class LoggingCallbackPatch(EpisodeCallbackPatch):
             callback.connector.log_dict(value, key)
         else:
             callback.connector.log_dict({key: value}, key)
-        self.logged_metadata[key] = value
+        self.logged_metadata_by_key[key] = value
 
     @staticmethod
     def _metadata_matches(previous_value: object, current_value: object) -> bool:
@@ -195,7 +199,7 @@ class LoggingCallbackPatch(EpisodeCallbackPatch):
         )
 
 
-class SavingCallbackPatch(EpisodeCallbackPatch):
+class SavingCallbackAdapter(EpisodeCallbackAdapter):
     """Preserve checkpoint scheduling without checking it every transition."""
 
     def process_episode(self, context: OnPolicyEpisodeCallbackContext) -> bool:
@@ -220,7 +224,7 @@ class SavingCallbackPatch(EpisodeCallbackPatch):
         return True
 
 
-class ExperimentPruningCallbackPatch(EpisodeCallbackPatch):
+class ExperimentPruningCallbackAdapter(EpisodeCallbackAdapter):
     """Evaluate pruning once when a complete episode changes its reward window."""
 
     def process_episode(self, context: OnPolicyEpisodeCallbackContext) -> bool:
@@ -250,7 +254,7 @@ class ExperimentPruningCallbackPatch(EpisodeCallbackPatch):
         )
 
 
-class ResetInfoCallbackPatch(EpisodeCallbackPatch):
+class ResetInfoCallbackAdapter(EpisodeCallbackAdapter):
     """Log initial and post-terminal reset information once per episode."""
 
     def process_episode(self, context: OnPolicyEpisodeCallbackContext) -> bool:
@@ -297,7 +301,7 @@ class ResetInfoCallbackPatch(EpisodeCallbackPatch):
         )
 
 
-class TerminalStepCallbackPatch(EpisodeCallbackPatch):
+class TerminalStepCallbackAdapter(EpisodeCallbackAdapter):
     """Invoke a terminal-only callback once with the completed episode's last row."""
 
     def process_episode(self, context: OnPolicyEpisodeCallbackContext) -> bool:
@@ -324,7 +328,7 @@ class CallbackBatchDispatcher:
 
     def __init__(self, callback: BaseCallback) -> None:
         self.callback_lists: List[CallbackList] = []
-        self.episode_patches: List[EpisodeCallbackPatch] = []
+        self.episode_adapters: List[EpisodeCallbackAdapter] = []
         self.step_callbacks: List[BaseCallback] = []
         self._classify_callback(callback)
 
@@ -333,7 +337,7 @@ class CallbackBatchDispatcher:
         return bool(self.step_callbacks)
 
     def process_step(self, callback_locals: dict) -> bool:
-        """Dispatch one transition only to callbacks without an episode patch."""
+        """Dispatch one transition only to callbacks without an episode adapter."""
         num_timesteps = callback_locals["self"].num_timesteps
         for callback_list in self.callback_lists:
             callback_list.n_calls += 1
@@ -346,15 +350,15 @@ class CallbackBatchDispatcher:
         return continue_training
 
     def process_episode(self, context: OnPolicyEpisodeCallbackContext) -> bool:
-        """Dispatch one complete episode to every installed callback patch."""
+        """Dispatch one complete episode to every installed callback adapter."""
         if not self.needs_step_callbacks:
             for callback_list in self.callback_lists:
                 callback_list.n_calls += context.batch.transition_count
                 callback_list.num_timesteps = context.end_timestep
 
         continue_training = True
-        for patch in self.episode_patches:
-            continue_training = patch.process_episode(context) and continue_training
+        for adapter in self.episode_adapters:
+            continue_training = adapter.process_episode(context) and continue_training
         return continue_training
 
     def _classify_callback(self, callback: BaseCallback) -> None:
@@ -364,16 +368,16 @@ class CallbackBatchDispatcher:
                 self._classify_callback(child_callback)
             return
 
-        patch = self._create_episode_patch(callback)
-        if patch is None:
+        adapter = self._create_episode_adapter(callback)
+        if adapter is None:
             self.step_callbacks.append(callback)
         else:
-            self.episode_patches.append(patch)
+            self.episode_adapters.append(adapter)
 
     @staticmethod
-    def _create_episode_patch(
+    def _create_episode_adapter(
         callback: BaseCallback,
-    ) -> EpisodeCallbackPatch | None:
+    ) -> EpisodeCallbackAdapter | None:
         callback_name = type(callback).__name__
         if callback_name == "LoggingCallback" and _has_attributes(
             callback,
@@ -385,12 +389,12 @@ class CallbackBatchDispatcher:
                 "metric_aggregator",
             ),
         ):
-            return LoggingCallbackPatch(callback)
+            return LoggingCallbackAdapter(callback)
         if callback_name == "SavingCallback" and _has_attributes(
             callback,
             ("agent", "checkpoint_frequency", "connector", "next_upload"),
         ):
-            return SavingCallbackPatch(callback)
+            return SavingCallbackAdapter(callback)
         if callback_name == "ExperimentPruningCallback" and _has_attributes(
             callback,
             (
@@ -399,19 +403,19 @@ class CallbackBatchDispatcher:
                 "pruning_start_at",
             ),
         ):
-            return ExperimentPruningCallbackPatch(callback)
+            return ExperimentPruningCallbackAdapter(callback)
         if callback_name == "ResetInfoCallback" and _has_attributes(
             callback,
             ("connector", "episode_counter", "first_step_tracker"),
         ):
-            return ResetInfoCallbackPatch(callback)
+            return ResetInfoCallbackAdapter(callback)
         if callback_name == "AsyncSBUtilizationLoggingCallback" and (
             _has_attributes(
                 callback,
                 ("logging_frequency", "shared_episode_counter"),
             )
         ):
-            return TerminalStepCallbackPatch(callback)
+            return TerminalStepCallbackAdapter(callback)
         return None
 
 

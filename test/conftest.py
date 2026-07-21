@@ -33,7 +33,7 @@ POLICY_TEST_TIMEOUT_SECONDS = 5.0
 
 
 class LoggingCallback(BaseCallback):
-    """Represent the external logging callback contract used by benchmark tests."""
+    """Represent the external logging callback contract used by batching tests."""
 
     def __init__(self, connector, metric_aggregator):
         super().__init__()
@@ -50,7 +50,7 @@ class LoggingCallback(BaseCallback):
 
 
 class MetricAggregator:
-    """Represent the framework metric aggregator state used by callback patches."""
+    """Represent the framework metric aggregator state used by callback adapters."""
 
     def __init__(self, aggregate_distributions=False):
         self.aggregate_distributions = aggregate_distributions
@@ -450,6 +450,16 @@ def on_policy_episode_with_metrics(on_policy_episode):
         }
     )
     episode[1] = replace(episode[1], infos=[terminal_info])
+    return episode
+
+
+@pytest.fixture
+def on_policy_episode_with_changed_metadata(on_policy_episode_with_metrics):
+    """Change one metadata value while preserving the metric-bearing episode."""
+    episode = list(on_policy_episode_with_metrics)
+    initial_info = dict(episode[0].infos[0])
+    initial_info["meta_settings"] = {"map": "changed"}
+    episode[0] = replace(episode[0], infos=[initial_info])
     return episode
 
 

@@ -77,6 +77,28 @@ class TestBatchedLoggingCallback:
             "meta_settings",
         )
 
+    def test_logs_metadata_again_after_its_value_changes(
+        self,
+        external_logging_callback,
+        on_policy_episode_with_metrics,
+        on_policy_episode_with_changed_metadata,
+    ):
+        """A changed metadata value is emitted after an earlier value was cached."""
+        initial_batch = pack_episode(on_policy_episode_with_metrics)
+        changed_batch = pack_episode(on_policy_episode_with_changed_metadata)
+
+        assert CallbackBatchDispatcher(external_logging_callback).process_episode(
+            OnPolicyEpisodeCallbackContext(initial_batch, 0, 2)
+        )
+        assert CallbackBatchDispatcher(external_logging_callback).process_episode(
+            OnPolicyEpisodeCallbackContext(changed_batch, 2, 4)
+        )
+
+        assert external_logging_callback.connector.log_dict.call_args_list == [
+            call({"map": "test"}, "meta_settings"),
+            call({"map": "changed"}, "meta_settings"),
+        ]
+
 
 class TestBatchedPeriodicCallbacks:
     """Periodic framework callbacks evaluate only at relevant episode boundaries."""
