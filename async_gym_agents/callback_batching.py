@@ -1,10 +1,12 @@
 from abc import ABC, abstractmethod
+from collections import deque
 from typing import List
 
 import numpy as np
 from stable_baselines3.common.callbacks import BaseCallback, CallbackList
 
-from async_gym_agents.data_classes import OnPolicyEpisodeCallbackContext
+from async_gym_agents import constants
+from async_gym_agents.data_classes import EpisodeBatch, OnPolicyEpisodeCallbackContext
 from async_gym_agents.episode_codec import (
     get_episode_infos,
     get_episode_reset_infos,
@@ -28,21 +30,24 @@ class EpisodeCallbackPatch(ABC):
 
 
 class LoggingCallbackPatch(EpisodeCallbackPatch):
-    """Run the framework metric aggregator without SB3's callback dispatch loop."""
+    """Aggregate framework metrics directly from complete episode batches."""
+
+    def __init__(self, callback: BaseCallback) -> None:
+        super().__init__(callback)
+        logged_metadata = getattr(callback, "async_logged_metadata_by_key", None)
+        if logged_metadata is None:
+            logged_metadata = {}
+            callback.async_logged_metadata_by_key = logged_metadata
+        self.logged_metadata = logged_metadata
 
     def process_episode(self, context: OnPolicyEpisodeCallbackContext) -> bool:
         callback = self.callback
         batch = context.batch
-        for transition_index in range(batch.transition_count):
-            infos = get_episode_infos(batch, transition_index)
-            callback.metric_aggregator.aggregate_step(
-                slice_episode_field(batch, "new_obs", transition_index),
-                slice_episode_field(batch, "actions", transition_index),
-                slice_episode_field(batch, "rewards", transition_index),
-                slice_episode_field(batch, "dones", transition_index),
-                infos,
-            )
-            self._log_metadata(callback, infos)
+        if self._supports_episode_aggregation(callback.metric_aggregator):
+            self._aggregate_episode(callback, batch)
+        else:
+            self._aggregate_episode_by_step(callback, batch)
+            self._log_episode_metadata(callback, batch)
 
         terminal_dones = slice_episode_field(
             batch,
@@ -64,16 +69,130 @@ class LoggingCallbackPatch(EpisodeCallbackPatch):
         self.advance_callback(context)
         return True
 
+    def _aggregate_episode_by_step(
+        self,
+        callback: BaseCallback,
+        batch: EpisodeBatch,
+    ) -> None:
+        for transition_index in range(batch.transition_count):
+            infos = get_episode_infos(batch, transition_index)
+            callback.metric_aggregator.aggregate_step(
+                slice_episode_field(batch, "new_obs", transition_index),
+                slice_episode_field(batch, "actions", transition_index),
+                slice_episode_field(batch, "rewards", transition_index),
+                slice_episode_field(batch, "dones", transition_index),
+                infos,
+            )
+
+    def _aggregate_episode(
+        self,
+        callback: BaseCallback,
+        batch: EpisodeBatch,
+    ) -> None:
+        aggregator = callback.metric_aggregator
+        # Workers pack each completed environment into its own episode batch.
+        episode_agent_index = 0
+        rewards = batch.fields["rewards"]
+        if aggregator.episode_reward is None:
+            aggregator.episode_reward = np.zeros(1, dtype=rewards.dtype)
+        aggregator.episode_reward[episode_agent_index] += np.sum(rewards)
+
+        if aggregator.aggregate_distributions:
+            if not aggregator.episode_actions:
+                aggregator.episode_actions = [[]]
+            aggregator.episode_actions[episode_agent_index].extend(
+                batch.fields["actions"]
+            )
+
+        self._aggregate_episode_infos(callback, batch)
+        terminal_index = batch.transition_count - 1
+        terminal_dones = slice_episode_field(batch, "dones", terminal_index)
+        terminal_infos = get_episode_infos(batch, terminal_index)
+        for done_index in np.flatnonzero(terminal_dones):
+            terminal_info = terminal_infos[done_index]
+            if not terminal_info.get(constants.DISCARD_INFO_KEY, False):
+                aggregator.episode_rewards.setdefault(done_index, []).append(
+                    aggregator.episode_reward[done_index]
+                )
+                end_reason = terminal_info.get(constants.EPISODE_END_REASON_INFO_KEY)
+                if end_reason is not None:
+                    aggregator.episode_end_reasons.setdefault(
+                        done_index,
+                        deque(maxlen=constants.EPISODE_END_REASON_WINDOW_SIZE),
+                    ).append(end_reason)
+            aggregator.episode_reward[done_index] = 0
+
+    def _aggregate_episode_infos(
+        self,
+        callback: BaseCallback,
+        batch: EpisodeBatch,
+    ) -> None:
+        aggregator = callback.metric_aggregator
+        episode_step_metrics = aggregator.episode_step_metrics
+        step_metric_prefix = constants.STEP_METRIC_INFO_PREFIX
+        meta_info_prefix = constants.META_INFO_PREFIX
+        for infos in batch.infos.values():
+            for agent_index, info in enumerate(infos):
+                for key, value in info.items():
+                    if key.startswith(step_metric_prefix):
+                        metric_name = key[len(step_metric_prefix) :]
+                        per_agent_values = episode_step_metrics.get(metric_name)
+                        if per_agent_values is None:
+                            per_agent_values = [[] for _ in range(len(infos))]
+                            episode_step_metrics[metric_name] = per_agent_values
+                        per_agent_values[agent_index].append(float(value))
+                    elif key.startswith(meta_info_prefix):
+                        self._log_metadata(callback, key, value)
+
+    def _log_episode_metadata(
+        self,
+        callback: BaseCallback,
+        batch: EpisodeBatch,
+    ) -> None:
+        for infos in batch.infos.values():
+            for info in infos:
+                for key, value in info.items():
+                    if key.startswith(constants.META_INFO_PREFIX):
+                        self._log_metadata(callback, key, value)
+
+    def _log_metadata(self, callback: BaseCallback, key: str, value: object) -> None:
+        if key in self.logged_metadata and self._metadata_matches(
+            self.logged_metadata[key],
+            value,
+        ):
+            return
+
+        if isinstance(value, dict):
+            callback.connector.log_dict(value, key)
+        else:
+            callback.connector.log_dict({key: value}, key)
+        self.logged_metadata[key] = value
+
     @staticmethod
-    def _log_metadata(callback: BaseCallback, infos: List[dict]) -> None:
-        for info in infos:
-            for key, value in info.items():
-                if not key.startswith("meta_"):
-                    continue
-                if isinstance(value, dict):
-                    callback.connector.log_dict(value, key)
-                else:
-                    callback.connector.log_dict({key: value}, key)
+    def _metadata_matches(previous_value: object, current_value: object) -> bool:
+        try:
+            comparison = previous_value == current_value
+            if isinstance(comparison, np.ndarray):
+                return bool(np.all(comparison))
+            return bool(comparison)
+        except (TypeError, ValueError):
+            return False
+
+    @staticmethod
+    def _supports_episode_aggregation(metric_aggregator: object) -> bool:
+        if type(metric_aggregator).__name__ != "MetricAggregator":
+            return False
+        return _has_attributes(
+            metric_aggregator,
+            (
+                "aggregate_distributions",
+                "episode_actions",
+                "episode_end_reasons",
+                "episode_reward",
+                "episode_rewards",
+                "episode_step_metrics",
+            ),
+        )
 
 
 class SavingCallbackPatch(EpisodeCallbackPatch):
@@ -113,7 +232,7 @@ class ExperimentPruningCallbackPatch(EpisodeCallbackPatch):
         terminal_infos = get_episode_infos(batch, terminal_index)
 
         for done_index in np.flatnonzero(terminal_dones):
-            if not terminal_infos[done_index].get("discard", False):
+            if not terminal_infos[done_index].get(constants.DISCARD_INFO_KEY, False):
                 callback.episode_rewards.append(episode_rewards[done_index])
 
         callback.episode_reward = np.zeros_like(episode_rewards)
@@ -256,7 +375,7 @@ class CallbackBatchDispatcher:
         callback: BaseCallback,
     ) -> EpisodeCallbackPatch | None:
         callback_name = type(callback).__name__
-        if callback_name == "LoggingCallback" and _has_callback_attributes(
+        if callback_name == "LoggingCallback" and _has_attributes(
             callback,
             (
                 "connector",
@@ -267,12 +386,12 @@ class CallbackBatchDispatcher:
             ),
         ):
             return LoggingCallbackPatch(callback)
-        if callback_name == "SavingCallback" and _has_callback_attributes(
+        if callback_name == "SavingCallback" and _has_attributes(
             callback,
             ("agent", "checkpoint_frequency", "connector", "next_upload"),
         ):
             return SavingCallbackPatch(callback)
-        if callback_name == "ExperimentPruningCallback" and _has_callback_attributes(
+        if callback_name == "ExperimentPruningCallback" and _has_attributes(
             callback,
             (
                 "episode_reward_threshold",
@@ -281,13 +400,13 @@ class CallbackBatchDispatcher:
             ),
         ):
             return ExperimentPruningCallbackPatch(callback)
-        if callback_name == "ResetInfoCallback" and _has_callback_attributes(
+        if callback_name == "ResetInfoCallback" and _has_attributes(
             callback,
             ("connector", "episode_counter", "first_step_tracker"),
         ):
             return ResetInfoCallbackPatch(callback)
         if callback_name == "AsyncSBUtilizationLoggingCallback" and (
-            _has_callback_attributes(
+            _has_attributes(
                 callback,
                 ("logging_frequency", "shared_episode_counter"),
             )
@@ -296,8 +415,8 @@ class CallbackBatchDispatcher:
         return None
 
 
-def _has_callback_attributes(
-    callback: BaseCallback,
+def _has_attributes(
+    value: object,
     attribute_names: tuple[str, ...],
 ) -> bool:
-    return all(hasattr(callback, name) for name in attribute_names)
+    return all(hasattr(value, name) for name in attribute_names)

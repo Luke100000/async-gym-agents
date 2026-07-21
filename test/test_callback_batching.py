@@ -24,11 +24,57 @@ class TestBatchedLoggingCallback:
         assert external_logging_callback.step_call_count == 0
         assert external_logging_callback.n_calls == 4
         assert (
-            external_logging_callback.metric_aggregator.aggregate_step.call_count == 4
+            external_logging_callback.metric_aggregator.aggregate_step.call_count == 0
         )
         assert (
             external_logging_callback.metric_aggregator.log_aggregated_metrics.call_count
             == 2
+        )
+
+    def test_aggregates_complete_episode_arrays_directly(
+        self,
+        external_logging_callback,
+        on_policy_episode_with_metrics,
+    ):
+        """Rewards, actions, metrics, and end reasons bypass step aggregation."""
+        callback = external_logging_callback
+        callback.logging_frequency = 2
+        callback.log_distributions = True
+        callback.metric_aggregator.aggregate_distributions = True
+        batch = pack_episode(on_policy_episode_with_metrics)
+
+        assert CallbackBatchDispatcher(callback).process_episode(
+            OnPolicyEpisodeCallbackContext(batch, 0, 2)
+        )
+
+        aggregator = callback.metric_aggregator
+        assert aggregator.aggregate_step.call_count == 0
+        assert aggregator.episode_rewards[0] == [3.0]
+        assert aggregator.episode_step_metrics["speed"][0] == [2.0, 4.0]
+        assert list(aggregator.episode_end_reasons[0]) == ["TIMEOUT"]
+        assert [action.tolist() for action in aggregator.episode_actions[0]] == [
+            [0],
+            [1],
+        ]
+
+    def test_logs_unchanged_metadata_only_once(
+        self,
+        external_logging_callback,
+        on_policy_episode_with_metrics,
+    ):
+        """Repeated episodes do not rewrite an identical metadata configuration."""
+        batch = pack_episode(on_policy_episode_with_metrics)
+
+        assert CallbackBatchDispatcher(external_logging_callback).process_episode(
+            OnPolicyEpisodeCallbackContext(batch, 0, 2)
+        )
+        assert CallbackBatchDispatcher(external_logging_callback).process_episode(
+            OnPolicyEpisodeCallbackContext(batch, 2, 4)
+        )
+
+        external_logging_callback.connector.log_dict.assert_called_once_with(
+            {"map": "test"},
+            "meta_settings",
         )
 
 
@@ -136,5 +182,21 @@ class TestCallbackCompatibility:
         assert external_logging_callback.step_call_count == 0
         assert external_logging_callback.n_calls == 4
         assert (
-            external_logging_callback.metric_aggregator.aggregate_step.call_count == 4
+            external_logging_callback.metric_aggregator.aggregate_step.call_count == 0
+        )
+
+    def test_preserves_step_aggregation_for_an_unknown_aggregator(
+        self,
+        short_episode_on_policy_agent,
+        external_legacy_logging_callback,
+    ):
+        """A logging implementation without episode state keeps its step contract."""
+        short_episode_on_policy_agent.learn(
+            total_timesteps=3,
+            callback=external_legacy_logging_callback,
+        )
+
+        assert (
+            external_legacy_logging_callback.metric_aggregator.aggregate_step.call_count
+            == 4
         )

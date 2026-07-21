@@ -49,6 +49,31 @@ class LoggingCallback(BaseCallback):
         return True
 
 
+class MetricAggregator:
+    """Represent the framework metric aggregator state used by callback patches."""
+
+    def __init__(self, aggregate_distributions=False):
+        self.aggregate_distributions = aggregate_distributions
+        self.episode_reward = None
+        self.episode_rewards = {}
+        self.episode_actions = None
+        self.episode_step_metrics = {}
+        self.episode_end_reasons = {}
+        self.aggregate_step = Mock()
+        self.log_aggregated_metrics = Mock()
+        self.reset_multi_episode_trackers = Mock(
+            side_effect=self.reset_aggregated_metrics
+        )
+
+    def reset_aggregated_metrics(self, agent_index):
+        """Reset the same multi-episode trackers as the framework aggregator."""
+        self.episode_rewards[agent_index] = []
+        for per_agent_values in self.episode_step_metrics.values():
+            per_agent_values[agent_index] = []
+        if self.episode_actions:
+            self.episode_actions[agent_index] = []
+
+
 class SavingCallback(BaseCallback):
     """Represent the external checkpoint callback contract used by tests."""
 
@@ -165,7 +190,23 @@ def external_logging_callback():
     """Create the external logging callback shape with mocked output boundaries."""
     return LoggingCallback(
         connector=Mock(),
-        metric_aggregator=Mock(),
+        metric_aggregator=MetricAggregator(),
+    )
+
+
+@pytest.fixture
+def external_legacy_logging_callback():
+    """Create a logging callback whose aggregator only accepts individual steps."""
+    metric_aggregator = Mock(
+        spec=[
+            "aggregate_step",
+            "log_aggregated_metrics",
+            "reset_multi_episode_trackers",
+        ]
+    )
+    return LoggingCallback(
+        connector=Mock(),
+        metric_aggregator=metric_aggregator,
     )
 
 
@@ -386,6 +427,30 @@ def on_policy_episode():
             reset_infos=[{"seed": 7}],
         ),
     ]
+
+
+@pytest.fixture
+def on_policy_episode_with_metrics(on_policy_episode):
+    """Add step metrics, metadata, and an end reason to a complete episode."""
+    episode = list(on_policy_episode)
+    episode[0] = replace(
+        episode[0],
+        infos=[
+            {
+                "meta_settings": {"map": "test"},
+                "step_metric_speed": 2.0,
+            }
+        ],
+    )
+    terminal_info = dict(episode[1].infos[0])
+    terminal_info.update(
+        {
+            "episode_end_reason": "TIMEOUT",
+            "step_metric_speed": 4.0,
+        }
+    )
+    episode[1] = replace(episode[1], infos=[terminal_info])
+    return episode
 
 
 @pytest.fixture
