@@ -121,7 +121,7 @@ class PreparedOnPolicyRollout:
 
 
 @dataclass(frozen=True)
-class OnPolicyEpisodeCallbackContext:
+class EpisodeCallbackContext:
     batch: EpisodeBatch
     start_timestep: int
     end_timestep: int

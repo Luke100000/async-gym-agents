@@ -6,7 +6,8 @@ import numpy as np
 from stable_baselines3.common.callbacks import BaseCallback, CallbackList
 
 from async_gym_agents import constants
-from async_gym_agents.data_classes import EpisodeBatch, OnPolicyEpisodeCallbackContext
+from async_gym_agents.data_classes import EpisodeBatch, EpisodeCallbackContext
+from async_gym_agents.enums import EpisodeKind
 from async_gym_agents.episode_codec import (
     get_episode_infos,
     get_episode_reset_infos,
@@ -21,12 +22,13 @@ class EpisodeCallbackAdapter(ABC):
         self.callback = callback
 
     @abstractmethod
-    def process_episode(self, context: OnPolicyEpisodeCallbackContext) -> bool:
+    def process_episode(self, context: EpisodeCallbackContext) -> bool:
         """Process one complete episode and return whether training should continue."""
 
-    def advance_callback(self, context: OnPolicyEpisodeCallbackContext) -> None:
-        self.callback.n_calls += context.batch.transition_count
-        self.callback.num_timesteps = context.end_timestep
+    def advance_callback(self, transition_count: int, num_timesteps: int) -> None:
+        """Advance SB3 callback counters without invoking its step hook."""
+        self.callback.n_calls += transition_count
+        self.callback.num_timesteps = num_timesteps
 
 
 class LoggingCallbackAdapter(EpisodeCallbackAdapter):
@@ -44,7 +46,7 @@ class LoggingCallbackAdapter(EpisodeCallbackAdapter):
             callback._async_logged_metadata_by_key = logged_metadata_by_key
         self.logged_metadata_by_key = logged_metadata_by_key
 
-    def process_episode(self, context: OnPolicyEpisodeCallbackContext) -> bool:
+    def process_episode(self, context: EpisodeCallbackContext) -> bool:
         callback = self.callback
         batch = context.batch
         if self._supports_episode_aggregation(callback.metric_aggregator):
@@ -70,7 +72,6 @@ class LoggingCallbackAdapter(EpisodeCallbackAdapter):
                 )
                 callback.metric_aggregator.reset_multi_episode_trackers(done_index)
 
-        self.advance_callback(context)
         return True
 
     def _aggregate_episode_by_step(
@@ -82,7 +83,11 @@ class LoggingCallbackAdapter(EpisodeCallbackAdapter):
             infos = get_episode_infos(batch, transition_index)
             callback.metric_aggregator.aggregate_step(
                 slice_episode_field(batch, "new_obs", transition_index),
-                slice_episode_field(batch, "actions", transition_index),
+                slice_episode_field(
+                    batch,
+                    resolve_episode_action_field(batch.episode_kind),
+                    transition_index,
+                ),
                 slice_episode_field(batch, "rewards", transition_index),
                 slice_episode_field(batch, "dones", transition_index),
                 infos,
@@ -104,8 +109,9 @@ class LoggingCallbackAdapter(EpisodeCallbackAdapter):
         if aggregator.aggregate_distributions:
             if not aggregator.episode_actions:
                 aggregator.episode_actions = [[]]
+            action_field = resolve_episode_action_field(batch.episode_kind)
             aggregator.episode_actions[episode_agent_index].extend(
-                batch.fields["actions"]
+                batch.fields[action_field]
             )
 
         self._aggregate_episode_infos(callback, batch)
@@ -202,7 +208,7 @@ class LoggingCallbackAdapter(EpisodeCallbackAdapter):
 class SavingCallbackAdapter(EpisodeCallbackAdapter):
     """Preserve checkpoint scheduling without checking it every transition."""
 
-    def process_episode(self, context: OnPolicyEpisodeCallbackContext) -> bool:
+    def process_episode(self, context: EpisodeCallbackContext) -> bool:
         callback = self.callback
         checkpoint_timestep = max(
             context.start_timestep + 1,
@@ -220,14 +226,13 @@ class SavingCallbackAdapter(EpisodeCallbackAdapter):
                 callback.next_upload + 1,
             )
 
-        self.advance_callback(context)
         return True
 
 
 class ExperimentPruningCallbackAdapter(EpisodeCallbackAdapter):
     """Evaluate pruning once when a complete episode changes its reward window."""
 
-    def process_episode(self, context: OnPolicyEpisodeCallbackContext) -> bool:
+    def process_episode(self, context: EpisodeCallbackContext) -> bool:
         callback = self.callback
         batch = context.batch
         episode_rewards = np.sum(batch.fields["rewards"], axis=0, keepdims=True)
@@ -240,7 +245,6 @@ class ExperimentPruningCallbackAdapter(EpisodeCallbackAdapter):
                 callback.episode_rewards.append(episode_rewards[done_index])
 
         callback.episode_reward = np.zeros_like(episode_rewards)
-        self.advance_callback(context)
         reward_window_is_full = (
             len(callback.episode_rewards) == callback.episode_rewards.maxlen
         )
@@ -257,7 +261,7 @@ class ExperimentPruningCallbackAdapter(EpisodeCallbackAdapter):
 class ResetInfoCallbackAdapter(EpisodeCallbackAdapter):
     """Log initial and post-terminal reset information once per episode."""
 
-    def process_episode(self, context: OnPolicyEpisodeCallbackContext) -> bool:
+    def process_episode(self, context: EpisodeCallbackContext) -> bool:
         callback = self.callback
         batch = context.batch
         initial_reset_infos = get_episode_reset_infos(batch, 0)
@@ -281,7 +285,6 @@ class ResetInfoCallbackAdapter(EpisodeCallbackAdapter):
                 terminal_reset_infos[done_index],
             )
 
-        self.advance_callback(context)
         return True
 
     @staticmethod
@@ -304,29 +307,37 @@ class ResetInfoCallbackAdapter(EpisodeCallbackAdapter):
 class TerminalStepCallbackAdapter(EpisodeCallbackAdapter):
     """Invoke a terminal-only callback once with the completed episode's last row."""
 
-    def process_episode(self, context: OnPolicyEpisodeCallbackContext) -> bool:
+    def process_episode(self, context: EpisodeCallbackContext) -> bool:
         callback = self.callback
         batch = context.batch
         terminal_index = batch.transition_count - 1
         callback.update_locals(
             {
                 "new_obs": slice_episode_field(batch, "new_obs", terminal_index),
-                "actions": slice_episode_field(batch, "actions", terminal_index),
+                "actions": slice_episode_field(
+                    batch,
+                    resolve_episode_action_field(batch.episode_kind),
+                    terminal_index,
+                ),
                 "rewards": slice_episode_field(batch, "rewards", terminal_index),
                 "dones": slice_episode_field(batch, "dones", terminal_index),
                 "infos": get_episode_infos(batch, terminal_index),
                 "reset_infos": get_episode_reset_infos(batch, terminal_index),
             }
         )
-        callback.n_calls += batch.transition_count - 1
         callback.num_timesteps = context.end_timestep
-        return callback.on_step()
+        return callback._on_step()
 
 
 class CallbackBatchDispatcher:
     """Route known callbacks by episode and preserve per-step compatibility."""
 
-    def __init__(self, callback: BaseCallback) -> None:
+    def __init__(
+        self,
+        callback: BaseCallback,
+        episode_kind: EpisodeKind = EpisodeKind.ON_POLICY,
+    ) -> None:
+        self.episode_kind = episode_kind
         self.callback_lists: List[CallbackList] = []
         self.episode_adapters: List[EpisodeCallbackAdapter] = []
         self.step_callbacks: List[BaseCallback] = []
@@ -337,11 +348,15 @@ class CallbackBatchDispatcher:
         return bool(self.step_callbacks)
 
     def process_step(self, callback_locals: dict) -> bool:
-        """Dispatch one transition only to callbacks without an episode adapter."""
+        """Advance one transition and invoke callbacks without an episode adapter."""
         num_timesteps = callback_locals["self"].num_timesteps
         for callback_list in self.callback_lists:
             callback_list.n_calls += 1
             callback_list.num_timesteps = num_timesteps
+
+        if self.episode_kind is EpisodeKind.OFF_POLICY:
+            for adapter in self.episode_adapters:
+                adapter.advance_callback(1, num_timesteps)
 
         continue_training = True
         for callback in self.step_callbacks:
@@ -349,12 +364,18 @@ class CallbackBatchDispatcher:
             continue_training = callback.on_step() and continue_training
         return continue_training
 
-    def process_episode(self, context: OnPolicyEpisodeCallbackContext) -> bool:
+    def process_episode(self, context: EpisodeCallbackContext) -> bool:
         """Dispatch one complete episode to every installed callback adapter."""
-        if not self.needs_step_callbacks:
-            for callback_list in self.callback_lists:
-                callback_list.n_calls += context.batch.transition_count
-                callback_list.num_timesteps = context.end_timestep
+        if self.episode_kind is EpisodeKind.ON_POLICY:
+            if not self.needs_step_callbacks:
+                for callback_list in self.callback_lists:
+                    callback_list.n_calls += context.batch.transition_count
+                    callback_list.num_timesteps = context.end_timestep
+            for adapter in self.episode_adapters:
+                adapter.advance_callback(
+                    context.batch.transition_count,
+                    context.end_timestep,
+                )
 
         continue_training = True
         for adapter in self.episode_adapters:
@@ -374,8 +395,8 @@ class CallbackBatchDispatcher:
         else:
             self.episode_adapters.append(adapter)
 
-    @staticmethod
     def _create_episode_adapter(
+        self,
         callback: BaseCallback,
     ) -> EpisodeCallbackAdapter | None:
         callback_name = type(callback).__name__
@@ -390,9 +411,13 @@ class CallbackBatchDispatcher:
             ),
         ):
             return LoggingCallbackAdapter(callback)
-        if callback_name == "SavingCallback" and _has_attributes(
-            callback,
-            ("agent", "checkpoint_frequency", "connector", "next_upload"),
+        if (
+            self.episode_kind is EpisodeKind.ON_POLICY
+            and callback_name == "SavingCallback"
+            and _has_attributes(
+                callback,
+                ("agent", "checkpoint_frequency", "connector", "next_upload"),
+            )
         ):
             return SavingCallbackAdapter(callback)
         if callback_name == "ExperimentPruningCallback" and _has_attributes(
@@ -417,6 +442,15 @@ class CallbackBatchDispatcher:
         ):
             return TerminalStepCallbackAdapter(callback)
         return None
+
+
+def resolve_episode_action_field(episode_kind: EpisodeKind) -> str:
+    """Return the packed action field consumed by framework logging."""
+    if episode_kind is EpisodeKind.ON_POLICY:
+        return "actions"
+    if episode_kind is EpisodeKind.OFF_POLICY:
+        return "buffer_actions"
+    raise ValueError(f"Unsupported episode kind: {episode_kind!r}")
 
 
 def _has_attributes(

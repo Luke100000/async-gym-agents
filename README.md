@@ -2,9 +2,9 @@
 
 Drop-in asynchronous data collection for Stable Baselines 3 agents.
 
-Framework logging, saving, pruning, reset-info, and utilization callbacks are
-processed from complete episode batches. Unrecognized Stable Baselines callbacks
-keep their normal `on_step()` behavior for compatibility.
+Known framework callbacks are processed from complete episode batches when their
+timing permits. Off-policy checkpointing and unrecognized Stable Baselines
+callbacks retain their normal per-step behavior.
 
 ## Usage
 

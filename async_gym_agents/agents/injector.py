@@ -19,6 +19,7 @@ from stable_baselines3.common.base_class import BasePolicy
 
 from async_gym_agents import constants
 from async_gym_agents.data_classes import (
+    EpisodeBatch,
     EpisodePacket,
     EpisodeSendResult,
     SharedPolicyDescriptor,
@@ -107,6 +108,7 @@ class AsyncAgentInjector:
         self._episode_transport: EpisodeTransport | None = None
         self._policy_store: Optional[SharedPolicyStore] = None
         self._transitions: Deque[Transition] = deque()
+        self._active_transition_batch: EpisodeBatch | None = None
 
         self._manager: Optional[multiprocessing.Manager] = None
         self._state: GenericState | None = None
@@ -362,6 +364,7 @@ class AsyncAgentInjector:
             "_episode_transport",
             "_policy_store",
             "_transitions",
+            "_active_transition_batch",
             "_manager",
             "_state",
             "_state_lock",
@@ -379,7 +382,10 @@ class AsyncAgentInjector:
             "_final_policy_report",
         ]
 
-    def _fetch_transitions(self, buffer_was_empty: bool) -> List[Transition]:
+    def _fetch_transitions(
+        self,
+        buffer_was_empty: bool,
+    ) -> tuple[List[Transition], EpisodeBatch]:
         phase = "waiting" if buffer_was_empty else "transport"
         with self._profiler_main.track(phase):
             packet: EpisodePacket = self._episode_transport.receive()
@@ -395,7 +401,7 @@ class AsyncAgentInjector:
             time.perf_counter_ns() - reconstruction_start_ns,
             count=packet.transition_count,
         )
-        return transitions
+        return transitions, episode_batch
 
     def _record_policy_lag(
         self,
@@ -415,6 +421,13 @@ class AsyncAgentInjector:
         Each episode is returned as a sequence of transitions, in order, complete,
         and not interleaved with episodes from other workers.
         """
+        transition, _ = self.fetch_transition_with_episode()
+        return transition
+
+    def fetch_transition_with_episode(
+        self,
+    ) -> tuple[Transition, EpisodeBatch | None]:
+        """Return one transition and its batch after consuming the episode's last row."""
         while len(self._transitions) == 0:
             transport_stats = self._episode_transport.get_stats()
             self._buffer_utilization += transport_stats.pending_episodes
@@ -422,9 +435,17 @@ class AsyncAgentInjector:
             self._buffer_emptiness += 1 if buffer_was_empty else 0
             self._buffer_stat_count += 1
 
-            self._transitions.extend(self._fetch_transitions(buffer_was_empty))
+            transitions, episode_batch = self._fetch_transitions(buffer_was_empty)
+            self._transitions.extend(transitions)
+            self._active_transition_batch = episode_batch
 
-        return self._transitions.popleft()
+        transition = self._transitions.popleft()
+        if self._transitions:
+            return transition, None
+
+        completed_episode = self._active_transition_batch
+        self._active_transition_batch = None
+        return transition, completed_episode
 
     def shutdown(self):
         if self._stop is None:
@@ -456,6 +477,8 @@ class AsyncAgentInjector:
             self._final_transport_report = self._build_transport_report()
             self._episode_transport.shutdown()
             self._episode_transport = None
+        self._transitions.clear()
+        self._active_transition_batch = None
         if self._policy_store is not None:
             self._final_policy_report = self._build_policy_report()
             self._policy_store.close()

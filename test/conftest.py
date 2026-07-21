@@ -87,6 +87,12 @@ class SavingCallback(BaseCallback):
 
     def _on_step(self) -> bool:
         self.step_call_count += 1
+        if self.num_timesteps > self.next_upload:
+            self.connector.upload(
+                agent=self.agent,
+                checkpoint_id=self.num_timesteps,
+            )
+            self.next_upload = self.num_timesteps + self.checkpoint_frequency
         return True
 
 
@@ -314,6 +320,14 @@ def short_cartpole_multi_env():
 
 
 @pytest.fixture
+def short_pendulum_multi_env():
+    """Create continuous-control workers with two-transition episodes."""
+    return IndexableMultiEnv(
+        [partial(gym.make, "Pendulum-v1", max_episode_steps=2) for _ in range(2)]
+    )
+
+
+@pytest.fixture
 def short_episode_on_policy_agent(short_cartpole_multi_env):
     """Create an on-policy agent whose workers complete two-transition episodes."""
     agent = get_injected_agent(PPO)(
@@ -323,6 +337,23 @@ def short_episode_on_policy_agent(short_cartpole_multi_env):
         device="cpu",
         n_epochs=1,
         n_steps=3,
+    )
+    yield agent
+    agent.shutdown()
+
+
+@pytest.fixture
+def short_episode_off_policy_agent(short_pendulum_multi_env):
+    """Create an off-policy agent whose workers complete two-transition episodes."""
+    agent = get_injected_agent(SAC)(
+        "MlpPolicy",
+        short_pendulum_multi_env,
+        batch_size=2,
+        buffer_size=32,
+        device="cpu",
+        gradient_steps=1,
+        learning_starts=100,
+        train_freq=1,
     )
     yield agent
     agent.shutdown()
@@ -486,6 +517,31 @@ def off_policy_episode():
             reset_infos=[{}],
         ),
     ]
+
+
+@pytest.fixture
+def off_policy_episode_with_metrics(off_policy_episode):
+    """Add logging metadata and metrics to a complete off-policy episode."""
+    episode = list(off_policy_episode)
+    episode[0] = replace(
+        episode[0],
+        infos=[
+            {
+                "meta_settings": {"map": "test"},
+                "step_metric_speed": 2.0,
+            }
+        ],
+    )
+    episode[1] = replace(
+        episode[1],
+        infos=[
+            {
+                "episode_end_reason": "TIMEOUT",
+                "step_metric_speed": 4.0,
+            }
+        ],
+    )
+    return episode
 
 
 @pytest.fixture

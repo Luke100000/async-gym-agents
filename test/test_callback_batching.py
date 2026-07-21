@@ -3,7 +3,8 @@ from unittest.mock import call
 import numpy as np
 
 from async_gym_agents.callback_batching import CallbackBatchDispatcher
-from async_gym_agents.data_classes import OnPolicyEpisodeCallbackContext
+from async_gym_agents.data_classes import EpisodeCallbackContext
+from async_gym_agents.enums import EpisodeKind
 from async_gym_agents.episode_codec import pack_episode
 
 
@@ -44,7 +45,7 @@ class TestBatchedLoggingCallback:
         batch = pack_episode(on_policy_episode_with_metrics)
 
         assert CallbackBatchDispatcher(callback).process_episode(
-            OnPolicyEpisodeCallbackContext(batch, 0, 2)
+            EpisodeCallbackContext(batch, 0, 2)
         )
 
         aggregator = callback.metric_aggregator
@@ -66,10 +67,10 @@ class TestBatchedLoggingCallback:
         batch = pack_episode(on_policy_episode_with_metrics)
 
         assert CallbackBatchDispatcher(external_logging_callback).process_episode(
-            OnPolicyEpisodeCallbackContext(batch, 0, 2)
+            EpisodeCallbackContext(batch, 0, 2)
         )
         assert CallbackBatchDispatcher(external_logging_callback).process_episode(
-            OnPolicyEpisodeCallbackContext(batch, 2, 4)
+            EpisodeCallbackContext(batch, 2, 4)
         )
 
         external_logging_callback.connector.log_dict.assert_called_once_with(
@@ -88,10 +89,10 @@ class TestBatchedLoggingCallback:
         changed_batch = pack_episode(on_policy_episode_with_changed_metadata)
 
         assert CallbackBatchDispatcher(external_logging_callback).process_episode(
-            OnPolicyEpisodeCallbackContext(initial_batch, 0, 2)
+            EpisodeCallbackContext(initial_batch, 0, 2)
         )
         assert CallbackBatchDispatcher(external_logging_callback).process_episode(
-            OnPolicyEpisodeCallbackContext(changed_batch, 2, 4)
+            EpisodeCallbackContext(changed_batch, 2, 4)
         )
 
         assert external_logging_callback.connector.log_dict.call_args_list == [
@@ -154,8 +155,8 @@ class TestBatchedTerminalCallbacks:
         batch = pack_episode(on_policy_episode)
         dispatcher = CallbackBatchDispatcher(external_reset_info_callback)
 
-        assert dispatcher.process_episode(OnPolicyEpisodeCallbackContext(batch, 0, 2))
-        assert dispatcher.process_episode(OnPolicyEpisodeCallbackContext(batch, 2, 4))
+        assert dispatcher.process_episode(EpisodeCallbackContext(batch, 0, 2))
+        assert dispatcher.process_episode(EpisodeCallbackContext(batch, 2, 4))
 
         assert external_reset_info_callback.connector.log_dict.call_args_list == [
             call({"seed": 7}, "Reset Info - Agent 0 - Episode 1"),
@@ -181,6 +182,97 @@ class TestBatchedTerminalCallbacks:
         assert all(
             np.array_equal(dones, np.array([True]))
             for dones in external_utilization_callback.terminal_dones
+        )
+
+
+class TestOffPolicyCallbackBatching:
+    """Off-policy collection batches terminal work without changing step semantics."""
+
+    def test_exposes_episode_batch_only_with_its_terminal_transition(
+        self,
+        initialized_off_policy_agent,
+        off_policy_packet,
+        enqueue_episode_packet,
+    ):
+        """Incremental replay insertion retains one batch until its final row."""
+        enqueue_episode_packet(initialized_off_policy_agent, off_policy_packet)
+
+        _, first_completed_episode = (
+            initialized_off_policy_agent.fetch_transition_with_episode()
+        )
+        _, terminal_completed_episode = (
+            initialized_off_policy_agent.fetch_transition_with_episode()
+        )
+
+        assert first_completed_episode is None
+        assert terminal_completed_episode is not None
+        assert terminal_completed_episode.episode_kind is EpisodeKind.OFF_POLICY
+        assert terminal_completed_episode.transition_count == 2
+
+    def test_batches_logging_while_preserving_third_party_step_callbacks(
+        self,
+        short_episode_off_policy_agent,
+        external_logging_callback,
+        unrecognized_step_callback,
+    ):
+        """A complete episode bypasses logging `_on_step()` but not unknown callbacks."""
+        short_episode_off_policy_agent.learn(
+            total_timesteps=3,
+            callback=[external_logging_callback, unrecognized_step_callback],
+        )
+
+        assert external_logging_callback.step_call_count == 0
+        assert external_logging_callback.n_calls == 3
+        assert (
+            external_logging_callback.metric_aggregator.aggregate_step.call_count == 0
+        )
+        assert (
+            external_logging_callback.metric_aggregator.log_aggregated_metrics.call_count
+            == 1
+        )
+        assert unrecognized_step_callback.step_call_count == 3
+        assert unrecognized_step_callback.n_calls == 3
+
+    def test_aggregates_off_policy_metrics_and_buffer_actions(
+        self,
+        external_logging_callback,
+        off_policy_episode_with_metrics,
+    ):
+        """Packed off-policy fields produce the same logger aggregates as step input."""
+        callback = external_logging_callback
+        callback.logging_frequency = 2
+        callback.log_distributions = True
+        callback.metric_aggregator.aggregate_distributions = True
+        batch = pack_episode(off_policy_episode_with_metrics)
+        dispatcher = CallbackBatchDispatcher(callback, EpisodeKind.OFF_POLICY)
+
+        assert dispatcher.process_episode(EpisodeCallbackContext(batch, 0, 2))
+
+        aggregator = callback.metric_aggregator
+        assert aggregator.episode_rewards[0] == [3.0]
+        assert aggregator.episode_step_metrics["speed"][0] == [2.0, 4.0]
+        assert list(aggregator.episode_end_reasons[0]) == ["TIMEOUT"]
+        np.testing.assert_allclose(
+            np.concatenate(aggregator.episode_actions[0]),
+            np.array([0.1, 0.2], dtype=np.float32),
+        )
+
+    def test_preserves_checkpoint_checks_per_transition(
+        self,
+        short_episode_off_policy_agent,
+        external_saving_callback,
+    ):
+        """A changing off-policy model keeps the original checkpoint step boundary."""
+        short_episode_off_policy_agent.learn(
+            total_timesteps=3,
+            callback=external_saving_callback,
+        )
+
+        assert external_saving_callback.step_call_count == 3
+        assert external_saving_callback.n_calls == 3
+        external_saving_callback.connector.upload.assert_called_once_with(
+            agent=external_saving_callback.agent,
+            checkpoint_id=3,
         )
 
 

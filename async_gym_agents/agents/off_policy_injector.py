@@ -14,7 +14,12 @@ from stable_baselines3.common.vec_env import VecEnv
 from stable_baselines3.common.vec_env.base_vec_env import VecEnvObs
 
 from async_gym_agents.agents.injector import AsyncAgentInjector, InjectorWorkerBase
-from async_gym_agents.data_classes import OffPolicyTransition as Transition
+from async_gym_agents.callback_batching import CallbackBatchDispatcher
+from async_gym_agents.data_classes import (
+    EpisodeCallbackContext,
+    OffPolicyTransition,
+)
+from async_gym_agents.enums import EpisodeKind
 from async_gym_agents.utils import copy_obs, single_slice
 
 
@@ -146,6 +151,10 @@ class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithm):
             self.actor.reset_noise(1)
 
         callback.on_rollout_start()
+        callback_dispatcher = CallbackBatchDispatcher(
+            callback,
+            EpisodeKind.OFF_POLICY,
+        )
         continue_training = True
         while should_collect_more_steps(
             train_freq, num_collected_steps, num_collected_episodes
@@ -159,7 +168,7 @@ class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithm):
                 self.actor.reset_noise(1)
 
             # Fetch transition (Also the only significant change to super)
-            transition: Transition = self.fetch_transition()
+            transition, completed_episode = self.fetch_transition_with_episode()
 
             with self._profiler_main.track("processing"):
                 # Make locals available for callbacks
@@ -175,16 +184,28 @@ class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithm):
                 self.num_timesteps += 1
                 num_collected_steps += 1
 
-                # Give access to local variables
-                callback.update_locals(locals())
-
                 # Only stop training if the return value is False, not when it is None.
-                if not callback.on_step():
+                if not callback_dispatcher.process_step(locals()):
                     return RolloutReturn(
                         num_collected_steps,
                         num_collected_episodes,
                         continue_training=False,
                     )
+
+                if completed_episode is not None:
+                    callback_context = EpisodeCallbackContext(
+                        batch=completed_episode,
+                        start_timestep=(
+                            self.num_timesteps - completed_episode.transition_count
+                        ),
+                        end_timestep=self.num_timesteps,
+                    )
+                    if not callback_dispatcher.process_episode(callback_context):
+                        return RolloutReturn(
+                            num_collected_steps,
+                            num_collected_episodes,
+                            continue_training=False,
+                        )
 
                 # Retrieve reward and episode length if using Monitor wrapper
                 self._update_info_buffer(infos, dones)
@@ -308,7 +329,7 @@ class InjectorWorker(InjectorWorkerBase):
             action = buffer_action
         return action, buffer_action
 
-    def generate(self) -> Generator[list[Transition], None, None]:
+    def generate(self) -> Generator[list[OffPolicyTransition], None, None]:
         """
         Continuously plays the game and returns episodes of Transitions
         """
@@ -337,7 +358,7 @@ class InjectorWorker(InjectorWorkerBase):
                     if idx not in episodes:
                         episodes[idx] = []
                     episodes[idx].append(
-                        Transition(
+                        OffPolicyTransition(
                             single_slice(buffer_actions, idx),
                             copy_obs(single_slice(last_obs, idx)),
                             copy_obs(single_slice(new_obs, idx)),

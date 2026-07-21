@@ -14,9 +14,10 @@ from stable_baselines3.common.vec_env import VecEnv
 from async_gym_agents.agents.injector import AsyncAgentInjector, InjectorWorkerBase
 from async_gym_agents.callback_batching import CallbackBatchDispatcher
 from async_gym_agents.data_classes import (
-    OnPolicyEpisodeCallbackContext,
+    EpisodeCallbackContext,
     OnPolicyTransition,
 )
+from async_gym_agents.enums import EpisodeKind
 from async_gym_agents.episode_codec import (
     get_episode_infos,
     get_episode_reset_infos,
@@ -124,7 +125,10 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
             self.policy.reset_noise(1)
 
         callback.on_rollout_start()
-        callback_dispatcher = CallbackBatchDispatcher(callback)
+        callback_dispatcher = CallbackBatchDispatcher(
+            callback,
+            EpisodeKind.ON_POLICY,
+        )
 
         new_obs = None
         dones = None
@@ -232,7 +236,7 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
                     n_steps += batch.transition_count
                     buffer_index += batch.transition_count
 
-                callback_context = OnPolicyEpisodeCallbackContext(
+                callback_context = EpisodeCallbackContext(
                     batch=batch,
                     start_timestep=episode_start_timestep,
                     end_timestep=self.num_timesteps,
