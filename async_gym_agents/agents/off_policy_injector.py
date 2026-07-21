@@ -1,4 +1,5 @@
-from typing import Any, Dict, Generator, List, Optional, Tuple, Type
+from collections import deque
+from typing import Any, Deque, Dict, Generator, List, Optional, Tuple, Type
 
 import gymnasium as gym
 import numpy as np
@@ -15,6 +16,9 @@ from stable_baselines3.common.vec_env.base_vec_env import VecEnvObs
 
 from async_gym_agents.agents.injector import AsyncAgentInjector, InjectorWorkerBase
 from async_gym_agents.data_classes import OffPolicyTransition as Transition
+from async_gym_agents.off_policy_episode_assembler import (
+    AsyncOffPolicyEpisodeAssembler,
+)
 from async_gym_agents.utils import copy_obs, single_slice
 
 
@@ -43,6 +47,7 @@ class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithm):
             mp_threads=mp_threads,
         )
         super(AsyncAgentInjector, self).__init__(*args, **kwargs)
+        self._active_transitions: Deque[Transition] = deque()
 
     def _store_transition(*args):
         raise NotImplementedError()
@@ -133,6 +138,7 @@ class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithm):
         self.policy.set_training_mode(False)
 
         self.pre_collect_preparation(self.policy)
+        self._initialize_episode_assembler()
 
         num_collected_steps, num_collected_episodes = 0, 0
 
@@ -233,6 +239,42 @@ class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithm):
             num_collected_episodes,
             continue_training,
         )
+
+    def fetch_transition(self) -> Transition:
+        """Return the next ordered row from a background-prepared episode."""
+        if not self._active_transitions:
+            self._initialize_episode_assembler()
+            try:
+                with self._profiler_main.track("assembler_acquire"):
+                    prepared_episode = self._episode_assembler.acquire()
+            except RuntimeError:
+                self.raise_for_failed_workers()
+                raise
+            self._record_policy_lag(
+                prepared_episode.episode.policy_version,
+                prepared_episode.episode.batch.transition_count,
+            )
+            self._active_transitions.extend(prepared_episode.transitions)
+
+        return self._active_transitions.popleft()
+
+    def _initialize_episode_assembler(self) -> None:
+        if self._episode_assembler is not None:
+            return
+        if self._episode_transport is None:
+            raise RuntimeError("Episode transport must be initialized before assembly")
+        self._episode_assembler = AsyncOffPolicyEpisodeAssembler(
+            transport=self._episode_transport,
+            profiler=self._profiler_main,
+        )
+        self._episode_assembler.start()
+
+    def _excluded_save_params(self):
+        return super()._excluded_save_params() + ["_active_transitions"]
+
+    def shutdown(self):
+        self._active_transitions.clear()
+        return super().shutdown()
 
     def get_worker_class(self) -> Type[InjectorWorkerBase]:
         return InjectorWorker

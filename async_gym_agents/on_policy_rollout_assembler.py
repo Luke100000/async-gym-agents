@@ -1,25 +1,21 @@
 import copy
-import queue
-import threading
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 import torch
 from stable_baselines3.common.buffers import RolloutBuffer
 
-from async_gym_agents import constants
 from async_gym_agents.data_classes import (
     AssembledEpisode,
-    EpisodeAssemblerStats,
     PreparedOnPolicyRollout,
 )
 from async_gym_agents.enums import EpisodeKind
-from async_gym_agents.episode_codec import decode_episode_packet
+from async_gym_agents.episode_assembler import AsyncEpisodeAssembler
 from async_gym_agents.episode_transport import EpisodeTransport
 from async_gym_agents.profiler import RuntimeProfiler
 
 
-class AsyncOnPolicyRolloutAssembler:
+class AsyncOnPolicyRolloutAssembler(AsyncEpisodeAssembler[PreparedOnPolicyRollout]):
     """Build the inactive on-policy rollout buffer while the active buffer trains."""
 
     def __init__(
@@ -29,155 +25,22 @@ class AsyncOnPolicyRolloutAssembler:
         profiler: RuntimeProfiler,
         rollout_buffer_template: RolloutBuffer,
     ) -> None:
-        if target_transition_count <= 0:
-            raise ValueError("Episode assembly target must be positive")
-
-        self._transport = transport
-        self._target_transition_count = target_transition_count
-        self._profiler = profiler
-        self._rollout_buffer_template = copy.copy(rollout_buffer_template)
-        self._fill_requested = threading.Event()
-        self._ready = threading.Event()
-        self._stop = threading.Event()
-        self._state_lock = threading.Lock()
-        self._thread: Optional[threading.Thread] = None
-        self._prepared_rollout: Optional[PreparedOnPolicyRollout] = None
-        self._error: Optional[BaseException] = None
-        self._filled_transition_count = 0
-        self._completed_assemblies = 0
-        self._last_transition_count = 0
-        self._max_transition_count = 0
-        self._last_payload_bytes = 0
-        self._max_payload_bytes = 0
-
-    def start(self) -> None:
-        """Start preparing the first trainer-ready rollout buffer."""
-        if self._thread is not None:
-            return
-        self._thread = threading.Thread(
-            target=self._run,
-            name="on-policy-rollout-assembler",
-            daemon=True,
+        super().__init__(
+            transport=transport,
+            episode_kind=EpisodeKind.ON_POLICY,
+            target_transition_count=target_transition_count,
+            profiler=profiler,
+            thread_name="on-policy-rollout-assembler",
         )
-        self._fill_requested.set()
-        self._thread.start()
+        self._rollout_buffer_template = copy.copy(rollout_buffer_template)
 
-    def acquire(self, timeout: Optional[float] = None) -> PreparedOnPolicyRollout:
-        """Swap in the prepared buffer and immediately start its replacement."""
-        if self._thread is None:
-            raise RuntimeError("Rollout assembler has not been started")
-        if not self._ready.wait(timeout):
-            raise TimeoutError("Timed out waiting for a prepared rollout buffer")
-
-        with self._state_lock:
-            if self._error is not None:
-                raise RuntimeError("Rollout assembler failed") from self._error
-            if self._prepared_rollout is None:
-                raise RuntimeError(
-                    "Rollout assembler stopped before preparing a buffer"
-                )
-            prepared_rollout = self._prepared_rollout
-            self._prepared_rollout = None
-            self._filled_transition_count = 0
-            self._ready.clear()
-
-        self._fill_requested.set()
-        return prepared_rollout
-
-    def shutdown(self) -> None:
-        """Stop background preparation and unblock all waits."""
-        self._stop.set()
-        self._fill_requested.set()
-        self._ready.set()
-        if self._thread is not None and self._thread.is_alive():
-            self._thread.join()
-
-    @property
-    def filled_transition_count(self) -> int:
-        """Return how many transitions currently occupy buffer B."""
-        with self._state_lock:
-            return self._filled_transition_count
-
-    def get_stats(self) -> EpisodeAssemblerStats:
-        """Return current fill progress and completed buffer peaks."""
-        with self._state_lock:
-            return EpisodeAssemblerStats(
-                target_transition_count=self._target_transition_count,
-                filling_transition_count=self._filled_transition_count,
-                completed_assemblies=self._completed_assemblies,
-                last_transition_count=self._last_transition_count,
-                max_transition_count=self._max_transition_count,
-                last_payload_bytes=self._last_payload_bytes,
-                max_payload_bytes=self._max_payload_bytes,
-            )
-
-    def _run(self) -> None:
-        try:
-            while not self._stop.is_set():
-                self._fill_requested.wait()
-                self._fill_requested.clear()
-                if self._stop.is_set():
-                    return
-                prepared_rollout = self._prepare_rollout()
-                if prepared_rollout is None:
-                    return
-                with self._state_lock:
-                    self._prepared_rollout = prepared_rollout
-                self._ready.set()
-        except BaseException as error:
-            with self._state_lock:
-                self._error = error
-            self._ready.set()
-
-    def _prepare_rollout(self) -> Optional[PreparedOnPolicyRollout]:
-        episodes = []
-        transition_count = 0
-        payload_bytes = 0
-        while (
-            transition_count < self._target_transition_count and not self._stop.is_set()
-        ):
-            transport_stats = self._transport.get_stats()
-            phase = (
-                "assembler_waiting"
-                if transport_stats.pending_episodes == 0
-                else "assembler_transport"
-            )
-            try:
-                with self._profiler.track(phase):
-                    packet = self._transport.receive(
-                        constants.ASSEMBLER_RECEIVE_TIMEOUT_SECONDS
-                    )
-            except queue.Empty:
-                continue
-
-            if packet.episode_kind is not EpisodeKind.ON_POLICY:
-                raise ValueError("Assembler received a non-on-policy episode")
-            with self._profiler.track("episode_deserialization"):
-                batch = decode_episode_packet(packet)
-            episodes.append(AssembledEpisode(packet=packet, batch=batch))
-            transition_count += packet.transition_count
-            payload_bytes += len(packet.payload)
-            with self._state_lock:
-                self._filled_transition_count = transition_count
-
-        if self._stop.is_set():
-            return None
-
+    def _build_assembly(
+        self,
+        episodes: list[AssembledEpisode],
+        transition_count: int,
+    ) -> PreparedOnPolicyRollout:
         with self._profiler.track("rollout_buffer_building"):
             rollout_buffer = self._build_rollout_buffer(episodes, transition_count)
-
-        with self._state_lock:
-            self._completed_assemblies += 1
-            self._last_transition_count = transition_count
-            self._max_transition_count = max(
-                self._max_transition_count,
-                transition_count,
-            )
-            self._last_payload_bytes = payload_bytes
-            self._max_payload_bytes = max(
-                self._max_payload_bytes,
-                payload_bytes,
-            )
         return PreparedOnPolicyRollout(
             rollout_buffer=rollout_buffer,
             episodes=episodes,

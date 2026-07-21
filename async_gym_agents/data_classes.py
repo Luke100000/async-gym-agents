@@ -109,7 +109,8 @@ class EpisodeTransportStats:
 
 @dataclass(frozen=True)
 class AssembledEpisode:
-    packet: EpisodePacket
+    policy_version: Optional[int]
+    payload_bytes: int
     batch: EpisodeBatch
 
 
@@ -118,6 +119,12 @@ class PreparedOnPolicyRollout:
     rollout_buffer: RolloutBuffer
     episodes: List[AssembledEpisode]
     transition_count: int
+
+
+@dataclass(frozen=True)
+class PreparedOffPolicyEpisode:
+    episode: AssembledEpisode
+    transitions: List[OffPolicyTransition]
 
 
 @dataclass(frozen=True)

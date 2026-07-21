@@ -132,6 +132,14 @@ def short_cartpole_multi_env():
 
 
 @pytest.fixture
+def short_pendulum_multi_env():
+    """Create continuous-control workers with two-transition episodes."""
+    return IndexableMultiEnv(
+        [partial(gym.make, "Pendulum-v1", max_episode_steps=2) for _ in range(2)]
+    )
+
+
+@pytest.fixture
 def short_episode_on_policy_agent(short_cartpole_multi_env):
     """Create an on-policy agent whose workers complete two-transition episodes."""
     agent = get_injected_agent(PPO)(
@@ -141,6 +149,22 @@ def short_episode_on_policy_agent(short_cartpole_multi_env):
         device="cpu",
         n_epochs=1,
         n_steps=3,
+    )
+    yield agent
+    agent.shutdown()
+
+
+@pytest.fixture
+def short_episode_off_policy_agent(short_pendulum_multi_env):
+    """Create an off-policy agent that consumes one transition per rollout."""
+    agent = get_injected_agent(SAC)(
+        "MlpPolicy",
+        short_pendulum_multi_env,
+        batch_size=2,
+        buffer_size=16,
+        device="cpu",
+        learning_starts=100,
+        train_freq=1,
     )
     yield agent
     agent.shutdown()
