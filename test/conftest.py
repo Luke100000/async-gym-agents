@@ -344,7 +344,7 @@ def short_episode_on_policy_agent(short_cartpole_multi_env):
 
 @pytest.fixture
 def short_episode_off_policy_agent(short_pendulum_multi_env):
-    """Create an off-policy agent whose workers complete two-transition episodes."""
+    """Create an agent that consumes one row per rollout from two-step episodes."""
     agent = get_injected_agent(SAC)(
         "MlpPolicy",
         short_pendulum_multi_env,

@@ -6,31 +6,24 @@ import os
 import signal
 import threading
 import time
-from collections import deque
 from contextlib import contextmanager
 from multiprocessing.context import Process as MPProcess
 from multiprocessing.managers import Namespace
 from multiprocessing.synchronize import Event as MPEvent
 from types import SimpleNamespace
-from typing import Any, Deque, Dict, Generator, List, Optional, Type, TypeAlias, cast
+from typing import Any, Dict, Generator, List, Optional, Type, TypeAlias, cast
 
 import torch
 from stable_baselines3.common.base_class import BasePolicy
 
 from async_gym_agents import constants
 from async_gym_agents.data_classes import (
-    EpisodeBatch,
-    EpisodePacket,
     EpisodeSendResult,
     SharedPolicyDescriptor,
 )
 from async_gym_agents.envs.multi_env import IndexableMultiEnv
-from async_gym_agents.episode_codec import (
-    decode_episode_packet,
-    encode_episode_batch,
-    pack_episode,
-    unpack_episode,
-)
+from async_gym_agents.episode_assembler import AsyncEpisodeAssembler
+from async_gym_agents.episode_codec import encode_episode_batch, pack_episode
 from async_gym_agents.episode_transport import (
     EpisodeFeeder,
     EpisodeSender,
@@ -107,8 +100,7 @@ class AsyncAgentInjector:
 
         self._episode_transport: EpisodeTransport | None = None
         self._policy_store: Optional[SharedPolicyStore] = None
-        self._transitions: Deque[Transition] = deque()
-        self._active_transition_batch: EpisodeBatch | None = None
+        self._episode_assembler: Optional[AsyncEpisodeAssembler[Any]] = None
 
         self._manager: Optional[multiprocessing.Manager] = None
         self._state: GenericState | None = None
@@ -128,6 +120,7 @@ class AsyncAgentInjector:
         self._policy_lag_count = 0
         self._policy_lag_max = 0
         self._final_transport_report = {}
+        self._final_assembly_report = {}
         self._final_policy_report = {}
 
         self._profiler_main = RuntimeProfiler()
@@ -363,8 +356,7 @@ class AsyncAgentInjector:
             "_envs",
             "_episode_transport",
             "_policy_store",
-            "_transitions",
-            "_active_transition_batch",
+            "_episode_assembler",
             "_manager",
             "_state",
             "_state_lock",
@@ -379,29 +371,9 @@ class AsyncAgentInjector:
             "_policy_lag_count",
             "_policy_lag_max",
             "_final_transport_report",
+            "_final_assembly_report",
             "_final_policy_report",
         ]
-
-    def _fetch_transitions(
-        self,
-        buffer_was_empty: bool,
-    ) -> tuple[List[Transition], EpisodeBatch]:
-        phase = "waiting" if buffer_was_empty else "transport"
-        with self._profiler_main.track(phase):
-            packet: EpisodePacket = self._episode_transport.receive()
-
-        self._record_policy_lag(packet.policy_version, packet.transition_count)
-        with self._profiler_main.track("episode_deserialization"):
-            episode_batch = decode_episode_packet(packet)
-
-        reconstruction_start_ns = time.perf_counter_ns()
-        transitions = unpack_episode(episode_batch)
-        self._profiler_main.record(
-            "transition_reconstruction",
-            time.perf_counter_ns() - reconstruction_start_ns,
-            count=packet.transition_count,
-        )
-        return transitions, episode_batch
 
     def _record_policy_lag(
         self,
@@ -416,38 +388,12 @@ class AsyncAgentInjector:
         self._policy_lag_count += transition_count
         self._policy_lag_max = max(self._policy_lag_max, lag)
 
-    def fetch_transition(self) -> Transition:
-        """
-        Each episode is returned as a sequence of transitions, in order, complete,
-        and not interleaved with episodes from other workers.
-        """
-        transition, _ = self.fetch_transition_with_episode()
-        return transition
-
-    def fetch_transition_with_episode(
-        self,
-    ) -> tuple[Transition, EpisodeBatch | None]:
-        """Return one transition and its batch after consuming the episode's last row."""
-        while len(self._transitions) == 0:
-            transport_stats = self._episode_transport.get_stats()
-            self._buffer_utilization += transport_stats.pending_episodes
-            buffer_was_empty = transport_stats.pending_episodes == 0
-            self._buffer_emptiness += 1 if buffer_was_empty else 0
-            self._buffer_stat_count += 1
-
-            transitions, episode_batch = self._fetch_transitions(buffer_was_empty)
-            self._transitions.extend(transitions)
-            self._active_transition_batch = episode_batch
-
-        transition = self._transitions.popleft()
-        if self._transitions:
-            return transition, None
-
-        completed_episode = self._active_transition_batch
-        self._active_transition_batch = None
-        return transition, completed_episode
-
     def shutdown(self):
+        if self._episode_assembler is not None:
+            self._final_assembly_report = self._build_assembly_report()
+            self._episode_assembler.shutdown()
+            self._episode_assembler = None
+
         if self._stop is None:
             return
 
@@ -477,8 +423,6 @@ class AsyncAgentInjector:
             self._final_transport_report = self._build_transport_report()
             self._episode_transport.shutdown()
             self._episode_transport = None
-        self._transitions.clear()
-        self._active_transition_batch = None
         if self._policy_store is not None:
             self._final_policy_report = self._build_policy_report()
             self._policy_store.close()
@@ -551,7 +495,19 @@ class AsyncAgentInjector:
         }
 
     def _build_assembly_report(self) -> Dict[str, float | int]:
-        return {}
+        if self._episode_assembler is None:
+            return dict(self._final_assembly_report)
+
+        stats = self._episode_assembler.get_stats()
+        return {
+            "target_transitions": stats.target_transition_count,
+            "filling_transitions": stats.filling_transition_count,
+            "completed_assemblies": stats.completed_assemblies,
+            "last_transitions": stats.last_transition_count,
+            "max_transitions": stats.max_transition_count,
+            "last_payload_bytes": stats.last_payload_bytes,
+            "max_payload_bytes": stats.max_payload_bytes,
+        }
 
     def _build_policy_report(self) -> Dict[str, int]:
         if self._policy_store is None:

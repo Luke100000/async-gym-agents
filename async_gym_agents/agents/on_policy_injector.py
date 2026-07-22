@@ -77,8 +77,6 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
             mp_threads=mp_threads,
         )
         super(AsyncAgentInjector, self).__init__(*args, **kwargs)
-        self._rollout_assembler = None
-        self._final_assembly_report = {}
 
     # This implementation mirrors SB3's rollout lifecycle and must track upgrades.
     def collect_rollouts(
@@ -108,7 +106,7 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
         self._initialize_rollout_assembler(n_rollout_steps)
         try:
             with self._profiler_main.track("assembler_acquire"):
-                prepared_rollout = self._rollout_assembler.acquire()
+                prepared_rollout = self._episode_assembler.acquire()
         except RuntimeError:
             self.raise_for_failed_workers()
             raise
@@ -116,8 +114,8 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
         rollout_buffer = prepared_rollout.rollout_buffer
         for assembled_episode in prepared_rollout.episodes:
             self._record_policy_lag(
-                assembled_episode.packet.policy_version,
-                assembled_episode.packet.transition_count,
+                assembled_episode.policy_version,
+                assembled_episode.batch.transition_count,
             )
 
         n_steps = 0
@@ -251,43 +249,15 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
         return True
 
     def _initialize_rollout_assembler(self, target_transition_count: int) -> None:
-        if self._rollout_assembler is not None:
+        if self._episode_assembler is not None:
             return
-        self._rollout_assembler = AsyncOnPolicyRolloutAssembler(
+        self._episode_assembler = AsyncOnPolicyRolloutAssembler(
             transport=self._episode_transport,
             target_transition_count=target_transition_count,
             profiler=self._profiler_main,
             rollout_buffer_template=self.rollout_buffer,
         )
-        self._rollout_assembler.start()
-
-    def _excluded_save_params(self):
-        return super()._excluded_save_params() + [
-            "_rollout_assembler",
-            "_final_assembly_report",
-        ]
-
-    def _build_assembly_report(self):
-        if self._rollout_assembler is None:
-            return dict(self._final_assembly_report)
-
-        stats = self._rollout_assembler.get_stats()
-        return {
-            "target_transitions": stats.target_transition_count,
-            "filling_transitions": stats.filling_transition_count,
-            "completed_buffers": stats.completed_assemblies,
-            "last_transitions": stats.last_transition_count,
-            "max_transitions": stats.max_transition_count,
-            "last_payload_bytes": stats.last_payload_bytes,
-            "max_payload_bytes": stats.max_payload_bytes,
-        }
-
-    def shutdown(self):
-        if self._rollout_assembler is not None:
-            self._final_assembly_report = self._build_assembly_report()
-            self._rollout_assembler.shutdown()
-            self._rollout_assembler = None
-        return super().shutdown()
+        self._episode_assembler.start()
 
     def get_worker_class(self) -> Type[InjectorWorkerBase]:
         return InjectorWorker

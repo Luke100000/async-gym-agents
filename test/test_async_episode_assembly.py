@@ -7,6 +7,9 @@ from async_gym_agents.agents.on_policy_injector import (
     bootstrap_truncated_rewards,
 )
 from async_gym_agents.episode_transport import EpisodeTransport
+from async_gym_agents.off_policy_episode_assembler import (
+    AsyncOffPolicyEpisodeAssembler,
+)
 from async_gym_agents.on_policy_rollout_assembler import (
     AsyncOnPolicyRolloutAssembler,
 )
@@ -92,7 +95,7 @@ class TestAsyncOnPolicyRolloutAssembler:
         assembly = assembler.acquire(ASSEMBLY_TEST_TIMEOUT_SECONDS)
 
         assert assembly.transition_count == 4
-        assert [episode.packet.transition_count for episode in assembly.episodes] == [
+        assert [episode.batch.transition_count for episode in assembly.episodes] == [
             2,
             2,
         ]
@@ -179,6 +182,72 @@ class TestOnPolicyCompleteEpisodeAssembly:
         assert policy_report["published_version"] >= 1
         assert policy_report["payload_bytes"] > 0
         assert policy_report["publication_count"] == 1
+
+
+class TestOffPolicyEpisodeAssembly:
+    """Off-policy episodes are prepared before trainer-side replay insertion."""
+
+    def test_reconstructs_one_complete_episode_before_acquisition(
+        self,
+        off_policy_packet,
+    ):
+        """The trainer acquires ordered transition views from one decoded episode."""
+        transport = EpisodeTransport(
+            worker_count=1,
+            max_pending_episodes=1,
+            use_mp=False,
+        )
+        stop = threading.Event()
+        assembler = AsyncOffPolicyEpisodeAssembler(
+            transport=transport,
+            profiler=RuntimeProfiler(),
+        )
+        assembler.start()
+        assert transport.get_sender(0).send(
+            off_policy_packet,
+            stop,
+            ASSEMBLY_TEST_TIMEOUT_SECONDS,
+        )
+
+        prepared_episode = assembler.acquire(ASSEMBLY_TEST_TIMEOUT_SECONDS)
+
+        assert prepared_episode.episode.payload_bytes == len(off_policy_packet.payload)
+        assert [
+            transition.rewards.item() for transition in prepared_episode.transitions
+        ] == [1.0, 2.0]
+        assembler.shutdown()
+        transport.shutdown()
+
+    def test_reports_a_completed_background_episode(
+        self,
+        initialized_off_policy_agent,
+        off_policy_packet,
+        enqueue_episode_packet,
+    ):
+        """Fetching a row exposes assembly statistics for its complete episode."""
+        enqueue_episode_packet(initialized_off_policy_agent, off_policy_packet)
+
+        transition = initialized_off_policy_agent.fetch_transition()
+
+        assembly_report = initialized_off_policy_agent.get_profiler_report()["assembly"]
+        assert transition.rewards.tolist() == [1.0]
+        assert assembly_report["completed_assemblies"] == 1
+        assert assembly_report["last_transitions"] == 2
+        assert assembly_report["last_payload_bytes"] == len(off_policy_packet.payload)
+
+    def test_preserves_single_step_replay_insertion(
+        self,
+        short_episode_off_policy_agent,
+    ):
+        """Prefetched episodes enter replay only as train frequency consumes rows."""
+        short_episode_off_policy_agent.learn(total_timesteps=3)
+
+        assembly_report = short_episode_off_policy_agent.get_profiler_report()[
+            "assembly"
+        ]
+        assert short_episode_off_policy_agent.num_timesteps == 3
+        assert short_episode_off_policy_agent.replay_buffer.size() == 3
+        assert assembly_report["completed_assemblies"] >= 2
 
 
 class TestTruncatedRewardBootstrap:
