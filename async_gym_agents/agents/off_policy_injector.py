@@ -274,12 +274,8 @@ class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithm):
         """Return one transition and its batch after consuming the episode's last row."""
         if not self._active_transitions:
             self._initialize_episode_assembler()
-            try:
-                with self._profiler_main.track("assembler_acquire"):
-                    prepared_episode = self._episode_assembler.acquire()
-            except RuntimeError:
-                self.raise_for_failed_workers()
-                raise
+            with self._profiler_main.track("assembler_acquire"):
+                prepared_episode = self._acquire_prepared_assembly()
             self._record_policy_lag(
                 prepared_episode.episode.policy_version,
                 prepared_episode.episode.batch.transition_count,

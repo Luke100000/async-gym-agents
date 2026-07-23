@@ -115,6 +115,8 @@ class AsyncEpisodeAssembler(ABC, Generic[PreparedAssembly]):
                     self._prepared_assembly = prepared_assembly
                 self._ready.set()
         except BaseException as error:
+            if self._stop.is_set():
+                return
             with self._state_lock:
                 self._error = error
             self._ready.set()
@@ -154,11 +156,10 @@ class AsyncEpisodeAssembler(ABC, Generic[PreparedAssembly]):
         return prepared_assembly
 
     def _receive_episode(self) -> Optional[AssembledEpisode]:
-        transport_stats = self._transport.get_stats()
         phase = (
-            "assembler_waiting"
-            if transport_stats.pending_episodes == 0
-            else "assembler_transport"
+            "assembler_transport"
+            if self._transport.has_pending_episodes()
+            else "assembler_waiting"
         )
         try:
             with self._profiler.track(phase):

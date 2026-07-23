@@ -1,6 +1,6 @@
+import copy
 import multiprocessing
 import queue
-import signal
 import threading
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
@@ -13,10 +13,11 @@ import numpy as np
 import pytest
 import torch
 from stable_baselines3 import PPO, SAC
-from stable_baselines3.common.buffers import RolloutBuffer
+from stable_baselines3.common.buffers import DictRolloutBuffer, RolloutBuffer
 from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.monitor import Monitor
 
+from async_gym_agents import constants
 from async_gym_agents.agents.async_agent import get_injected_agent
 from async_gym_agents.data_classes import OffPolicyTransition, OnPolicyTransition
 from async_gym_agents.envs.buggy_lunar_lander import BuggyLunarLander
@@ -29,7 +30,91 @@ PROCESSES = 8
 DIRECT_TRANSPORT_PAYLOAD_BYTES = 8 * 1024 * 1024
 DIRECT_TRANSPORT_PROCESS_TIMEOUT_SECONDS = 5.0
 TEST_EPISODE_SEND_TIMEOUT_SECONDS = 1.0
-POLICY_TEST_TIMEOUT_SECONDS = 5.0
+POLICY_TEST_TIMEOUT_SECONDS = 10.0
+WORKER_READY_TIMEOUT_SECONDS = 10.0
+
+
+class RewardRecordingCallback(BaseCallback):
+    """Record each reward exposed through the Stable Baselines callback contract."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.rewards = []
+
+    def _on_step(self) -> bool:
+        self.rewards.extend(np.asarray(self.locals["rewards"]).tolist())
+        return True
+
+
+class TwoFeatureDiscreteEnv(gym.Env):
+    """Provide a one-step environment matching the packed reward-test episode."""
+
+    metadata = {"render_modes": []}
+
+    def __init__(self) -> None:
+        self.observation_space = gym.spaces.Box(
+            low=-10.0,
+            high=10.0,
+            shape=(2,),
+            dtype=np.float32,
+        )
+        self.action_space = gym.spaces.Discrete(2)
+
+    def reset(self, *, seed=None, options=None):
+        super().reset(seed=seed)
+        return np.zeros(2, dtype=np.float32), {}
+
+    def step(self, action):
+        return np.ones(2, dtype=np.float32), 0.0, True, False, {}
+
+
+class WorkerTestError(RuntimeError):
+    """Identify an intentional worker failure in lifecycle tests."""
+
+
+class FailingWorkerEnv(TwoFeatureDiscreteEnv):
+    """Fail when a real worker starts its environment lifecycle."""
+
+    def reset(self, *, seed=None, options=None):
+        raise WorkerTestError("intentional worker failure")
+
+
+class BlockingWorkerEnv(TwoFeatureDiscreteEnv):
+    """Signal worker readiness and block until the test releases the reset."""
+
+    def __init__(self, ready, release) -> None:
+        super().__init__()
+        self._ready = ready
+        self._release = release
+
+    def reset(self, *, seed=None, options=None):
+        self._ready.set()
+        if not self._release.wait(WORKER_READY_TIMEOUT_SECONDS):
+            raise TimeoutError("Worker reset was not released")
+        return super().reset(seed=seed, options=options)
+
+
+def make_failing_worker_env():
+    """Create an environment that fails inside a real collection worker."""
+    return FailingWorkerEnv()
+
+
+def make_blocking_worker_env(ready, release):
+    """Create an environment controlled by spawn-compatible readiness events."""
+    return BlockingWorkerEnv(ready, release)
+
+
+def make_worker_test_agent(env_fns, *, use_mp=False):
+    """Create a small on-policy agent for real worker lifecycle tests."""
+    return get_injected_agent(PPO)(
+        "MlpPolicy",
+        IndexableMultiEnv(env_fns),
+        batch_size=2,
+        device="cpu",
+        n_steps=2,
+        use_mp=use_mp,
+        worker_join_timeout=2.0,
+    )
 
 
 class LoggingCallback(BaseCallback):
@@ -385,6 +470,52 @@ def fixed_terminal_value_policy():
 
 
 @pytest.fixture
+def reward_recording_callback():
+    """Create a callback that retains its exact callback-local rewards."""
+    return RewardRecordingCallback()
+
+
+@pytest.fixture
+def thread_failure_agent():
+    """Create an agent whose real thread worker fails during reset."""
+    agent = make_worker_test_agent([make_failing_worker_env])
+    yield agent, WorkerTestError
+    agent.shutdown()
+
+
+@pytest.fixture
+def process_blocked_agent():
+    """Create an agent with one spawn worker held at a readiness barrier."""
+    context = multiprocessing.get_context("spawn")
+    ready = context.Event()
+    release = context.Event()
+    env_factory = partial(make_blocking_worker_env, ready, release)
+    agent = make_worker_test_agent([env_factory], use_mp=True)
+    yield agent, ready
+    agent.shutdown()
+
+
+@pytest.fixture
+def multi_worker_failure_agent():
+    """Create one failing and one blocked thread worker for root attribution."""
+    ready = threading.Event()
+    release = threading.Event()
+    env_factory = partial(make_blocking_worker_env, ready, release)
+    agent = make_worker_test_agent([make_failing_worker_env, env_factory])
+    yield agent, ready
+    release.set()
+    agent.shutdown()
+
+
+@pytest.fixture
+def shutdown_worker_agent():
+    """Create a healthy one-step worker for intentional-shutdown coverage."""
+    agent = make_worker_test_agent([TwoFeatureDiscreteEnv])
+    yield agent
+    agent.shutdown()
+
+
+@pytest.fixture
 def initialized_on_policy_agent():
     """Create an on-policy agent with initialized transport state and no workers."""
     env = IndexableMultiEnv([partial(gym.make, "Taxi-v3")])
@@ -396,6 +527,30 @@ def initialized_on_policy_agent():
         n_steps=2,
     )
     agent._init_collect_state()
+    agent._last_obs = agent.env.reset()
+    agent._last_episode_starts = np.ones((agent.env.num_envs,), dtype=bool)
+    agent.ep_info_buffer = deque(maxlen=agent._stats_window_size)
+    agent.ep_success_buffer = deque(maxlen=agent._stats_window_size)
+    yield agent
+    agent.shutdown()
+
+
+@pytest.fixture
+def initialized_reward_test_agent():
+    """Create an initialized agent whose buffer matches the reward-test packet."""
+    env = IndexableMultiEnv([TwoFeatureDiscreteEnv])
+    agent = get_injected_agent(PPO)(
+        "MlpPolicy",
+        env,
+        batch_size=2,
+        device="cpu",
+        n_steps=2,
+    )
+    agent._init_collect_state()
+    agent._last_obs = agent.env.reset()
+    agent._last_episode_starts = np.ones((agent.env.num_envs,), dtype=bool)
+    agent.ep_info_buffer = deque(maxlen=agent._stats_window_size)
+    agent.ep_success_buffer = deque(maxlen=agent._stats_window_size)
     yield agent
     agent.shutdown()
 
@@ -415,16 +570,6 @@ def initialized_off_policy_agent():
 
 
 @pytest.fixture
-def on_policy_agent_with_signaled_worker(initialized_on_policy_agent):
-    """Attach a worker terminated by a cross-platform fatal signal."""
-    worker = Mock()
-    worker.exitcode = -signal.SIGTERM
-    worker.is_alive.return_value = False
-    initialized_on_policy_agent._workers = [worker]
-    return initialized_on_policy_agent
-
-
-@pytest.fixture
 def on_policy_episode():
     """Create a complete two-step on-policy episode with sparse terminal info."""
     return [
@@ -434,7 +579,8 @@ def on_policy_episode():
             log_probs=np.array([-0.5], dtype=np.float32),
             last_obs=np.array([[1.0, 2.0]], dtype=np.float32),
             new_obs=np.array([[2.0, 3.0]], dtype=np.float32),
-            rewards=np.array([1.0], dtype=np.float32),
+            environment_rewards=np.array([1.0], dtype=np.float32),
+            training_rewards=np.array([1.0], dtype=np.float32),
             dones=np.array([False]),
             last_dones=np.array([True]),
             infos=[{}],
@@ -446,7 +592,8 @@ def on_policy_episode():
             log_probs=np.array([-0.25], dtype=np.float32),
             last_obs=np.array([[2.0, 3.0]], dtype=np.float32),
             new_obs=np.array([[0.0, 0.0]], dtype=np.float32),
-            rewards=np.array([2.0], dtype=np.float32),
+            environment_rewards=np.array([2.0], dtype=np.float32),
+            training_rewards=np.array([3.0], dtype=np.float32),
             dones=np.array([True]),
             last_dones=np.array([False]),
             infos=[
@@ -641,6 +788,122 @@ def on_policy_rollout_buffer():
         gamma=0.99,
         n_envs=1,
     )
+
+
+@pytest.fixture
+def dict_on_policy_episode(on_policy_episode):
+    """Create a two-step episode with dictionary observations."""
+    observation_rows = (
+        {
+            "position": np.array([[1.0, 2.0]], dtype=np.float32),
+            "velocity": np.array([[0.1]], dtype=np.float32),
+        },
+        {
+            "position": np.array([[2.0, 3.0]], dtype=np.float32),
+            "velocity": np.array([[0.2]], dtype=np.float32),
+        },
+        {
+            "position": np.array([[3.0, 4.0]], dtype=np.float32),
+            "velocity": np.array([[0.3]], dtype=np.float32),
+        },
+    )
+    return [
+        replace(
+            on_policy_episode[0],
+            last_obs=observation_rows[0],
+            new_obs=observation_rows[1],
+        ),
+        replace(
+            on_policy_episode[1],
+            last_obs=observation_rows[1],
+            new_obs=observation_rows[2],
+        ),
+    ]
+
+
+@pytest.fixture
+def dict_on_policy_packet(dict_on_policy_episode):
+    """Encode the dictionary-observation episode for assembly tests."""
+    return encode_episode_batch(0, 1, pack_episode(dict_on_policy_episode))
+
+
+@pytest.fixture
+def dict_on_policy_rollout_buffer():
+    """Create a rollout buffer with dictionary observation destinations."""
+    return DictRolloutBuffer(
+        buffer_size=2,
+        observation_space=gym.spaces.Dict(
+            {
+                "position": gym.spaces.Box(
+                    low=-10.0,
+                    high=10.0,
+                    shape=(2,),
+                    dtype=np.float32,
+                ),
+                "velocity": gym.spaces.Box(
+                    low=-10.0,
+                    high=10.0,
+                    shape=(1,),
+                    dtype=np.float32,
+                ),
+            }
+        ),
+        action_space=gym.spaces.Discrete(2),
+        device="cpu",
+        gae_lambda=0.95,
+        gamma=0.99,
+        n_envs=1,
+    )
+
+
+@pytest.fixture
+def build_reference_rollout_buffer():
+    """Return the reviewed concatenate-then-copy rollout assembly oracle."""
+
+    def copy_concatenated_values(destination, values):
+        """Copy one recursively concatenated field into its buffer destination."""
+        if isinstance(destination, dict):
+            for key, destination_value in destination.items():
+                copy_concatenated_values(
+                    destination_value,
+                    [value[key] for value in values],
+                )
+            return
+        source = np.concatenate(values, axis=0)
+        np.copyto(destination, source.reshape(destination.shape))
+
+    def build(template, episodes):
+        """Build a reference buffer with the pre-remediation allocation path."""
+        transition_count = sum(episode.batch.transition_count for episode in episodes)
+        rollout_buffer = copy.copy(template)
+        rollout_buffer.buffer_size = transition_count
+        rollout_buffer.n_envs = 1
+        rollout_buffer.reset()
+        field_destinations = {
+            "last_obs": rollout_buffer.observations,
+            "actions": rollout_buffer.actions,
+            constants.ON_POLICY_TRAINING_REWARDS_FIELD: rollout_buffer.rewards,
+            "last_dones": rollout_buffer.episode_starts,
+            "values": rollout_buffer.values,
+            "log_probs": rollout_buffer.log_probs,
+        }
+        for field_name, destination in field_destinations.items():
+            copy_concatenated_values(
+                destination,
+                [episode.batch.fields[field_name] for episode in episodes],
+            )
+        final_dones = (
+            episodes[-1].batch.fields["dones"][-1:].reshape(rollout_buffer.n_envs)
+        )
+        rollout_buffer.compute_returns_and_advantage(
+            last_values=torch.zeros(rollout_buffer.n_envs),
+            dones=final_dones,
+        )
+        rollout_buffer.pos = transition_count
+        rollout_buffer.full = True
+        return rollout_buffer
+
+    return build
 
 
 @pytest.fixture

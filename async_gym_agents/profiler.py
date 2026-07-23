@@ -67,8 +67,6 @@ def build_profiler_report(
     worker_stats: Mapping[str, Mapping[str, int]],
     *,
     worker_last_sync_time: Optional[float],
-    buffer_utilization: float,
-    buffer_emptiness: float,
     buffer_full_push_fraction: float,
     buffer_avg_push_wait_time: float,
     discarded_episodes_fraction: float,
@@ -82,11 +80,8 @@ def build_profiler_report(
         "main": _summarize_stats(main_stats),
         "worker": _summarize_stats(worker_stats),
         "buffer": {
-            "utilization": buffer_utilization,
-            "emptiness": buffer_emptiness,
             "full_push_fraction": buffer_full_push_fraction,
-            "avg_push_wait_seconds": buffer_avg_push_wait_time,
-            "avg_push_time_seconds": buffer_avg_push_wait_time,
+            constants.BUFFER_AVG_PUSH_WAIT_SECONDS_KEY: (buffer_avg_push_wait_time),
             "discarded_episodes_fraction": discarded_episodes_fraction,
             constants.BUFFER_AVG_POLICY_LAG_KEY: avg_policy_lag,
             constants.BUFFER_MAX_POLICY_LAG_KEY: max_policy_lag,
@@ -109,11 +104,12 @@ def render_profiler_report(report: Mapping[str, Any]) -> str:
     lines.extend(_render_profile_section("Worker", report.get("worker", {})))
 
     buffer = report.get("buffer", {})
-    avg_push_wait_seconds = buffer.get("avg_push_wait_seconds", 0.0)
+    avg_push_wait_seconds = buffer.get(
+        constants.BUFFER_AVG_PUSH_WAIT_SECONDS_KEY,
+        0.0,
+    )
     lines.append(
         "Buffer: "
-        f"util={buffer.get('utilization', 0.0):.2f}, "
-        f"empty={buffer.get('emptiness', 0.0):.2f}, "
         f"full_push={buffer.get('full_push_fraction', 0.0):.2f}, "
         f"push_wait_ms={avg_push_wait_seconds * constants.MILLISECONDS_PER_SECOND:.2f}, "
         f"dropped={buffer.get('discarded_episodes_fraction', 0.0):.2f}, "
@@ -134,6 +130,7 @@ def render_profiler_report(report: Mapping[str, Any]) -> str:
     if transport:
         lines.append(
             "Transport: "
+            f"util={transport.get('utilization', 0.0):.2f}, "
             f"pending={int(transport.get('pending_episodes', 0))}, "
             f"peak={int(transport.get('max_pending_episodes', 0))}, "
             f"pending_bytes={int(transport.get('pending_bytes', 0))}, "

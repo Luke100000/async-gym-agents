@@ -41,4 +41,7 @@ next rollout buffer, while off-policy agents prepare one episode ahead and keep
 replay-buffer insertion on the trainer thread.
 
 Use `get_profiler_report()` to inspect trainer, worker, buffer, transport, and
-policy statistics.
+policy statistics. `transport.utilization` is the current fraction of bounded
+episode slots in use. Episode-send backpressure is reported once as
+`buffer.avg_push_wait_seconds`; the buffer section does not contain historical
+queue utilization or emptiness estimates.

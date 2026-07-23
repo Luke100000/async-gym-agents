@@ -11,6 +11,7 @@ from stable_baselines3.common.policies import BasePolicy
 from stable_baselines3.common.utils import obs_as_tensor
 from stable_baselines3.common.vec_env import VecEnv
 
+from async_gym_agents import constants
 from async_gym_agents.agents.injector import AsyncAgentInjector, InjectorWorkerBase
 from async_gym_agents.callback_batching import CallbackBatchDispatcher
 from async_gym_agents.data_classes import (
@@ -104,12 +105,8 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
         self.policy.set_training_mode(False)
         self.pre_collect_preparation(self.policy)
         self._initialize_rollout_assembler(n_rollout_steps)
-        try:
-            with self._profiler_main.track("assembler_acquire"):
-                prepared_rollout = self._episode_assembler.acquire()
-        except RuntimeError:
-            self.raise_for_failed_workers()
-            raise
+        with self._profiler_main.track("assembler_acquire"):
+            prepared_rollout = self._acquire_prepared_assembly()
         self.rollout_buffer = prepared_rollout.rollout_buffer
         rollout_buffer = prepared_rollout.rollout_buffer
         for assembled_episode in prepared_rollout.episodes:
@@ -155,7 +152,13 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
                             transition_index,
                         )
                         actions = rollout_buffer.actions[buffer_index]
-                        rewards = rollout_buffer.rewards[buffer_index]
+                        training_rewards = rollout_buffer.rewards[buffer_index]
+                        environment_rewards = slice_episode_field(
+                            batch,
+                            constants.ON_POLICY_ENVIRONMENT_REWARDS_FIELD,
+                            transition_index,
+                        )
+                        rewards = environment_rewards
                         self._last_episode_starts = rollout_buffer.episode_starts[
                             buffer_index
                         ]
@@ -212,7 +215,13 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
                         transition_index,
                     )
                     actions = rollout_buffer.actions[final_buffer_index]
-                    rewards = rollout_buffer.rewards[final_buffer_index]
+                    training_rewards = rollout_buffer.rewards[final_buffer_index]
+                    environment_rewards = slice_episode_field(
+                        batch,
+                        constants.ON_POLICY_ENVIRONMENT_REWARDS_FIELD,
+                        transition_index,
+                    )
+                    rewards = environment_rewards
                     self._last_episode_starts = rollout_buffer.episode_starts[
                         final_buffer_index
                     ]
@@ -321,10 +330,12 @@ class InjectorWorker(InjectorWorkerBase):
             with self._profiler.track("stepping"):
                 new_obs, rewards, dones, infos = self.env.step(clipped_actions)
 
+            environment_rewards = rewards.copy()
+            training_rewards = environment_rewards.copy()
             bootstrap_truncated_rewards(
                 self.policy,
                 self.gamma,
-                rewards,
+                training_rewards,
                 dones,
                 infos,
             )
@@ -340,16 +351,20 @@ class InjectorWorker(InjectorWorkerBase):
                         episodes[idx] = []
                     episodes[idx].append(
                         OnPolicyTransition(
-                            single_slice(actions, idx),
-                            single_slice(values, idx),
-                            single_slice(log_probs, idx),
-                            copy_obs(single_slice(last_obs, idx)),
-                            copy_obs(single_slice(new_obs, idx)),
-                            single_slice(rewards, idx),
-                            single_slice(dones, idx),
-                            single_slice(last_dones, idx),
-                            single_slice(infos, idx),
-                            single_slice(self.env.reset_infos, idx),
+                            actions=single_slice(actions, idx),
+                            values=single_slice(values, idx),
+                            log_probs=single_slice(log_probs, idx),
+                            last_obs=copy_obs(single_slice(last_obs, idx)),
+                            new_obs=copy_obs(single_slice(new_obs, idx)),
+                            environment_rewards=single_slice(
+                                environment_rewards,
+                                idx,
+                            ),
+                            training_rewards=single_slice(training_rewards, idx),
+                            dones=single_slice(dones, idx),
+                            last_dones=single_slice(last_dones, idx),
+                            infos=single_slice(infos, idx),
+                            reset_infos=single_slice(self.env.reset_infos, idx),
                         )
                     )
             self._flush_profiler()

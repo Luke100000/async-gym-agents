@@ -11,7 +11,7 @@ from multiprocessing.context import Process as MPProcess
 from multiprocessing.managers import Namespace
 from multiprocessing.synchronize import Event as MPEvent
 from types import SimpleNamespace
-from typing import Any, Dict, Generator, List, Optional, Type, TypeAlias, cast
+from typing import Any, Callable, Dict, Generator, List, Optional, Type, TypeAlias, cast
 
 import torch
 from stable_baselines3.common.base_class import BasePolicy
@@ -20,6 +20,7 @@ from async_gym_agents import constants
 from async_gym_agents.data_classes import (
     EpisodeSendResult,
     SharedPolicyDescriptor,
+    WorkerFailure,
 )
 from async_gym_agents.envs.multi_env import IndexableMultiEnv
 from async_gym_agents.episode_assembler import AsyncEpisodeAssembler
@@ -28,6 +29,7 @@ from async_gym_agents.episode_transport import (
     EpisodeFeeder,
     EpisodeSender,
     EpisodeTransport,
+    WorkerTransportClosedError,
 )
 from async_gym_agents.policy_transport import SharedPolicyReader, SharedPolicyStore
 from async_gym_agents.profiler import (
@@ -43,6 +45,24 @@ GenericState: TypeAlias = Namespace | SimpleNamespace
 GenericStateLock: TypeAlias = Any
 GenericEvent: TypeAlias = MPEvent | threading.Event
 GenericWorker: TypeAlias = MPProcess | threading.Thread
+WorkerFailureCallback: TypeAlias = Callable[[int, BaseException], None]
+
+
+class AsyncWorkerFailureError(RuntimeError):
+    """Aggregate attributable worker failures for the trainer."""
+
+    def __init__(self, failures: List[WorkerFailure]) -> None:
+        self.failures = tuple(failures)
+        details = ", ".join(
+            constants.WORKER_FAILURE_MESSAGE.format(
+                worker_index=failure.worker_index,
+                reason=failure.reason,
+            )
+            for failure in failures
+        )
+        super().__init__(
+            constants.ASYNC_WORKER_FAILURE_MESSAGE.format(failures=details)
+        )
 
 
 @contextmanager
@@ -108,14 +128,14 @@ class AsyncAgentInjector:
         self._version = 0
 
         self._stop: GenericEvent | None = None
+        self._shutdown_started = threading.Event()
+        self._thread_failure_lock = threading.Lock()
+        self._thread_failures: Dict[int, WorkerFailure] = {}
 
         self._initialized = False
         self._initialized_workers = False
         self._workers: List[GenericWorker] = []
 
-        self._buffer_utilization = 0.0
-        self._buffer_emptiness = 0.0
-        self._buffer_stat_count = 0
         self._policy_lag_total = 0
         self._policy_lag_count = 0
         self._policy_lag_max = 0
@@ -139,6 +159,7 @@ class AsyncAgentInjector:
         worker_kwargs: Dict[str, Any],
         policy_class: BasePolicy,
         policy_data: Dict[str, Any],
+        failure_callback: Optional[WorkerFailureCallback] = None,
         use_mp: bool = False,
         mp_threads: int = 1,
     ):
@@ -173,17 +194,19 @@ class AsyncAgentInjector:
                 )
 
             worker.run()
-        except BaseException:
+        except BaseException as error:
             logging.getLogger("async_gym_agents").exception(
                 "Async worker %s failed",
                 worker_index,
             )
-            raise
+            if failure_callback is not None:
+                failure_callback(worker_index, error)
+            if use_mp:
+                raise
         finally:
             if policy_reader is not None:
                 policy_reader.close()
-            if use_mp:
-                episode_sender.close()
+            episode_sender.close()
 
     def get_worker_class(self) -> Type["InjectorWorkerBase"]:
         raise NotImplementedError()
@@ -263,6 +286,9 @@ class AsyncAgentInjector:
         self._state.worker_profiler_last_sync = None
 
         self._stop = self.mp_ctx.Event() if self.use_mp else threading.Event()
+        self._shutdown_started.clear()
+        with self._thread_failure_lock:
+            self._thread_failures.clear()
 
         self._initialized = True
 
@@ -307,6 +333,9 @@ class AsyncAgentInjector:
                         worker_kwargs=self.get_worker_kwargs(),
                         policy_class=policy_class,
                         policy_data=policy_data,
+                        failure_callback=(
+                            None if self.use_mp else self._record_thread_failure
+                        ),
                         use_mp=self.use_mp,
                         mp_threads=self.mp_threads,
                     ),
@@ -325,20 +354,97 @@ class AsyncAgentInjector:
 
         self._initialized_workers = True
 
-    def raise_for_failed_workers(self) -> None:
-        """Raise a trainer-side error identifying terminated worker processes."""
-        failures = []
+    def _record_thread_failure(
+        self,
+        worker_index: int,
+        error: BaseException,
+    ) -> None:
+        if self._shutdown_started.is_set():
+            return
+        failure = WorkerFailure(
+            worker_index=worker_index,
+            reason=f"{type(error).__name__}: {error}",
+            cause=error,
+        )
+        with self._thread_failure_lock:
+            self._thread_failures.setdefault(worker_index, failure)
+
+    def raise_for_failed_workers(
+        self,
+        closed_worker_index: Optional[int] = None,
+    ) -> None:
+        """Raise an attributable trainer-side error for unexpected worker exits."""
+        if self._shutdown_started.is_set():
+            return
+
+        with self._thread_failure_lock:
+            failures_by_worker = dict(self._thread_failures)
+
+        if closed_worker_index is not None and self.use_mp:
+            self._wait_for_process_exit(closed_worker_index)
+
         for worker_index, worker in enumerate(self._workers):
             exit_code = getattr(worker, "exitcode", None)
             if exit_code is None or exit_code == 0:
                 continue
-            failures.append(
-                f"worker {worker_index} exited with "
-                f"{self._format_worker_exit_reason(exit_code)}"
+            failures_by_worker.setdefault(
+                worker_index,
+                WorkerFailure(
+                    worker_index=worker_index,
+                    reason=self._format_worker_exit_reason(exit_code),
+                ),
             )
 
+        if closed_worker_index is not None and not failures_by_worker:
+            failures_by_worker[closed_worker_index] = WorkerFailure(
+                worker_index=closed_worker_index,
+                reason=constants.WORKER_TRANSPORT_CLOSED_REASON,
+            )
+
+        failures = [failures_by_worker[index] for index in sorted(failures_by_worker)]
         if failures:
-            raise RuntimeError(f"Async workers failed: {', '.join(failures)}")
+            failure_error = AsyncWorkerFailureError(failures)
+            original_cause = next(
+                (failure.cause for failure in failures if failure.cause is not None),
+                None,
+            )
+            if original_cause is not None:
+                raise failure_error from original_cause
+            raise failure_error
+
+    def _wait_for_process_exit(self, worker_index: int) -> None:
+        worker = self._workers[worker_index]
+        deadline = time.monotonic() + constants.PROCESS_EXIT_ATTRIBUTION_TIMEOUT_SECONDS
+        while getattr(worker, "exitcode", None) is None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            worker.join(
+                timeout=min(
+                    constants.WORKER_HEALTH_CHECK_INTERVAL_SECONDS,
+                    remaining,
+                )
+            )
+
+    def _acquire_prepared_assembly(self) -> Any:
+        """Wait for background assembly while checking real worker health."""
+        if self._episode_assembler is None:
+            raise RuntimeError("Episode assembler has not been initialized")
+
+        while True:
+            try:
+                return self._episode_assembler.acquire(
+                    constants.WORKER_HEALTH_CHECK_INTERVAL_SECONDS
+                )
+            except TimeoutError:
+                self.raise_for_failed_workers()
+            except RuntimeError as error:
+                cause = error.__cause__
+                if isinstance(cause, WorkerTransportClosedError):
+                    self.raise_for_failed_workers(cause.worker_index)
+                else:
+                    self.raise_for_failed_workers()
+                raise
 
     @staticmethod
     def _format_worker_exit_reason(exit_code: int) -> str:
@@ -362,6 +468,9 @@ class AsyncAgentInjector:
             "_state_lock",
             "_version",
             "_stop",
+            "_shutdown_started",
+            "_thread_failure_lock",
+            "_thread_failures",
             "_initialized",
             "_initialized_workers",
             "_workers",
@@ -389,6 +498,7 @@ class AsyncAgentInjector:
         self._policy_lag_max = max(self._policy_lag_max, lag)
 
     def shutdown(self):
+        self._shutdown_started.set()
         if self._episode_assembler is not None:
             self._final_assembly_report = self._build_assembly_report()
             self._episode_assembler.shutdown()
@@ -463,8 +573,6 @@ class AsyncAgentInjector:
                 if self._state is None
                 else getattr(self._state, "worker_profiler_last_sync", None)
             ),
-            buffer_utilization=self.buffer_utilization,
-            buffer_emptiness=self.buffer_emptyness,
             buffer_full_push_fraction=self.buffer_full_push_fraction,
             buffer_avg_push_wait_time=self.buffer_avg_push_wait_time,
             discarded_episodes_fraction=self.discarded_episodes_fraction,
@@ -529,28 +637,6 @@ class AsyncAgentInjector:
         return cast(ProfileStats, dict(self._state.worker_profiler_stats))
 
     @property
-    def buffer_utilization(self) -> float:
-        """
-        The average size of the buffer in episodes.
-        """
-        return (
-            0
-            if self._buffer_stat_count == 0
-            else self._buffer_utilization / self._buffer_stat_count
-        )
-
-    @property
-    def buffer_emptyness(self) -> float:
-        """
-        The fraction of the time the buffer was empty.
-        """
-        return (
-            0
-            if self._buffer_stat_count == 0
-            else self._buffer_emptiness / self._buffer_stat_count
-        )
-
-    @property
     def discarded_episodes_fraction(self) -> float:
         """
         The fraction of episodes dropped, either due to full buffer or truncation.
@@ -571,11 +657,6 @@ class AsyncAgentInjector:
             if self._state is None or self._state.queue_put_attempts == 0
             else self._state.full_queue_put_attempts / self._state.queue_put_attempts
         )
-
-    @property
-    def buffer_avg_push_time(self) -> float:
-        """Return the average enqueue wait through the legacy property name."""
-        return self.buffer_avg_push_wait_time
 
     @property
     def buffer_avg_push_wait_time(self) -> float:
