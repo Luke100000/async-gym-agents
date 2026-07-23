@@ -5,6 +5,7 @@ import numpy as np
 import torch
 from stable_baselines3.common.buffers import RolloutBuffer
 
+from async_gym_agents import constants
 from async_gym_agents.data_classes import (
     AssembledEpisode,
     PreparedOnPolicyRollout,
@@ -57,52 +58,40 @@ class AsyncOnPolicyRolloutAssembler(AsyncEpisodeAssembler[PreparedOnPolicyRollou
         rollout_buffer.n_envs = 1
         rollout_buffer.reset()
 
-        observations = self._concatenate_episode_field(
+        self._fill_episode_field(
             episodes,
             "last_obs",
+            rollout_buffer.observations,
         )
-        self._copy_observations(rollout_buffer.observations, observations)
-        self._copy_array(
+        self._fill_episode_field(
+            episodes,
+            "actions",
             rollout_buffer.actions,
-            self._concatenate_episode_field(
-                episodes,
-                "actions",
-            ),
         )
-        self._copy_array(
+        self._fill_episode_field(
+            episodes,
+            constants.ON_POLICY_TRAINING_REWARDS_FIELD,
             rollout_buffer.rewards,
-            self._concatenate_episode_field(
-                episodes,
-                "rewards",
-            ),
         )
-        self._copy_array(
+        self._fill_episode_field(
+            episodes,
+            "last_dones",
             rollout_buffer.episode_starts,
-            self._concatenate_episode_field(
-                episodes,
-                "last_dones",
-            ),
         )
-        self._copy_array(
+        self._fill_episode_field(
+            episodes,
+            "values",
             rollout_buffer.values,
-            self._concatenate_episode_field(
-                episodes,
-                "values",
-            ),
         )
-        self._copy_array(
+        self._fill_episode_field(
+            episodes,
+            "log_probs",
             rollout_buffer.log_probs,
-            self._concatenate_episode_field(
-                episodes,
-                "log_probs",
-            ),
         )
 
-        dones = self._concatenate_episode_field(
-            episodes,
-            "dones",
+        final_dones = np.asarray(episodes[-1].batch.fields["dones"][-1:]).reshape(
+            rollout_buffer.n_envs
         )
-        final_dones = np.asarray(dones[-1:]).reshape(rollout_buffer.n_envs)
         rollout_buffer.compute_returns_and_advantage(
             last_values=torch.zeros(rollout_buffer.n_envs),
             dones=final_dones,
@@ -111,35 +100,44 @@ class AsyncOnPolicyRolloutAssembler(AsyncEpisodeAssembler[PreparedOnPolicyRollou
         rollout_buffer.full = True
         return rollout_buffer
 
-    def _concatenate_episode_field(
+    def _fill_episode_field(
         self,
         episodes: list[AssembledEpisode],
         field_name: str,
-    ) -> Any:
-        return self._concatenate_values(
-            [episode.batch.fields[field_name] for episode in episodes]
+        destination: Any,
+    ) -> None:
+        self.fill_concatenated_values(
+            destination,
+            [episode.batch.fields[field_name] for episode in episodes],
         )
 
-    def _concatenate_values(self, values: list[Any]) -> Any:
-        first_value = values[0]
-        if isinstance(first_value, np.ndarray):
-            return np.concatenate(values, axis=0)
-        if isinstance(first_value, dict):
-            return {
-                key: self._concatenate_values([value[key] for value in values])
-                for key in first_value
-            }
-        raise TypeError(
-            f"Cannot build a rollout buffer from {type(first_value)!r} observations"
-        )
-
-    def _copy_observations(self, destination: Any, source: Any) -> None:
+    @classmethod
+    def fill_concatenated_values(
+        cls,
+        destination: Any,
+        values: list[Any],
+    ) -> None:
+        """Concatenate episode chunks directly into a rollout-buffer destination."""
+        if isinstance(destination, np.ndarray):
+            first_value = values[0]
+            if not isinstance(first_value, np.ndarray):
+                raise TypeError(
+                    f"Cannot fill an array from {type(first_value)!r} values"
+                )
+            concatenated_shape = (
+                sum(value.shape[0] for value in values),
+                *first_value.shape[1:],
+            )
+            destination_view = destination.reshape(concatenated_shape)
+            np.concatenate(values, axis=0, out=destination_view)
+            return
         if isinstance(destination, dict):
             for key, destination_value in destination.items():
-                self._copy_observations(destination_value, source[key])
+                cls.fill_concatenated_values(
+                    destination_value,
+                    [value[key] for value in values],
+                )
             return
-        self._copy_array(destination, source)
-
-    @staticmethod
-    def _copy_array(destination: np.ndarray, source: Any) -> None:
-        np.copyto(destination, np.asarray(source).reshape(destination.shape))
+        raise TypeError(
+            f"Cannot fill rollout destination of type {type(destination)!r}"
+        )

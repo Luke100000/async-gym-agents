@@ -10,16 +10,25 @@ from async_gym_agents.enums import EpisodeKind
 
 @dataclass
 class OnPolicyTransition:
+    """One on-policy row with independent callback and training reward views."""
+
     actions: np.ndarray
     values: np.ndarray
     log_probs: np.ndarray
     last_obs: VecEnvObs
     new_obs: VecEnvObs
-    rewards: np.ndarray
+    environment_rewards: np.ndarray
+    training_rewards: np.ndarray
     dones: np.ndarray
     last_dones: np.ndarray
     infos: List[Dict]
     reset_infos: List[Dict]
+
+    def __post_init__(self) -> None:
+        if self.environment_rewards.shape != self.training_rewards.shape:
+            raise ValueError("Environment and training reward shapes must match")
+        if np.shares_memory(self.environment_rewards, self.training_rewards):
+            raise ValueError("Environment and training rewards must not share memory")
 
 
 @dataclass
@@ -146,3 +155,12 @@ class EpisodeAssemblerStats:
     max_transition_count: int
     last_payload_bytes: int
     max_payload_bytes: int
+
+
+@dataclass(frozen=True)
+class WorkerFailure:
+    """Describe one unexpected worker termination at the trainer boundary."""
+
+    worker_index: int
+    reason: str
+    cause: Optional[BaseException] = None

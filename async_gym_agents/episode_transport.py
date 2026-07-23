@@ -21,6 +21,19 @@ GenericSharedCounter: TypeAlias = Any
 GenericStopEvent: TypeAlias = Any
 
 
+class WorkerTransportClosedError(RuntimeError):
+    """Report which worker-side episode channel closed unexpectedly."""
+
+    def __init__(self, worker_index: int) -> None:
+        self.worker_index = worker_index
+        super().__init__(
+            constants.WORKER_FAILURE_MESSAGE.format(
+                worker_index=worker_index,
+                reason=constants.WORKER_TRANSPORT_CLOSED_REASON,
+            )
+        )
+
+
 def _encode_episode_packet_header(packet: EpisodePacket) -> bytes:
     """Encode fixed-size packet metadata without copying the episode payload."""
     if packet.episode_kind is EpisodeKind.ON_POLICY:
@@ -426,6 +439,10 @@ class EpisodeTransport:
             received_bytes=self._received_bytes,
         )
 
+    def has_pending_episodes(self) -> bool:
+        """Return whether at least one complete episode is currently queued."""
+        return self._pending_episodes.value > 0
+
     def interrupt(self) -> None:
         """Close receiving endpoints so blocked worker sends can stop promptly."""
         if self._interrupted:
@@ -472,7 +489,7 @@ class EpisodeTransport:
         connection = self._receive_connections[worker_index]
         header = self._pending_headers.pop(worker_index, None)
         if header is None:
-            header = connection.recv_bytes()
+            header = self._receive_worker_bytes(connection, worker_index)
 
         try:
             remaining = self._calculate_remaining_timeout(deadline)
@@ -484,8 +501,18 @@ class EpisodeTransport:
             self._pending_headers[worker_index] = header
             raise queue.Empty
 
-        payload = connection.recv_bytes()
+        payload = self._receive_worker_bytes(connection, worker_index)
         return _decode_pipe_packet(worker_index, header, payload)
+
+    @staticmethod
+    def _receive_worker_bytes(
+        connection: Connection,
+        worker_index: int,
+    ) -> bytes:
+        try:
+            return connection.recv_bytes()
+        except (EOFError, OSError) as error:
+            raise WorkerTransportClosedError(worker_index) from error
 
     def _calculate_remaining_timeout(
         self,

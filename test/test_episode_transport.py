@@ -1,7 +1,12 @@
 import threading
 from dataclasses import replace
 
-from async_gym_agents.episode_transport import EpisodeTransport
+import pytest
+
+from async_gym_agents.episode_transport import (
+    EpisodeTransport,
+    WorkerTransportClosedError,
+)
 
 TRANSPORT_TEST_TIMEOUT_SECONDS = 0.02
 TRANSPORT_THREAD_JOIN_TIMEOUT_SECONDS = 1.0
@@ -189,6 +194,46 @@ class TestEpisodeTransport:
         assert not process.is_alive()
         assert process.exitcode == 0
         assert not send_completed.is_set()
+
+    def test_attributes_a_closed_sender_to_its_worker(self):
+        """Receiver closure errors identify the worker endpoint that disappeared."""
+        transport = EpisodeTransport(
+            worker_count=1,
+            max_pending_episodes=1,
+            use_mp=False,
+        )
+        transport.get_sender(0).close()
+
+        with pytest.raises(
+            WorkerTransportClosedError,
+            match="worker 0",
+        ) as error:
+            transport.receive(TRANSPORT_TEST_TIMEOUT_SECONDS)
+
+        assert error.value.worker_index == 0
+        transport.shutdown()
+
+    def test_reports_pending_state_across_packet_lifecycle(self, on_policy_packet):
+        """The narrow pending query changes only while an episode is queued."""
+        transport = EpisodeTransport(
+            worker_count=1,
+            max_pending_episodes=1,
+            use_mp=False,
+        )
+        stop = threading.Event()
+
+        assert transport.has_pending_episodes() is False
+        assert transport.get_sender(0).send(
+            on_policy_packet,
+            stop,
+            TRANSPORT_TEST_TIMEOUT_SECONDS,
+        )
+        assert transport.has_pending_episodes() is True
+
+        transport.receive(TRANSPORT_TEST_TIMEOUT_SECONDS)
+
+        assert transport.has_pending_episodes() is False
+        transport.shutdown()
 
 
 class TestEpisodeFeeder:

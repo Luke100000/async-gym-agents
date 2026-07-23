@@ -3,6 +3,7 @@ import pickle
 
 import numpy as np
 
+from async_gym_agents import constants
 from async_gym_agents.enums import EpisodeKind
 from async_gym_agents.episode_codec import (
     decode_episode_packet,
@@ -37,6 +38,37 @@ class TestEpisodeCodec:
         )
         assert decoded_episode[0].infos == [{}]
         assert decoded_episode[1].reset_infos == [{"seed": 7}]
+        np.testing.assert_array_equal(
+            decoded_episode[1].environment_rewards,
+            np.array([2.0], dtype=np.float32),
+        )
+        np.testing.assert_array_equal(
+            decoded_episode[1].training_rewards,
+            np.array([3.0], dtype=np.float32),
+        )
+        assert not np.shares_memory(
+            decoded_episode[1].environment_rewards,
+            decoded_episode[1].training_rewards,
+        )
+
+    def test_packs_reward_views_under_explicit_field_names(
+        self,
+        on_policy_episode,
+    ):
+        """Packed on-policy episodes retain independent callback and training views."""
+        batch = pack_episode(on_policy_episode)
+
+        assert constants.ON_POLICY_ENVIRONMENT_REWARDS_FIELD in batch.fields
+        assert constants.ON_POLICY_TRAINING_REWARDS_FIELD in batch.fields
+        assert constants.OFF_POLICY_REWARDS_FIELD not in batch.fields
+        np.testing.assert_array_equal(
+            batch.fields[constants.ON_POLICY_ENVIRONMENT_REWARDS_FIELD],
+            np.array([1.0, 2.0], dtype=np.float32),
+        )
+        np.testing.assert_array_equal(
+            batch.fields[constants.ON_POLICY_TRAINING_REWARDS_FIELD],
+            np.array([1.0, 3.0], dtype=np.float32),
+        )
 
     def test_round_trips_off_policy_episode(self, off_policy_episode):
         """Off-policy observations, actions, rewards, and done flags retain shape."""

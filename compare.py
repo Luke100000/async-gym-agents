@@ -11,6 +11,7 @@ from stable_baselines3.common.evaluation import evaluate_policy
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv
 
+from async_gym_agents import constants
 from async_gym_agents.agents.async_agent import get_injected_agent
 from async_gym_agents.envs.multi_env import IndexableMultiEnv
 from async_gym_agents.envs.slow_cartpole import SlowCartPoleEnv
@@ -62,13 +63,17 @@ def evaluate(
     model.learn(total_timesteps=TRAIN_TIMESTEPS // batch_size)
 
     if mode == Mode.ASYNC:
+        profiler_report = model.get_profiler_report()
         model.shutdown()
-
-        print(f"Buffer utilization: {model.buffer_utilization}")
-        print(f"Buffer emptiness: {model.buffer_emptyness}")
-        print(f"Buffer full push fraction: {model.buffer_full_push_fraction}")
-        print(f"Buffer avg push time: {model.buffer_avg_push_time}")
-        print(f"Discarded episodes: {model.discarded_episodes_fraction}")
+        buffer_report = profiler_report["buffer"]
+        transport_report = profiler_report["transport"]
+        print(f"Transport utilization: {transport_report['utilization']}")
+        print(f"Buffer full push fraction: {buffer_report['full_push_fraction']}")
+        print(
+            "Buffer avg push wait: "
+            f"{buffer_report[constants.BUFFER_AVG_PUSH_WAIT_SECONDS_KEY]}"
+        )
+        print(f"Discarded episodes: {buffer_report['discarded_episodes_fraction']}")
 
     eval_env = get_env(False)
     mean_reward, std_reward = evaluate_policy(
