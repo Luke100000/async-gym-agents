@@ -30,6 +30,8 @@ BUFFER_AVG_PUSH_WAIT_SECONDS_KEY = "avg_push_wait_seconds"
 ON_POLICY_ENVIRONMENT_REWARDS_FIELD = "environment_rewards"
 ON_POLICY_TRAINING_REWARDS_FIELD = "training_rewards"
 OFF_POLICY_REWARDS_FIELD = "rewards"
+ON_POLICY_ACTIONS_FIELD = "actions"
+OFF_POLICY_ACTIONS_FIELD = "buffer_actions"
 
 ASYNC_WORKER_FAILURE_MESSAGE = "Async workers failed: {failures}"
 WORKER_FAILURE_MESSAGE = "worker {worker_index}: {reason}"

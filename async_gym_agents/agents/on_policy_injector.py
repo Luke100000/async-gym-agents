@@ -187,12 +187,14 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
                 else:
                     if self.use_sde and self.sde_sample_freq > 0:
                         first_reset_offset = (-n_steps) % self.sde_sample_freq
-                        for _ in range(
+                        for reset_offset in range(
                             first_reset_offset,
                             batch.transition_count,
                             self.sde_sample_freq,
                         ):
+                            self.num_timesteps = episode_start_timestep + reset_offset
                             self.policy.reset_noise(1)
+                        self.num_timesteps = episode_start_timestep
 
                     for transition_index, infos in batch.infos.items():
                         dones = slice_episode_field(

@@ -14,9 +14,10 @@ __pycache__/
 .coverage
 htmlcov/
 
-.claude/settings.local.json
-.serena/cache/
-.serena/project.local.yml
+.specify
+.agents
+.claude
+.serena
 
 .env
 .env.*

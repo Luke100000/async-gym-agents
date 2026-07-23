@@ -4,6 +4,8 @@ from dataclasses import replace
 from unittest.mock import patch
 
 import numpy as np
+import pytest
+from stable_baselines3.common.callbacks import CallbackList
 
 from async_gym_agents import constants
 from async_gym_agents.agents.on_policy_injector import (
@@ -379,6 +381,73 @@ class TestOnPolicyCompleteEpisodeAssembly:
             1.0,
             3.0,
         ]
+
+    @pytest.mark.parametrize(
+        ("use_sde", "sde_sample_freq", "expected_noise_reset_count"),
+        (
+            (False, -1, 0),
+            (True, 1, 5),
+            (True, 3, 3),
+        ),
+    )
+    def test_matches_optimized_and_mixed_callback_collection_state(
+        self,
+        use_sde,
+        sde_sample_freq,
+        expected_noise_reset_count,
+        reward_test_agent_pair,
+        on_policy_packet,
+        logging_callback_pair,
+        unrecognized_step_callback,
+        snapshot_logging_callback,
+        record_policy_noise_resets,
+        collect_deterministic_reward_rollout,
+    ):
+        """Known-only and mixed callbacks retain identical trainer-visible state."""
+        optimized_agent, mixed_agent = reward_test_agent_pair
+        optimized_logging, mixed_logging = logging_callback_pair
+        mixed_callbacks = CallbackList([mixed_logging, unrecognized_step_callback])
+        optimized_noise_resets = record_policy_noise_resets(optimized_agent)
+        mixed_noise_resets = record_policy_noise_resets(mixed_agent)
+
+        assert collect_deterministic_reward_rollout(
+            optimized_agent,
+            on_policy_packet,
+            optimized_logging,
+            use_sde=use_sde,
+            sde_sample_freq=sde_sample_freq,
+        )
+        assert collect_deterministic_reward_rollout(
+            mixed_agent,
+            on_policy_packet,
+            mixed_callbacks,
+            use_sde=use_sde,
+            sde_sample_freq=sde_sample_freq,
+        )
+
+        assert optimized_agent.num_timesteps == mixed_agent.num_timesteps == 4
+        assert list(optimized_agent.ep_info_buffer) == list(mixed_agent.ep_info_buffer)
+        assert list(optimized_agent.ep_success_buffer) == list(
+            mixed_agent.ep_success_buffer
+        )
+        np.testing.assert_array_equal(
+            optimized_agent._last_obs,
+            mixed_agent._last_obs,
+        )
+        np.testing.assert_array_equal(
+            optimized_agent._last_episode_starts,
+            mixed_agent._last_episode_starts,
+        )
+        assert snapshot_logging_callback(
+            optimized_logging
+        ) == snapshot_logging_callback(mixed_logging)
+        assert optimized_logging.n_calls == mixed_logging.n_calls == 4
+        assert unrecognized_step_callback.n_calls == 4
+        assert unrecognized_step_callback.rewards == [1.0, 2.0, 1.0, 2.0]
+        assert unrecognized_step_callback.timesteps == [1, 2, 3, 4]
+        assert len(optimized_noise_resets) == expected_noise_reset_count
+        assert len(mixed_noise_resets) == expected_noise_reset_count
+        assert optimized_noise_resets == mixed_noise_resets
 
 
 class TestOffPolicyEpisodeAssembly:

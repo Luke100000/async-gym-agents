@@ -1,5 +1,3 @@
-from unittest.mock import call
-
 import numpy as np
 
 from async_gym_agents.callback_batching import CallbackBatchDispatcher
@@ -24,13 +22,8 @@ class TestBatchedLoggingCallback:
 
         assert external_logging_callback.step_call_count == 0
         assert external_logging_callback.n_calls == 4
-        assert (
-            external_logging_callback.metric_aggregator.aggregate_step.call_count == 0
-        )
-        assert (
-            external_logging_callback.metric_aggregator.log_aggregated_metrics.call_count
-            == 2
-        )
+        assert external_logging_callback.metric_aggregator.aggregated_steps == []
+        assert len(external_logging_callback.metric_aggregator.logged_metrics) == 2
 
     def test_aggregates_complete_episode_arrays_directly(
         self,
@@ -49,7 +42,7 @@ class TestBatchedLoggingCallback:
         )
 
         aggregator = callback.metric_aggregator
-        assert aggregator.aggregate_step.call_count == 0
+        assert aggregator.aggregated_steps == []
         assert aggregator.episode_rewards[0] == [3.0]
         assert aggregator.episode_step_metrics["speed"][0] == [2.0, 4.0]
         assert list(aggregator.episode_end_reasons[0]) == ["TIMEOUT"]
@@ -73,10 +66,9 @@ class TestBatchedLoggingCallback:
             EpisodeCallbackContext(batch, 2, 4)
         )
 
-        external_logging_callback.connector.log_dict.assert_called_once_with(
-            {"map": "test"},
-            "meta_settings",
-        )
+        assert external_logging_callback.connector.logged_dicts == [
+            ({"map": "test"}, "meta_settings")
+        ]
 
     def test_logs_metadata_again_after_its_value_changes(
         self,
@@ -95,9 +87,9 @@ class TestBatchedLoggingCallback:
             EpisodeCallbackContext(changed_batch, 2, 4)
         )
 
-        assert external_logging_callback.connector.log_dict.call_args_list == [
-            call({"map": "test"}, "meta_settings"),
-            call({"map": "changed"}, "meta_settings"),
+        assert external_logging_callback.connector.logged_dicts == [
+            ({"map": "test"}, "meta_settings"),
+            ({"map": "changed"}, "meta_settings"),
         ]
 
 
@@ -115,10 +107,12 @@ class TestBatchedPeriodicCallbacks:
             callback=external_saving_callback,
         )
 
-        external_saving_callback.connector.upload.assert_called_once_with(
-            agent=external_saving_callback.agent,
-            checkpoint_id=3,
-        )
+        assert external_saving_callback.connector.uploads == [
+            {
+                "agent": external_saving_callback.agent,
+                "checkpoint_id": 3,
+            }
+        ]
         assert external_saving_callback.step_call_count == 0
         assert external_saving_callback.n_calls == 4
 
@@ -158,9 +152,9 @@ class TestBatchedTerminalCallbacks:
         assert dispatcher.process_episode(EpisodeCallbackContext(batch, 0, 2))
         assert dispatcher.process_episode(EpisodeCallbackContext(batch, 2, 4))
 
-        assert external_reset_info_callback.connector.log_dict.call_args_list == [
-            call({"seed": 7}, "Reset Info - Agent 0 - Episode 1"),
-            call({"seed": 7}, "Reset Info - Agent 0 - Episode 2"),
+        assert external_reset_info_callback.connector.logged_dicts == [
+            ({"seed": 7}, "Reset Info - Agent 0 - Episode 1"),
+            ({"seed": 7}, "Reset Info - Agent 0 - Episode 2"),
         ]
         assert external_reset_info_callback.first_step_tracker == [0]
         assert external_reset_info_callback.step_call_count == 0
@@ -223,13 +217,8 @@ class TestOffPolicyCallbackBatching:
 
         assert external_logging_callback.step_call_count == 0
         assert external_logging_callback.n_calls == 3
-        assert (
-            external_logging_callback.metric_aggregator.aggregate_step.call_count == 0
-        )
-        assert (
-            external_logging_callback.metric_aggregator.log_aggregated_metrics.call_count
-            == 1
-        )
+        assert external_logging_callback.metric_aggregator.aggregated_steps == []
+        assert len(external_logging_callback.metric_aggregator.logged_metrics) == 1
         assert unrecognized_step_callback.step_call_count == 3
         assert unrecognized_step_callback.n_calls == 3
 
@@ -270,10 +259,12 @@ class TestOffPolicyCallbackBatching:
 
         assert external_saving_callback.step_call_count == 3
         assert external_saving_callback.n_calls == 3
-        external_saving_callback.connector.upload.assert_called_once_with(
-            agent=external_saving_callback.agent,
-            checkpoint_id=3,
-        )
+        assert external_saving_callback.connector.uploads == [
+            {
+                "agent": external_saving_callback.agent,
+                "checkpoint_id": 3,
+            }
+        ]
 
 
 class TestCallbackCompatibility:
@@ -295,9 +286,7 @@ class TestCallbackCompatibility:
         assert unrecognized_step_callback.n_calls == 4
         assert external_logging_callback.step_call_count == 0
         assert external_logging_callback.n_calls == 4
-        assert (
-            external_logging_callback.metric_aggregator.aggregate_step.call_count == 0
-        )
+        assert external_logging_callback.metric_aggregator.aggregated_steps == []
 
     def test_preserves_step_aggregation_for_an_unknown_aggregator(
         self,
@@ -311,6 +300,174 @@ class TestCallbackCompatibility:
         )
 
         assert (
-            external_legacy_logging_callback.metric_aggregator.aggregate_step.call_count
+            len(external_legacy_logging_callback.metric_aggregator.aggregated_steps)
             == 4
         )
+
+
+class TestCallbackStateEquivalence:
+    """Batched adapters match genuine per-step callback state transitions."""
+
+    def test_matches_on_policy_reward_distribution_and_metric_state(
+        self,
+        logging_callback_pair,
+        on_policy_episode_with_metrics,
+        replay_callback_by_step,
+        process_callback_by_episode,
+        snapshot_logging_callback,
+    ):
+        """Raw rewards, distributions, metadata, metrics, and end reasons match."""
+        reference_callback, batched_callback = logging_callback_pair
+        batch = pack_episode(on_policy_episode_with_metrics)
+
+        reference_decisions = replay_callback_by_step(reference_callback, batch)
+        batched_decision = process_callback_by_episode(batched_callback, batch)
+
+        assert all(reference_decisions)
+        assert batched_decision is True
+        assert snapshot_logging_callback(
+            reference_callback
+        ) == snapshot_logging_callback(batched_callback)
+        assert batched_callback.metric_aggregator.episode_rewards[0] == [3.0]
+
+    def test_matches_metadata_deduplication_and_logging_frequency(
+        self,
+        logging_callback_pair,
+        on_policy_episode_with_metrics,
+        on_policy_episode_with_changed_metadata,
+        replay_callback_by_step,
+        process_callback_by_episode,
+        snapshot_logging_callback,
+    ):
+        """Repeated and changed metadata produce identical two-episode log state."""
+        reference_callback, batched_callback = logging_callback_pair
+        batches = (
+            pack_episode(on_policy_episode_with_metrics),
+            pack_episode(on_policy_episode_with_changed_metadata),
+        )
+
+        start_timestep = 0
+        for batch in batches:
+            assert all(
+                replay_callback_by_step(
+                    reference_callback,
+                    batch,
+                    start_timestep,
+                )
+            )
+            assert process_callback_by_episode(
+                batched_callback,
+                batch,
+                start_timestep,
+            )
+            start_timestep += batch.transition_count
+
+        assert snapshot_logging_callback(
+            reference_callback
+        ) == snapshot_logging_callback(batched_callback)
+        assert len(batched_callback.metric_aggregator.logged_metrics) == 1
+        assert batched_callback.connector.logged_dicts == [
+            ({"map": "test"}, "meta_settings"),
+            ({"map": "changed"}, "meta_settings"),
+        ]
+
+    def test_discards_all_episode_local_aggregates_but_keeps_metadata(
+        self,
+        logging_callback_pair,
+        on_policy_episode_with_metrics,
+        discarded_on_policy_episode,
+        replay_callback_by_step,
+        process_callback_by_episode,
+        snapshot_logging_callback,
+    ):
+        """Discarded rewards, actions, metrics, and end reasons never leak."""
+        reference_callback, batched_callback = logging_callback_pair
+        accepted_batch = pack_episode(on_policy_episode_with_metrics)
+        discarded_batch = pack_episode(discarded_on_policy_episode)
+
+        assert all(replay_callback_by_step(reference_callback, accepted_batch))
+        assert process_callback_by_episode(batched_callback, accepted_batch)
+        assert all(
+            replay_callback_by_step(
+                reference_callback,
+                discarded_batch,
+                start_timestep=2,
+            )
+        )
+        assert process_callback_by_episode(
+            batched_callback,
+            discarded_batch,
+            start_timestep=2,
+        )
+
+        assert snapshot_logging_callback(
+            reference_callback
+        ) == snapshot_logging_callback(batched_callback)
+        aggregator = batched_callback.metric_aggregator
+        assert len(aggregator.logged_metrics) == 1
+        logged_metrics = aggregator.logged_metrics[0]
+        assert logged_metrics["episode_rewards"] == [3.0]
+        assert len(logged_metrics["episode_actions"]) == 2
+        assert logged_metrics["episode_step_metrics"]["speed"] == [2.0, 4.0]
+        assert logged_metrics["episode_end_reasons"] == ["TIMEOUT"]
+        assert batched_callback.connector.logged_dicts == [
+            ({"map": "test"}, "meta_settings")
+        ]
+
+    def test_matches_pruning_window_and_uses_environment_reward(
+        self,
+        pruning_callback_pair,
+        on_policy_episode,
+        replay_callback_by_step,
+        process_callback_by_episode,
+    ):
+        """A raw-reward window prunes where bootstrapped training rewards would not."""
+        reference_callback, batched_callback = pruning_callback_pair
+        batch = pack_episode(on_policy_episode)
+
+        first_reference = replay_callback_by_step(reference_callback, batch)
+        first_batched = process_callback_by_episode(batched_callback, batch)
+        second_reference = replay_callback_by_step(
+            reference_callback,
+            batch,
+            start_timestep=2,
+        )
+        second_batched = process_callback_by_episode(
+            batched_callback,
+            batch,
+            start_timestep=2,
+        )
+
+        assert first_reference[-1] is True
+        assert first_batched is True
+        assert second_reference[-1] is False
+        assert second_batched is False
+        assert list(reference_callback.episode_rewards) == list(
+            batched_callback.episode_rewards
+        )
+        assert [float(value) for value in batched_callback.episode_rewards] == [
+            3.0,
+            3.0,
+        ]
+        assert reference_callback.n_calls == batched_callback.n_calls == 4
+        assert reference_callback.num_timesteps == batched_callback.num_timesteps == 4
+
+    def test_matches_off_policy_reward_and_action_state(
+        self,
+        logging_callback_pair,
+        off_policy_episode_with_metrics,
+        replay_callback_by_step,
+        process_callback_by_episode,
+        snapshot_logging_callback,
+    ):
+        """Off-policy callbacks retain their existing rewards and buffer actions."""
+        reference_callback, batched_callback = logging_callback_pair
+        batch = pack_episode(off_policy_episode_with_metrics)
+
+        assert all(replay_callback_by_step(reference_callback, batch))
+        assert process_callback_by_episode(batched_callback, batch)
+
+        assert snapshot_logging_callback(
+            reference_callback
+        ) == snapshot_logging_callback(batched_callback)
+        assert batched_callback.metric_aggregator.episode_rewards[0] == [3.0]

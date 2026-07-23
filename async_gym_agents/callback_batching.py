@@ -88,7 +88,11 @@ class LoggingCallbackAdapter(EpisodeCallbackAdapter):
                     resolve_episode_action_field(batch.episode_kind),
                     transition_index,
                 ),
-                slice_episode_field(batch, "rewards", transition_index),
+                slice_episode_field(
+                    batch,
+                    resolve_episode_reward_field(batch.episode_kind),
+                    transition_index,
+                ),
                 slice_episode_field(batch, "dones", transition_index),
                 infos,
             )
@@ -101,7 +105,24 @@ class LoggingCallbackAdapter(EpisodeCallbackAdapter):
         aggregator = callback.metric_aggregator
         # Workers pack each completed environment into its own episode batch.
         episode_agent_index = 0
-        rewards = batch.fields["rewards"]
+        terminal_index = batch.transition_count - 1
+        terminal_dones = slice_episode_field(batch, "dones", terminal_index)
+        terminal_infos = get_episode_infos(batch, terminal_index)
+        discarded = any(
+            terminal_infos[done_index].get(constants.DISCARD_INFO_KEY, False)
+            for done_index in np.flatnonzero(terminal_dones)
+        )
+        if discarded:
+            self._log_episode_metadata(callback, batch)
+            if aggregator.episode_reward is None:
+                reward_values = batch.fields[
+                    resolve_episode_reward_field(batch.episode_kind)
+                ]
+                aggregator.episode_reward = np.zeros(1, dtype=reward_values.dtype)
+            aggregator.episode_reward[episode_agent_index] = 0
+            return
+
+        rewards = batch.fields[resolve_episode_reward_field(batch.episode_kind)]
         if aggregator.episode_reward is None:
             aggregator.episode_reward = np.zeros(1, dtype=rewards.dtype)
         aggregator.episode_reward[episode_agent_index] += np.sum(rewards)
@@ -115,21 +136,17 @@ class LoggingCallbackAdapter(EpisodeCallbackAdapter):
             )
 
         self._aggregate_episode_infos(callback, batch)
-        terminal_index = batch.transition_count - 1
-        terminal_dones = slice_episode_field(batch, "dones", terminal_index)
-        terminal_infos = get_episode_infos(batch, terminal_index)
         for done_index in np.flatnonzero(terminal_dones):
             terminal_info = terminal_infos[done_index]
-            if not terminal_info.get(constants.DISCARD_INFO_KEY, False):
-                aggregator.episode_rewards.setdefault(done_index, []).append(
-                    aggregator.episode_reward[done_index]
-                )
-                end_reason = terminal_info.get(constants.EPISODE_END_REASON_INFO_KEY)
-                if end_reason is not None:
-                    aggregator.episode_end_reasons.setdefault(
-                        done_index,
-                        deque(maxlen=constants.EPISODE_END_REASON_WINDOW_SIZE),
-                    ).append(end_reason)
+            aggregator.episode_rewards.setdefault(done_index, []).append(
+                aggregator.episode_reward[done_index]
+            )
+            end_reason = terminal_info.get(constants.EPISODE_END_REASON_INFO_KEY)
+            if end_reason is not None:
+                aggregator.episode_end_reasons.setdefault(
+                    done_index,
+                    deque(maxlen=constants.EPISODE_END_REASON_WINDOW_SIZE),
+                ).append(end_reason)
             aggregator.episode_reward[done_index] = 0
 
     def _aggregate_episode_infos(
@@ -235,7 +252,11 @@ class ExperimentPruningCallbackAdapter(EpisodeCallbackAdapter):
     def process_episode(self, context: EpisodeCallbackContext) -> bool:
         callback = self.callback
         batch = context.batch
-        episode_rewards = np.sum(batch.fields["rewards"], axis=0, keepdims=True)
+        episode_rewards = np.sum(
+            batch.fields[resolve_episode_reward_field(batch.episode_kind)],
+            axis=0,
+            keepdims=True,
+        )
         terminal_index = batch.transition_count - 1
         terminal_dones = slice_episode_field(batch, "dones", terminal_index)
         terminal_infos = get_episode_infos(batch, terminal_index)
@@ -319,7 +340,11 @@ class TerminalStepCallbackAdapter(EpisodeCallbackAdapter):
                     resolve_episode_action_field(batch.episode_kind),
                     terminal_index,
                 ),
-                "rewards": slice_episode_field(batch, "rewards", terminal_index),
+                "rewards": slice_episode_field(
+                    batch,
+                    resolve_episode_reward_field(batch.episode_kind),
+                    terminal_index,
+                ),
                 "dones": slice_episode_field(batch, "dones", terminal_index),
                 "infos": get_episode_infos(batch, terminal_index),
                 "reset_infos": get_episode_reset_infos(batch, terminal_index),
@@ -447,9 +472,18 @@ class CallbackBatchDispatcher:
 def resolve_episode_action_field(episode_kind: EpisodeKind) -> str:
     """Return the packed action field consumed by framework logging."""
     if episode_kind is EpisodeKind.ON_POLICY:
-        return "actions"
+        return constants.ON_POLICY_ACTIONS_FIELD
     if episode_kind is EpisodeKind.OFF_POLICY:
-        return "buffer_actions"
+        return constants.OFF_POLICY_ACTIONS_FIELD
+    raise ValueError(f"Unsupported episode kind: {episode_kind!r}")
+
+
+def resolve_episode_reward_field(episode_kind: EpisodeKind) -> str:
+    """Return the callback-visible reward field for an episode kind."""
+    if episode_kind is EpisodeKind.ON_POLICY:
+        return constants.ON_POLICY_ENVIRONMENT_REWARDS_FIELD
+    if episode_kind is EpisodeKind.OFF_POLICY:
+        return constants.OFF_POLICY_REWARDS_FIELD
     raise ValueError(f"Unsupported episode kind: {episode_kind!r}")
 
 
