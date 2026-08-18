@@ -4,6 +4,7 @@ from dataclasses import replace
 from unittest.mock import patch
 
 import numpy as np
+import torch
 
 from async_gym_agents import constants
 from async_gym_agents.agents.on_policy_injector import (
@@ -25,13 +26,13 @@ ASSEMBLER_CLASSIFICATION_WAIT_SECONDS = 0.02
 class TestAsyncOnPolicyRolloutAssembler:
     """Buffer B is filled from complete episodes while buffer A is in use."""
 
-    def test_prepares_a_full_rollout_buffer_before_acquisition(
+    def test_prepares_raw_rollout_fields_before_acquisition(
         self,
         on_policy_packet,
         on_policy_rollout_buffer,
         build_reference_rollout_buffer,
     ):
-        """The acquired buffer is immediately ready for on-policy training."""
+        """The acquired buffer's raw fields are ready for the trainer to finalize."""
         transport = EpisodeTransport(
             worker_count=1,
             max_pending_episodes=1,
@@ -57,8 +58,8 @@ class TestAsyncOnPolicyRolloutAssembler:
             prepared_rollout.episodes,
         )
 
-        assert prepared_rollout.rollout_buffer.full is True
-        assert prepared_rollout.rollout_buffer.pos == 2
+        # Returns/advantages and pos/full are finalized by the trainer, not here.
+        assert prepared_rollout.rollout_buffer.full is False
         for field_name in (
             "observations",
             "actions",
@@ -66,8 +67,6 @@ class TestAsyncOnPolicyRolloutAssembler:
             "episode_starts",
             "values",
             "log_probs",
-            "returns",
-            "advantages",
         ):
             np.testing.assert_array_equal(
                 getattr(prepared_rollout.rollout_buffer, field_name),
@@ -76,14 +75,6 @@ class TestAsyncOnPolicyRolloutAssembler:
         assert prepared_rollout.episodes[0].batch.fields[
             constants.ON_POLICY_ENVIRONMENT_REWARDS_FIELD
         ].tolist() == [1.0, 2.0]
-        np.testing.assert_allclose(
-            prepared_rollout.rollout_buffer.returns[:, 0],
-            np.array([3.84625, 3.0], dtype=np.float32),
-        )
-        np.testing.assert_allclose(
-            prepared_rollout.rollout_buffer.advantages[:, 0],
-            np.array([3.59625, 2.5], dtype=np.float32),
-        )
         assembler.shutdown()
         transport.shutdown()
 
@@ -124,14 +115,6 @@ class TestAsyncOnPolicyRolloutAssembler:
                 prepared_rollout.rollout_buffer.observations[key],
                 reference_buffer.observations[key],
             )
-        np.testing.assert_array_equal(
-            prepared_rollout.rollout_buffer.returns,
-            reference_buffer.returns,
-        )
-        np.testing.assert_array_equal(
-            prepared_rollout.rollout_buffer.advantages,
-            reference_buffer.advantages,
-        )
         assert prepared_rollout.rollout_buffer.pos == reference_buffer.pos
         assert prepared_rollout.rollout_buffer.full is reference_buffer.full
         assembler.shutdown()
@@ -365,6 +348,15 @@ class TestOnPolicyCompleteEpisodeAssembly:
         """Callbacks receive raw rewards even when the rollout buffer is adjusted."""
         enqueue_episode_packet(initialized_reward_test_agent, on_policy_packet)
         reward_recording_callback.init_callback(initialized_reward_test_agent)
+        policy = initialized_reward_test_agent.policy
+        terminal_obs = policy.obs_to_tensor(
+            np.array([3.0, 4.0], dtype=np.float32)
+        )[0]
+        with torch.inference_mode():
+            terminal_value = policy.predict_values(terminal_obs)[0].item()
+        expected_bootstrapped_reward = (
+            3.0 + initialized_reward_test_agent.gamma * terminal_value
+        )
 
         completed = initialized_reward_test_agent.collect_rollouts(
             initialized_reward_test_agent.env,
@@ -375,10 +367,15 @@ class TestOnPolicyCompleteEpisodeAssembly:
 
         assert completed is True
         assert reward_recording_callback.rewards == [1.0, 2.0]
-        assert initialized_reward_test_agent.rollout_buffer.rewards[:, 0].tolist() == [
-            1.0,
-            3.0,
-        ]
+        rollout_buffer = initialized_reward_test_agent.rollout_buffer
+        np.testing.assert_allclose(
+            rollout_buffer.rewards[:, 0],
+            np.array([1.0, expected_bootstrapped_reward], dtype=np.float32),
+        )
+        # The trainer, not the assembler, finalizes returns/advantages and full/pos
+        # so it can use its own live policy for the truncation bootstrap above.
+        assert rollout_buffer.full is True
+        assert rollout_buffer.pos == 2
 
 
 class TestOffPolicyEpisodeAssembly:
@@ -448,7 +445,7 @@ class TestOffPolicyEpisodeAssembly:
 
 
 class TestTruncatedRewardBootstrap:
-    """Time-limit rewards are finalized before background buffer construction."""
+    """Time-limit rewards are finalized by the trainer using its own live policy."""
 
     def test_uses_the_rollout_policy_only_for_truncated_episodes(
         self,

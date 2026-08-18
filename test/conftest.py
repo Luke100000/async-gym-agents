@@ -627,7 +627,12 @@ def build_reference_rollout_buffer():
         np.copyto(destination, source.reshape(destination.shape))
 
     def build(template, episodes):
-        """Build a reference buffer with the pre-remediation allocation path."""
+        """Build a reference buffer with the pre-remediation allocation path.
+
+        Mirrors only the assembler's raw-field concatenation. Returns/advantages,
+        the truncation-reward bootstrap, and `pos`/`full` are finalized by the
+        trainer afterwards using its own live policy, not by the assembler.
+        """
         transition_count = sum(episode.batch.transition_count for episode in episodes)
         rollout_buffer = copy.copy(template)
         rollout_buffer.buffer_size = transition_count
@@ -646,15 +651,6 @@ def build_reference_rollout_buffer():
                 destination,
                 [episode.batch.fields[field_name] for episode in episodes],
             )
-        final_dones = (
-            episodes[-1].batch.fields["dones"][-1:].reshape(rollout_buffer.n_envs)
-        )
-        rollout_buffer.compute_returns_and_advantage(
-            last_values=torch.zeros(rollout_buffer.n_envs),
-            dones=final_dones,
-        )
-        rollout_buffer.pos = transition_count
-        rollout_buffer.full = True
         return rollout_buffer
 
     return build
