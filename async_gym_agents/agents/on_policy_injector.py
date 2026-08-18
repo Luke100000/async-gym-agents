@@ -132,80 +132,14 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
             for assembled_episode in prepared_rollout.episodes:
                 batch = assembled_episode.batch
                 episode_start_timestep = self.num_timesteps
-                if callback_dispatcher.needs_step_callbacks:
-                    for transition_index in range(batch.transition_count):
-                        if (
-                            self.use_sde
-                            and self.sde_sample_freq > 0
-                            and n_steps % self.sde_sample_freq == 0
-                        ):
-                            self.policy.reset_noise(1)
+                for transition_index in range(batch.transition_count):
+                    if (
+                        self.use_sde
+                        and self.sde_sample_freq > 0
+                        and n_steps % self.sde_sample_freq == 0
+                    ):
+                        self.policy.reset_noise(1)
 
-                        new_obs = slice_episode_field(
-                            batch,
-                            "new_obs",
-                            transition_index,
-                        )
-                        self._last_obs = slice_episode_field(
-                            batch,
-                            "last_obs",
-                            transition_index,
-                        )
-                        actions = rollout_buffer.actions[buffer_index]
-                        training_rewards = rollout_buffer.rewards[buffer_index]
-                        environment_rewards = slice_episode_field(
-                            batch,
-                            constants.ON_POLICY_ENVIRONMENT_REWARDS_FIELD,
-                            transition_index,
-                        )
-                        rewards = environment_rewards
-                        self._last_episode_starts = rollout_buffer.episode_starts[
-                            buffer_index
-                        ]
-                        values = torch.from_numpy(rollout_buffer.values[buffer_index])
-                        log_probs = torch.from_numpy(
-                            rollout_buffer.log_probs[buffer_index]
-                        )
-                        dones = slice_episode_field(
-                            batch,
-                            "dones",
-                            transition_index,
-                        )
-                        infos = get_episode_infos(batch, transition_index)
-                        reset_infos = get_episode_reset_infos(
-                            batch,
-                            transition_index,
-                        )
-
-                        self.num_timesteps += 1
-                        if not callback_dispatcher.process_step(locals()):
-                            return False
-
-                        self._update_info_buffer(infos, dones)
-                        n_steps += 1
-                        buffer_index += 1
-                else:
-                    if self.use_sde and self.sde_sample_freq > 0:
-                        first_reset_offset = (-n_steps) % self.sde_sample_freq
-                        for reset_offset in range(
-                            first_reset_offset,
-                            batch.transition_count,
-                            self.sde_sample_freq,
-                        ):
-                            self.num_timesteps = episode_start_timestep + reset_offset
-                            self.policy.reset_noise(1)
-                        self.num_timesteps = episode_start_timestep
-
-                    for transition_index, infos in batch.infos.items():
-                        dones = slice_episode_field(
-                            batch,
-                            "dones",
-                            transition_index,
-                        )
-                        self._update_info_buffer(infos, dones)
-
-                    transition_index = batch.transition_count - 1
-                    final_buffer_index = buffer_index + transition_index
                     new_obs = slice_episode_field(
                         batch,
                         "new_obs",
@@ -216,8 +150,8 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
                         "last_obs",
                         transition_index,
                     )
-                    actions = rollout_buffer.actions[final_buffer_index]
-                    training_rewards = rollout_buffer.rewards[final_buffer_index]
+                    actions = rollout_buffer.actions[buffer_index]
+                    training_rewards = rollout_buffer.rewards[buffer_index]
                     environment_rewards = slice_episode_field(
                         batch,
                         constants.ON_POLICY_ENVIRONMENT_REWARDS_FIELD,
@@ -225,12 +159,10 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
                     )
                     rewards = environment_rewards
                     self._last_episode_starts = rollout_buffer.episode_starts[
-                        final_buffer_index
+                        buffer_index
                     ]
-                    values = torch.from_numpy(rollout_buffer.values[final_buffer_index])
-                    log_probs = torch.from_numpy(
-                        rollout_buffer.log_probs[final_buffer_index]
-                    )
+                    values = torch.from_numpy(rollout_buffer.values[buffer_index])
+                    log_probs = torch.from_numpy(rollout_buffer.log_probs[buffer_index])
                     dones = slice_episode_field(
                         batch,
                         "dones",
@@ -241,9 +173,14 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
                         batch,
                         transition_index,
                     )
-                    self.num_timesteps += batch.transition_count
-                    n_steps += batch.transition_count
-                    buffer_index += batch.transition_count
+
+                    self.num_timesteps += 1
+                    if not callback_dispatcher.process_step(locals()):
+                        return False
+
+                    self._update_info_buffer(infos, dones)
+                    n_steps += 1
+                    buffer_index += 1
 
                 callback_context = EpisodeCallbackContext(
                     batch=batch,

@@ -368,10 +368,6 @@ class CallbackBatchDispatcher:
         self.step_callbacks: List[BaseCallback] = []
         self._classify_callback(callback)
 
-    @property
-    def needs_step_callbacks(self) -> bool:
-        return bool(self.step_callbacks)
-
     def process_step(self, callback_locals: dict) -> bool:
         """Advance one transition and invoke callbacks without an episode adapter."""
         num_timesteps = callback_locals["self"].num_timesteps
@@ -392,10 +388,6 @@ class CallbackBatchDispatcher:
     def process_episode(self, context: EpisodeCallbackContext) -> bool:
         """Dispatch one complete episode to every installed callback adapter."""
         if self.episode_kind is EpisodeKind.ON_POLICY:
-            if not self.needs_step_callbacks:
-                for callback_list in self.callback_lists:
-                    callback_list.n_calls += context.batch.transition_count
-                    callback_list.num_timesteps = context.end_timestep
             for adapter in self.episode_adapters:
                 adapter.advance_callback(
                     context.batch.transition_count,
