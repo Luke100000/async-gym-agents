@@ -246,19 +246,19 @@ class TestOffPolicyCallbackBatching:
             np.array([0.1, 0.2], dtype=np.float32),
         )
 
-    def test_preserves_checkpoint_checks_per_transition(
+    def test_saves_at_episode_boundaries_for_off_policy_too(
         self,
         short_episode_off_policy_agent,
         external_saving_callback,
     ):
-        """A changing off-policy model keeps the original checkpoint step boundary."""
+        """A checkpoint callback batches by episode for off-policy collection as well."""
         short_episode_off_policy_agent.learn(
-            total_timesteps=3,
+            total_timesteps=4,
             callback=external_saving_callback,
         )
 
-        assert external_saving_callback.step_call_count == 3
-        assert external_saving_callback.n_calls == 3
+        assert external_saving_callback.step_call_count == 0
+        assert external_saving_callback.n_calls == 4
         assert external_saving_callback.connector.uploads == [
             {
                 "agent": external_saving_callback.agent,
