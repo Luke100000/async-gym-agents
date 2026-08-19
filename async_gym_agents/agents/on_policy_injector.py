@@ -1,5 +1,4 @@
-from dataclasses import dataclass
-from typing import Dict, Generator, Type
+from typing import Generator, Optional, Type
 
 import gymnasium as gym
 import numpy as np
@@ -8,26 +7,45 @@ from gymnasium import spaces
 from stable_baselines3.common.buffers import RolloutBuffer
 from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.on_policy_algorithm import OnPolicyAlgorithm
+from stable_baselines3.common.policies import BasePolicy
 from stable_baselines3.common.utils import obs_as_tensor
 from stable_baselines3.common.vec_env import VecEnv
-from stable_baselines3.common.vec_env.base_vec_env import VecEnvObs
 
+from async_gym_agents import constants
 from async_gym_agents.agents.injector import AsyncAgentInjector, InjectorWorkerBase
+from async_gym_agents.data_classes import OnPolicyTransition as Transition
+from async_gym_agents.episode_codec import (
+    get_episode_infos,
+    get_episode_reset_infos,
+    slice_episode_field,
+)
+from async_gym_agents.on_policy_rollout_assembler import (
+    AsyncOnPolicyRolloutAssembler,
+)
 from async_gym_agents.utils import copy_obs, single_slice
 
 
-@dataclass
-class Transition:
-    actions: np.ndarray
-    values: np.ndarray
-    log_probs: np.ndarray
-    last_obs: VecEnvObs
-    new_obs: VecEnvObs
-    rewards: np.ndarray
-    dones: np.ndarray
-    last_dones: np.ndarray
-    infos: list[Dict]
-    reset_infos: list[Dict]
+def bootstrap_truncated_rewards(
+    policy: BasePolicy,
+    gamma: float,
+    rewards: np.ndarray,
+    dones: np.ndarray,
+    infos: list[dict],
+) -> None:
+    """Bootstrap time-limit rewards with the rollout policy's terminal value."""
+    for index, done in enumerate(dones):
+        terminal_observation = infos[index].get("terminal_observation")
+        if (
+            not done
+            or terminal_observation is None
+            or not infos[index].get("TimeLimit.truncated", False)
+        ):
+            continue
+
+        terminal_obs = policy.obs_to_tensor(terminal_observation)[0]
+        with torch.inference_mode():
+            terminal_value = policy.predict_values(terminal_obs)[0]
+        rewards[index] += gamma * terminal_value.item()
 
 
 class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
@@ -38,7 +56,7 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
         use_mp: bool = False,
         worker_start_interval_seconds: float = 0.0,
         skip_truncated: bool = False,
-        queue_put_timeout: float = 60.0,
+        queue_put_timeout: Optional[float] = None,
         worker_join_timeout: float = 120.0,
         profiler_sync_interval: float = 1.0,
         mp_threads: int = 1,
@@ -56,7 +74,7 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
         )
         super(AsyncAgentInjector, self).__init__(*args, **kwargs)
 
-    # must be updated from SB3 (!)
+    # This implementation mirrors SB3's rollout lifecycle and must track upgrades.
     def collect_rollouts(
         self,
         env: VecEnv,
@@ -79,16 +97,20 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
         """
         assert self._last_obs is not None, "No previous observation was provided"
 
-        # Switch to eval mode (this affects batch norm / dropout)
         self.policy.set_training_mode(False)
-
         self.pre_collect_preparation(self.policy)
+        self._initialize_rollout_assembler(n_rollout_steps)
+        with self._profiler_main.track("assembler_acquire"):
+            prepared_rollout = self._acquire_prepared_assembly()
+        self.rollout_buffer = prepared_rollout.rollout_buffer
+        rollout_buffer = prepared_rollout.rollout_buffer
+        for assembled_episode in prepared_rollout.episodes:
+            self._record_policy_lag(
+                assembled_episode.policy_version,
+                assembled_episode.batch.transition_count,
+            )
 
         n_steps = 0
-        rollout_buffer.n_envs = 1
-        rollout_buffer.reset()
-
-        # Sample new weights for the state-dependent exploration
         if self.use_sde:
             self.policy.reset_noise(1)
 
@@ -96,81 +118,95 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
 
         new_obs = None
         dones = None
-        while n_steps < n_rollout_steps:
-            if (
-                self.use_sde
-                and self.sde_sample_freq > 0
-                and n_steps % self.sde_sample_freq == 0
-            ):
-                # Sample a new noise matrix
-                self.policy.reset_noise(1)
-
-            # Fetch transitions from workers
-            transition: Transition = self.fetch_transition()
-
-            with self._profiler_main.track("processing"):
-                # Make locals available for callbacks
-                new_obs = transition.new_obs
-                self._last_obs = transition.last_obs
-                actions = transition.actions
-                rewards = transition.rewards
-                self._last_episode_starts = transition.last_dones
-                values = torch.from_numpy(transition.values)
-                log_probs = torch.from_numpy(transition.log_probs)
-                dones = transition.dones
-                infos = transition.infos
-                reset_infos = transition.reset_infos
-
-                self.num_timesteps += 1
-
-                # Give access to local variables
-                callback.update_locals(locals())
-                if not callback.on_step():
-                    return False
-
-                self._update_info_buffer(infos, dones)
-                n_steps += 1
-
-                # Handle timeout by bootstrapping with value function
-                # see GitHub issue #633
-                for idx, done in enumerate(dones):
+        buffer_index = 0
+        with self._profiler_main.track("transition_processing"):
+            for assembled_episode in prepared_rollout.episodes:
+                batch = assembled_episode.batch
+                for transition_index in range(batch.transition_count):
                     if (
-                        done
-                        and infos[idx].get("terminal_observation") is not None
-                        and infos[idx].get("TimeLimit.truncated", False)
+                        self.use_sde
+                        and self.sde_sample_freq > 0
+                        and n_steps % self.sde_sample_freq == 0
                     ):
-                        terminal_obs = self.policy.obs_to_tensor(
-                            infos[idx]["terminal_observation"]
-                        )[0]
-                        with torch.inference_mode():
-                            terminal_value = self.policy.predict_values(terminal_obs)[0]
-                        rewards[idx] += self.gamma * terminal_value
+                        self.policy.reset_noise(1)
 
-                assert rollout_buffer.n_envs == 1
+                    new_obs = slice_episode_field(
+                        batch,
+                        "new_obs",
+                        transition_index,
+                    )
+                    self._last_obs = slice_episode_field(
+                        batch,
+                        "last_obs",
+                        transition_index,
+                    )
+                    actions = rollout_buffer.actions[buffer_index]
+                    training_rewards = rollout_buffer.rewards[buffer_index]
+                    environment_rewards = slice_episode_field(
+                        batch,
+                        constants.ON_POLICY_ENVIRONMENT_REWARDS_FIELD,
+                        transition_index,
+                    )
+                    rewards = environment_rewards
+                    self._last_episode_starts = rollout_buffer.episode_starts[
+                        buffer_index
+                    ]
+                    values = torch.from_numpy(rollout_buffer.values[buffer_index])
+                    log_probs = torch.from_numpy(rollout_buffer.log_probs[buffer_index])
+                    dones = slice_episode_field(
+                        batch,
+                        "dones",
+                        transition_index,
+                    )
+                    infos = get_episode_infos(batch, transition_index)
+                    reset_infos = get_episode_reset_infos(
+                        batch,
+                        transition_index,
+                    )
 
-                rollout_buffer.add(
-                    self._last_obs,
-                    actions,
-                    rewards,
-                    self._last_episode_starts,
-                    values,
-                    log_probs,
-                )
+                    # GH issue #633: bootstrap truncated-episode rewards with the
+                    # trainer's own, continuously-updated policy rather than a
+                    # worker's cached snapshot, which may be many episodes stale.
+                    bootstrap_truncated_rewards(
+                        self.policy,
+                        self.gamma,
+                        training_rewards,
+                        dones,
+                        infos,
+                    )
 
-        with self._profiler_main.track("processing"):
-            with torch.inference_mode():
-                # Compute value for the last timestep
-                values = self.policy.predict_values(obs_as_tensor(new_obs, self.device))
+                    self.num_timesteps += 1
+                    callback.update_locals(locals())
+                    if not callback.on_step():
+                        return False
 
-            rollout_buffer.compute_returns_and_advantage(
-                last_values=values, dones=dones
-            )
+                    self._update_info_buffer(infos, dones)
+                    n_steps += 1
+                    buffer_index += 1
 
-            callback.update_locals(locals())
+        rollout_buffer.compute_returns_and_advantage(
+            last_values=torch.zeros(rollout_buffer.n_envs),
+            dones=dones,
+        )
+        rollout_buffer.pos = buffer_index
+        rollout_buffer.full = True
+
+        callback.update_locals(locals())
 
         callback.on_rollout_end()
 
         return True
+
+    def _initialize_rollout_assembler(self, target_transition_count: int) -> None:
+        if self._episode_assembler is not None:
+            return
+        self._episode_assembler = AsyncOnPolicyRolloutAssembler(
+            transport=self._episode_transport,
+            target_transition_count=target_transition_count,
+            profiler=self._profiler_main,
+            rollout_buffer_template=self.rollout_buffer,
+        )
+        self._episode_assembler.start()
 
     def get_worker_class(self) -> Type[InjectorWorkerBase]:
         return InjectorWorker
@@ -231,6 +267,12 @@ class InjectorWorker(InjectorWorkerBase):
             with self._profiler.track("stepping"):
                 new_obs, rewards, dones, infos = self.env.step(clipped_actions)
 
+            environment_rewards = rewards.copy()
+            # The TimeLimit-truncation bootstrap correction (GH issue #633) is
+            # applied by the trainer in collect_rollouts, using its own live
+            # policy instead of this worker's cached, potentially stale copy.
+            training_rewards = environment_rewards.copy()
+
             if isinstance(self.action_space, spaces.Discrete):
                 # Reshape in case of discrete action
                 actions = actions.reshape(-1, 1)
@@ -242,16 +284,20 @@ class InjectorWorker(InjectorWorkerBase):
                         episodes[idx] = []
                     episodes[idx].append(
                         Transition(
-                            single_slice(actions, idx),
-                            single_slice(values, idx),
-                            single_slice(log_probs, idx),
-                            copy_obs(single_slice(last_obs, idx)),
-                            copy_obs(single_slice(new_obs, idx)),
-                            single_slice(rewards, idx),
-                            single_slice(dones, idx),
-                            single_slice(last_dones, idx),
-                            single_slice(infos, idx),
-                            single_slice(self.env.reset_infos, idx),
+                            actions=single_slice(actions, idx),
+                            values=single_slice(values, idx),
+                            log_probs=single_slice(log_probs, idx),
+                            last_obs=copy_obs(single_slice(last_obs, idx)),
+                            new_obs=copy_obs(single_slice(new_obs, idx)),
+                            environment_rewards=single_slice(
+                                environment_rewards,
+                                idx,
+                            ),
+                            training_rewards=single_slice(training_rewards, idx),
+                            dones=single_slice(dones, idx),
+                            last_dones=single_slice(last_dones, idx),
+                            infos=single_slice(infos, idx),
+                            reset_infos=single_slice(self.env.reset_infos, idx),
                         )
                     )
             self._flush_profiler()
@@ -261,7 +307,6 @@ class InjectorWorker(InjectorWorkerBase):
             # Start a new episode
             for idx, done in enumerate(dones):
                 if done:
-                    yield episodes[idx]
-                    del episodes[idx]
+                    yield episodes.pop(idx)
 
-                    self.copy_policy_from_queue()
+                    self.copy_policy_from_store()

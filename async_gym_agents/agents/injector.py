@@ -3,21 +3,35 @@ import io
 import logging
 import multiprocessing
 import os
-import queue
+import signal
 import threading
 import time
 from contextlib import contextmanager
 from multiprocessing.context import Process as MPProcess
 from multiprocessing.managers import Namespace
-from multiprocessing.queues import Queue as MPQueue
 from multiprocessing.synchronize import Event as MPEvent
 from types import SimpleNamespace
-from typing import Any, Dict, Generator, List, Optional, Type, TypeAlias, cast
+from typing import Any, Callable, Dict, Generator, List, Optional, Type, TypeAlias, cast
 
 import torch
 from stable_baselines3.common.base_class import BasePolicy
 
+from async_gym_agents import constants
+from async_gym_agents.data_classes import (
+    EpisodeSendResult,
+    SharedPolicyDescriptor,
+    WorkerFailure,
+)
 from async_gym_agents.envs.multi_env import IndexableMultiEnv
+from async_gym_agents.episode_assembler import AsyncEpisodeAssembler
+from async_gym_agents.episode_codec import encode_episode_batch, pack_episode
+from async_gym_agents.episode_transport import (
+    EpisodeFeeder,
+    EpisodeSender,
+    EpisodeTransport,
+    WorkerTransportClosedError,
+)
+from async_gym_agents.policy_transport import SharedPolicyReader, SharedPolicyStore
 from async_gym_agents.profiler import (
     ProfileStats,
     RuntimeProfiler,
@@ -30,9 +44,25 @@ from async_gym_agents.utils import make_venv
 GenericState: TypeAlias = Namespace | SimpleNamespace
 GenericStateLock: TypeAlias = Any
 GenericEvent: TypeAlias = MPEvent | threading.Event
-GenericQueue: TypeAlias = MPQueue | queue.Queue
-GenericUpdateQueue: TypeAlias = MPQueue | queue.Queue
 GenericWorker: TypeAlias = MPProcess | threading.Thread
+WorkerFailureCallback: TypeAlias = Callable[[int, BaseException], None]
+
+
+class AsyncWorkerFailureError(RuntimeError):
+    """Aggregate attributable worker failures for the trainer."""
+
+    def __init__(self, failures: List[WorkerFailure]) -> None:
+        self.failures = tuple(failures)
+        details = ", ".join(
+            constants.WORKER_FAILURE_MESSAGE.format(
+                worker_index=failure.worker_index,
+                reason=failure.reason,
+            )
+            for failure in failures
+        )
+        super().__init__(
+            constants.ASYNC_WORKER_FAILURE_MESSAGE.format(failures=details)
+        )
 
 
 @contextmanager
@@ -58,7 +88,7 @@ class AsyncAgentInjector:
         use_mp: bool = False,
         worker_start_interval_seconds: float = 0.0,
         skip_truncated: bool = False,
-        queue_put_timeout: float = 60.0,
+        queue_put_timeout: Optional[float] = None,
         worker_join_timeout: float = 120.0,
         profiler_sync_interval: float = 1.0,
         mp_threads: int = 1,
@@ -70,7 +100,7 @@ class AsyncAgentInjector:
         :param use_mp: Use processes instead of threads
         :param worker_start_interval_seconds: Delay between parent-side worker starts
         :param skip_truncated: Skip episodes with truncated signal
-        :param queue_put_timeout: Timeout when putting an episode before dropping
+        :param queue_put_timeout: Optional timeout before dropping a blocked episode. None applies backpressure until shutdown.
         :param worker_join_timeout: Shutdown time before killing the process
         :param mp_threads: Cores used for various torch multiprocessing, which for workers should be lowered
         :param profiler_sync_interval: Worker profiler flush interval in seconds
@@ -80,7 +110,6 @@ class AsyncAgentInjector:
         self.use_mp = use_mp
         self.worker_start_interval_seconds = worker_start_interval_seconds
 
-        # noinspection PyTypeChecker
         self.mp_ctx = multiprocessing.get_context(mp_method)
 
         self._skip_truncated = skip_truncated
@@ -89,27 +118,30 @@ class AsyncAgentInjector:
         self._profiler_sync_interval = profiler_sync_interval
         self.mp_threads = mp_threads
 
-        # shared memory
-        self._episode_queue: GenericQueue | None = None
-        self._update_queues: List[GenericUpdateQueue] = []
-        self._transitions: List[Transition] = []
+        self._episode_transport: EpisodeTransport | None = None
+        self._policy_store: Optional[SharedPolicyStore] = None
+        self._episode_assembler: Optional[AsyncEpisodeAssembler[Any]] = None
 
-        # shared object (!)
         self._manager: Optional[multiprocessing.Manager] = None
         self._state: GenericState | None = None
         self._state_lock: GenericStateLock | None = None
         self._version = 0
 
         self._stop: GenericEvent | None = None
+        self._shutdown_started = threading.Event()
+        self._thread_failure_lock = threading.Lock()
+        self._thread_failures: Dict[int, WorkerFailure] = {}
 
         self._initialized = False
         self._initialized_workers = False
         self._workers: List[GenericWorker] = []
 
-        # Metrics
-        self._buffer_utilization = 0.0
-        self._buffer_emptiness = 0.0
-        self._buffer_stat_count = 0
+        self._policy_lag_total = 0
+        self._policy_lag_count = 0
+        self._policy_lag_max = 0
+        self._final_transport_report = {}
+        self._final_assembly_report = {}
+        self._final_policy_report = {}
 
         self._profiler_main = RuntimeProfiler()
         self._logger = logging.getLogger("async_gym_agents")
@@ -117,15 +149,17 @@ class AsyncAgentInjector:
     @staticmethod
     def _run_worker(
         worker_class: Type["InjectorWorkerBase"],
+        worker_index: int,
         env_func: EnvFactory,
-        episode_queue: GenericQueue,
-        update_queue: GenericUpdateQueue,
+        episode_sender: EpisodeSender,
+        policy_descriptor: SharedPolicyDescriptor,
         state: GenericState,
         state_lock: GenericStateLock,
         stop: GenericEvent,
         worker_kwargs: Dict[str, Any],
         policy_class: BasePolicy,
         policy_data: Dict[str, Any],
+        failure_callback: Optional[WorkerFailureCallback] = None,
         use_mp: bool = False,
         mp_threads: int = 1,
     ):
@@ -138,32 +172,41 @@ class AsyncAgentInjector:
                     "Failed to set torch threads, make sure to never call torch.set_num_threads() unconditional!"
                 )
 
-        worker = worker_class(
-            env_func=env_func,
-            episode_queue=episode_queue,
-            update_queue=update_queue,
-            state=state,
-            state_lock=state_lock,
-            stop=stop,
-            policy_class=policy_class,
-            policy_data=policy_data,
-            **worker_kwargs,
-        )
-
-        if use_mp:
-            logging.getLogger("async_gym_agents").info(
-                f"Worker has {torch.get_num_threads()} threads and {torch.get_num_interop_threads()} interop threads"
+        policy_reader = None
+        try:
+            policy_reader = SharedPolicyReader(policy_descriptor)
+            worker = worker_class(
+                worker_index=worker_index,
+                env_func=env_func,
+                episode_sender=episode_sender,
+                policy_reader=policy_reader,
+                state=state,
+                state_lock=state_lock,
+                stop=stop,
+                policy_class=policy_class,
+                policy_data=policy_data,
+                **worker_kwargs,
             )
 
-        worker.run()
+            if use_mp:
+                logging.getLogger("async_gym_agents").info(
+                    f"Worker has {torch.get_num_threads()} threads and {torch.get_num_interop_threads()} interop threads"
+                )
 
-        # Only close the queue in a child process; closing it in a thread
-        # would close the shared queue for all workers.
-        if use_mp:
-            episode_queue.close()
-            episode_queue.cancel_join_thread()
-            update_queue.close()
-            update_queue.cancel_join_thread()
+            worker.run()
+        except BaseException as error:
+            logging.getLogger("async_gym_agents").exception(
+                "Async worker %s failed",
+                worker_index,
+            )
+            if failure_callback is not None:
+                failure_callback(worker_index, error)
+            if use_mp:
+                raise
+        finally:
+            if policy_reader is not None:
+                policy_reader.close()
+            episode_sender.close()
 
     def get_worker_class(self) -> Type["InjectorWorkerBase"]:
         raise NotImplementedError()
@@ -175,7 +218,6 @@ class AsyncAgentInjector:
             profiler_sync_interval=self._profiler_sync_interval,
         )
 
-    # noinspection PyUnresolvedReferences
     def get_indexable_env(self) -> IndexableMultiEnv:
         """
         Asserts whether a correct environment is supplied
@@ -188,16 +230,31 @@ class AsyncAgentInjector:
     def pre_collect_preparation(self, policy: BasePolicy):
         self._init_collect_state()
 
-        with self._profiler_main.track("syncing"):
-            # weights -> bytes
+        with self._profiler_main.track("policy_serialization"):
             weights_buf = io.BytesIO()
             torch.save(policy.state_dict(), weights_buf)
             weights_bytes = weights_buf.getvalue()
 
-            self._version += 1
-            self._push_policy_update(self._version, weights_bytes)
+        next_version = self._version + 1
+        with self._profiler_main.track("policy_publication"):
+            if self._policy_store is None:
+                self._policy_store = SharedPolicyStore.create(
+                    initial_version=next_version,
+                    initial_payload=weights_bytes,
+                    mp_ctx=self.mp_ctx,
+                )
+                policy_stats = self._policy_store.get_stats()
+                self._logger.info(
+                    "Shared policy initialized: payload_bytes=%s, "
+                    "slot_capacity_bytes=%s",
+                    policy_stats.payload_bytes,
+                    policy_stats.slot_capacity_bytes,
+                )
+            else:
+                self._policy_store.publish(next_version, weights_bytes)
+        self._version = next_version
 
-            self._logger.debug(f"update policy to the version: {self._version}")
+        self._logger.debug(f"update policy to the version: {self._version}")
 
         with self._profiler_main.track("worker_bootstrap"):
             self._init_collect_processes(policy)
@@ -210,18 +267,13 @@ class AsyncAgentInjector:
         # primitives from the current mode before creating worker state.
         self._state_lock = self.mp_ctx.Lock() if self.use_mp else threading.Lock()
 
-        # Environment queue
-        self._episode_queue = (
-            self.mp_ctx.Queue(maxsize=self.max_episodes_in_buffer)
-            if self.use_mp
-            else queue.Queue(maxsize=self.max_episodes_in_buffer)
+        worker_count = len(self.get_indexable_env().env_fns)
+        self._episode_transport = EpisodeTransport(
+            worker_count=worker_count,
+            max_pending_episodes=self.max_episodes_in_buffer,
+            use_mp=self.use_mp,
+            mp_ctx=self.mp_ctx,
         )
-        self._update_queues = [
-            self.mp_ctx.Queue() if self.use_mp else queue.Queue()
-            for _ in self.get_indexable_env().env_fns
-        ]
-
-        # Shared state for metrics
         self._manager = self.mp_ctx.Manager() if self.use_mp else None
         self._state = self._manager.Namespace() if self.use_mp else SimpleNamespace()
 
@@ -233,8 +285,10 @@ class AsyncAgentInjector:
         self._state.worker_profiler_stats = self._manager.dict() if self.use_mp else {}
         self._state.worker_profiler_last_sync = None
 
-        # Stop signal
         self._stop = self.mp_ctx.Event() if self.use_mp else threading.Event()
+        self._shutdown_started.clear()
+        with self._thread_failure_lock:
+            self._thread_failures.clear()
 
         self._initialized = True
 
@@ -242,11 +296,9 @@ class AsyncAgentInjector:
         if self._initialized_workers:
             return
 
-        # Start workers
         self._workers = []
 
         policy_class = type(policy)
-        # noinspection PyProtectedMember
         policy_data = policy._get_constructor_parameters()
 
         worker_env = dict(
@@ -261,30 +313,35 @@ class AsyncAgentInjector:
 
         worker_env_fns = self.get_indexable_env().env_fns
         worker_count = len(worker_env_fns)
-        for worker_index, (env_func, update_queue) in enumerate(
-            zip(worker_env_fns, self._update_queues, strict=True)
-        ):
+        if self._policy_store is None:
+            raise RuntimeError("Workers require an initial shared policy snapshot")
+        policy_descriptor = self._policy_store.get_descriptor()
+        for worker_index, env_func in enumerate(worker_env_fns):
             with patched_env(**worker_env) if self.use_mp else contextlib.nullcontext():
                 worker = (self.mp_ctx.Process if self.use_mp else threading.Thread)(
+                    name=f"async-agent-worker-{worker_index}",
                     target=AsyncAgentInjector._run_worker,
                     kwargs=dict(
                         worker_class=self.get_worker_class(),
+                        worker_index=worker_index,
                         env_func=env_func,
-                        episode_queue=self._episode_queue,
-                        update_queue=update_queue,
+                        episode_sender=self._episode_transport.get_sender(worker_index),
+                        policy_descriptor=policy_descriptor,
                         state=self._state,
                         state_lock=self._state_lock,
                         stop=self._stop,
                         worker_kwargs=self.get_worker_kwargs(),
                         policy_class=policy_class,
                         policy_data=policy_data,
+                        failure_callback=(
+                            None if self.use_mp else self._record_thread_failure
+                        ),
                         use_mp=self.use_mp,
                         mp_threads=self.mp_threads,
                     ),
                 )
                 worker.start()
 
-            # noinspection PyTypeChecker
             self._workers.append(worker)
 
             if (
@@ -293,64 +350,167 @@ class AsyncAgentInjector:
             ):
                 time.sleep(self.worker_start_interval_seconds)
 
+        self._episode_transport.close_parent_senders()
+
         self._initialized_workers = True
 
+    def _record_thread_failure(
+        self,
+        worker_index: int,
+        error: BaseException,
+    ) -> None:
+        if self._shutdown_started.is_set():
+            return
+        failure = WorkerFailure(
+            worker_index=worker_index,
+            reason=f"{type(error).__name__}: {error}",
+            cause=error,
+        )
+        with self._thread_failure_lock:
+            self._thread_failures.setdefault(worker_index, failure)
+
+    def raise_for_failed_workers(
+        self,
+        closed_worker_index: Optional[int] = None,
+    ) -> None:
+        """Raise an attributable trainer-side error for unexpected worker exits."""
+        if self._shutdown_started.is_set():
+            return
+
+        with self._thread_failure_lock:
+            failures_by_worker = dict(self._thread_failures)
+
+        if closed_worker_index is not None and self.use_mp:
+            self._wait_for_process_exit(closed_worker_index)
+
+        for worker_index, worker in enumerate(self._workers):
+            exit_code = getattr(worker, "exitcode", None)
+            if exit_code is None or exit_code == 0:
+                continue
+            failures_by_worker.setdefault(
+                worker_index,
+                WorkerFailure(
+                    worker_index=worker_index,
+                    reason=self._format_worker_exit_reason(exit_code),
+                ),
+            )
+
+        if closed_worker_index is not None and not failures_by_worker:
+            failures_by_worker[closed_worker_index] = WorkerFailure(
+                worker_index=closed_worker_index,
+                reason=constants.WORKER_TRANSPORT_CLOSED_REASON,
+            )
+
+        failures = [failures_by_worker[index] for index in sorted(failures_by_worker)]
+        if failures:
+            failure_error = AsyncWorkerFailureError(failures)
+            original_cause = next(
+                (failure.cause for failure in failures if failure.cause is not None),
+                None,
+            )
+            if original_cause is not None:
+                raise failure_error from original_cause
+            raise failure_error
+
+    def _wait_for_process_exit(self, worker_index: int) -> None:
+        worker = self._workers[worker_index]
+        deadline = time.monotonic() + constants.PROCESS_EXIT_ATTRIBUTION_TIMEOUT_SECONDS
+        while getattr(worker, "exitcode", None) is None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            worker.join(
+                timeout=min(
+                    constants.WORKER_HEALTH_CHECK_INTERVAL_SECONDS,
+                    remaining,
+                )
+            )
+
+    def _acquire_prepared_assembly(self) -> Any:
+        """Wait for background assembly while checking real worker health."""
+        if self._episode_assembler is None:
+            raise RuntimeError("Episode assembler has not been initialized")
+
+        while True:
+            try:
+                return self._episode_assembler.acquire(
+                    constants.WORKER_HEALTH_CHECK_INTERVAL_SECONDS
+                )
+            except TimeoutError:
+                self.raise_for_failed_workers()
+            except RuntimeError as error:
+                cause = error.__cause__
+                if isinstance(cause, WorkerTransportClosedError):
+                    self.raise_for_failed_workers(cause.worker_index)
+                else:
+                    self.raise_for_failed_workers()
+                raise
+
+    @staticmethod
+    def _format_worker_exit_reason(exit_code: int) -> str:
+        if exit_code > 0:
+            return f"exit code {exit_code}"
+
+        signal_number = -exit_code
+        try:
+            return signal.Signals(signal_number).name
+        except ValueError:
+            return f"signal {signal_number}"
+
     def _excluded_save_params(self) -> List[str]:
-        # noinspection PyUnresolvedReferences
         return super()._excluded_save_params() + [
             "_envs",
-            "_episode_queue",
-            "_update_queues",
-            "_transitions",
+            "_episode_transport",
+            "_policy_store",
+            "_episode_assembler",
             "_manager",
             "_state",
             "_state_lock",
             "_version",
             "_stop",
+            "_shutdown_started",
+            "_thread_failure_lock",
+            "_thread_failures",
             "_initialized",
             "_initialized_workers",
             "_workers",
             "_profiler_main",
             "_logger",
+            "_policy_lag_total",
+            "_policy_lag_count",
+            "_policy_lag_max",
+            "_final_transport_report",
+            "_final_assembly_report",
+            "_final_policy_report",
         ]
 
-    @staticmethod
-    def _clear_queue(target_queue: GenericUpdateQueue) -> None:
-        while True:
-            try:
-                target_queue.get_nowait()
-            except queue.Empty:
-                return
+    def _record_policy_lag(
+        self,
+        policy_version: Optional[int],
+        transition_count: int,
+    ) -> None:
+        if policy_version is None or transition_count == 0:
+            return
 
-    def _push_policy_update(self, version: int, weights: bytes) -> None:
-        for update_queue in self._update_queues:
-            self._clear_queue(update_queue)
-            update_queue.put((version, weights))
-
-    def _fetch_transitions(self) -> List[Transition]:
-        with self._profiler_main.track("transport"):
-            return self._episode_queue.get()
-
-    def fetch_transition(self) -> Transition:
-        """
-        Each episode is returned as a sequence of transitions, in order, complete,
-        and not interleaved with episodes from other workers.
-        """
-        while len(self._transitions) == 0:
-            self._buffer_utilization += self._episode_queue.qsize()
-            self._buffer_emptiness += 1 if self._episode_queue.empty() else 0
-            self._buffer_stat_count += 1
-
-            self._transitions = self._fetch_transitions()
-
-        return self._transitions.pop(0)
+        lag = max(0, self._version - policy_version)
+        self._policy_lag_total += lag * transition_count
+        self._policy_lag_count += transition_count
+        self._policy_lag_max = max(self._policy_lag_max, lag)
 
     def shutdown(self):
+        self._shutdown_started.set()
+        if self._episode_assembler is not None:
+            self._final_assembly_report = self._build_assembly_report()
+            self._episode_assembler.shutdown()
+            self._episode_assembler = None
+
         if self._stop is None:
             return
 
         self._logger.info("Send stop event to all processes")
         self._stop.set()
+        if self._episode_transport is not None:
+            self._episode_transport.interrupt()
         self._stop = None
 
         for worker in self._workers:
@@ -359,25 +519,26 @@ class AsyncAgentInjector:
 
             worker.join(timeout=self._worker_join_timeout)
 
+            if not worker.is_alive():
+                continue
+
             if self.use_mp:
                 try:
                     worker.kill()
+                    worker.join(timeout=self._worker_join_timeout)
                 except PermissionError:
                     self._logger.warning("cannot kill process due to permission error")
 
-        # close the queue (multiprocessing.Queue needs explicit cleanup)
-        if self._episode_queue is not None:
-            if self.use_mp:
-                self._episode_queue.close()
-                self._episode_queue.cancel_join_thread()
-            self._episode_queue = None
-        for update_queue in self._update_queues:
-            if self.use_mp:
-                update_queue.close()
-                update_queue.cancel_join_thread()
-        self._update_queues = []
+        if self._episode_transport is not None:
+            self._final_transport_report = self._build_transport_report()
+            self._episode_transport.shutdown()
+            self._episode_transport = None
+        if self._policy_store is not None:
+            self._final_policy_report = self._build_policy_report()
+            self._policy_store.close()
+            self._policy_store.unlink()
+            self._policy_store = None
 
-        # release a shared object: manager
         if self._manager is not None:
             worker_profiler_stats = cast(
                 ProfileStats, dict(self._state.worker_profiler_stats)
@@ -401,7 +562,6 @@ class AsyncAgentInjector:
 
     def train(self, *args, **kwargs):
         with self._profiler_main.track("training"):
-            # noinspection PyUnresolvedReferences
             return super().train(*args, **kwargs)
 
     def get_profiler_report(self) -> Dict[str, Any]:
@@ -413,40 +573,68 @@ class AsyncAgentInjector:
                 if self._state is None
                 else getattr(self._state, "worker_profiler_last_sync", None)
             ),
-            buffer_utilization=self.buffer_utilization,
-            buffer_emptiness=self.buffer_emptyness,
             buffer_full_push_fraction=self.buffer_full_push_fraction,
-            buffer_avg_push_time=self.buffer_avg_push_time,
+            buffer_avg_push_wait_time=self.buffer_avg_push_wait_time,
             discarded_episodes_fraction=self.discarded_episodes_fraction,
+            avg_policy_lag=self.avg_policy_lag,
+            max_policy_lag=self.max_policy_lag,
+            transport_stats=self._build_transport_report(),
+            assembly_stats=self._build_assembly_report(),
+            policy_stats=self._build_policy_report(),
         )
+
+    def _build_transport_report(self) -> Dict[str, Any]:
+        if self._episode_transport is None:
+            return dict(self._final_transport_report)
+
+        stats = self._episode_transport.get_stats()
+        capacity = self._episode_transport.max_pending_episodes
+        return {
+            "pending_episodes": stats.pending_episodes,
+            "max_pending_episodes": stats.max_pending_episodes,
+            "capacity_episodes": capacity,
+            "utilization": stats.pending_episodes / capacity,
+            "pending_bytes": stats.pending_bytes,
+            "max_pending_bytes": stats.max_pending_bytes,
+            "sent_episodes": stats.sent_episodes,
+            "sent_bytes": stats.sent_bytes,
+            "received_episodes": stats.received_episodes,
+            "received_bytes": stats.received_bytes,
+        }
+
+    def _build_assembly_report(self) -> Dict[str, float | int]:
+        if self._episode_assembler is None:
+            return dict(self._final_assembly_report)
+
+        stats = self._episode_assembler.get_stats()
+        return {
+            "target_transitions": stats.target_transition_count,
+            "filling_transitions": stats.filling_transition_count,
+            "completed_assemblies": stats.completed_assemblies,
+            "last_transitions": stats.last_transition_count,
+            "max_transitions": stats.max_transition_count,
+            "last_payload_bytes": stats.last_payload_bytes,
+            "max_payload_bytes": stats.max_payload_bytes,
+        }
+
+    def _build_policy_report(self) -> Dict[str, int]:
+        if self._policy_store is None:
+            return dict(self._final_policy_report)
+
+        stats = self._policy_store.get_stats()
+        return {
+            "published_version": stats.published_version,
+            "payload_bytes": stats.payload_bytes,
+            "slot_capacity_bytes": stats.slot_capacity_bytes,
+            "publication_count": stats.publication_count,
+            "publication_failures": stats.publication_failures,
+        }
 
     def _get_worker_profiler_stats(self) -> ProfileStats:
         if self._state is None or not hasattr(self._state, "worker_profiler_stats"):
             return {}
 
         return cast(ProfileStats, dict(self._state.worker_profiler_stats))
-
-    @property
-    def buffer_utilization(self) -> float:
-        """
-        The average size of the buffer in episodes.
-        """
-        return (
-            0
-            if self._buffer_stat_count == 0
-            else self._buffer_utilization / self._buffer_stat_count
-        )
-
-    @property
-    def buffer_emptyness(self) -> float:
-        """
-        The fraction of the time the buffer was empty.
-        """
-        return (
-            0
-            if self._buffer_stat_count == 0
-            else self._buffer_emptiness / self._buffer_stat_count
-        )
 
     @property
     def discarded_episodes_fraction(self) -> float:
@@ -471,7 +659,7 @@ class AsyncAgentInjector:
         )
 
     @property
-    def buffer_avg_push_time(self) -> float:
+    def buffer_avg_push_wait_time(self) -> float:
         """
         The average time spent waiting to enqueue an episode, in seconds.
         """
@@ -480,27 +668,43 @@ class AsyncAgentInjector:
             if self._state is None or self._state.queue_put_attempts == 0
             else self._state.total_queue_put_wait_ns
             / self._state.queue_put_attempts
-            / 1_000_000_000
+            / constants.NANOSECONDS_PER_SECOND
         )
+
+    @property
+    def avg_policy_lag(self) -> float:
+        """Return the transition-weighted average policy update lag."""
+        return (
+            0
+            if self._policy_lag_count == 0
+            else self._policy_lag_total / self._policy_lag_count
+        )
+
+    @property
+    def max_policy_lag(self) -> int:
+        """Return the largest observed policy update lag."""
+        return self._policy_lag_max
 
 
 class InjectorWorkerBase:
     def __init__(
         self,
+        worker_index: int,
         env_func: EnvFactory,
-        episode_queue: GenericQueue,
-        update_queue: GenericUpdateQueue,
+        episode_sender: EpisodeSender,
+        policy_reader: SharedPolicyReader,
         state: GenericState,
         state_lock: GenericStateLock,
         stop: GenericEvent,
         skip_truncated: bool,
-        queue_put_timeout: float,
+        queue_put_timeout: Optional[float],
         profiler_sync_interval: float,
         policy_class: BasePolicy,
         policy_data: Dict[str, Any],
         **kwargs,
     ):
         self.env = make_venv(env_func())
+        self.worker_index = worker_index
 
         self.policy: BasePolicy | None = None
         self.policy_class = policy_class
@@ -508,8 +712,8 @@ class InjectorWorkerBase:
 
         self._policy_version = None
 
-        self._episode_queue = episode_queue
-        self._update_queue = update_queue
+        self._episode_sender = episode_sender
+        self._policy_reader = policy_reader
         self._state = state
         self._state_lock = state_lock
         self._stop = stop
@@ -521,95 +725,78 @@ class InjectorWorkerBase:
         self._profiler = RuntimeProfiler()
         self._profiler_sync_interval = profiler_sync_interval
         self._last_profiler_sync = time.time()
+        self._episode_feeder = EpisodeFeeder(
+            sender=self._episode_sender,
+            stop=self._stop,
+            on_send_complete=self._record_episode_send_result,
+        )
 
-    def copy_policy_from_queue(self, block: bool = False):
+    def copy_policy_from_store(self) -> None:
         if self.policy is None:
-            # noinspection PyArgumentList
             self.policy = self.policy_class(**self.policy_data)
 
-        latest_update = None
-        while not self._stop.is_set():
-            try:
-                if latest_update is None and block:
-                    latest_update = self._update_queue.get(timeout=0.1)
-                else:
-                    latest_update = self._update_queue.get_nowait()
-            except queue.Empty:
-                if block and latest_update is None:
-                    continue
-                break
+        retries_before_copy = self._policy_reader.retry_count
+        with self._profiler.track("policy_snapshot_copy"):
+            snapshot = self._policy_reader.read_if_new(self._policy_version)
+        retry_count = self._policy_reader.retry_count - retries_before_copy
+        if retry_count > 0:
+            self._profiler.record(
+                "policy_snapshot_retry",
+                0,
+                count=retry_count,
+            )
 
-        if latest_update is None:
+        if snapshot is None:
             return
 
-        version, weights_bytes = latest_update
-        if self._policy_version == version:
-            return
-
-        with self._profiler.track("syncing"):
+        with self._profiler.track("policy_loading"):
             weights = torch.load(
-                io.BytesIO(weights_bytes),
+                io.BytesIO(snapshot.payload),
                 map_location="cpu",
                 weights_only=True,
             )
             self.policy.load_state_dict(weights)
             self.policy.to("cpu")
             self.policy.set_training_mode(False)
-            self._policy_version = version
+            self._policy_version = snapshot.version
             self._logger.debug(
-                f"policy loaded from queue: version={self._policy_version}"
+                f"policy loaded from shared store: version={self._policy_version}"
             )
 
     def _put_episode_with_timeout(self, episode):
-        start_ns = time.perf_counter_ns()
-        deadline_ns = start_ns + int(self._queue_put_timeout * 1_000_000_000)
-        queue_was_full = self._episode_queue.full()
-
-        def record_push_wait() -> None:
-            with self._state_lock:
-                self._state.total_queue_put_wait_ns += max(
-                    0,
-                    min(time.perf_counter_ns(), deadline_ns) - start_ns,
-                )
-
+        with self._profiler.track("episode_packing"):
+            episode_batch = pack_episode(episode)
+        with self._profiler.track("episode_serialization"):
+            packet = encode_episode_batch(
+                self.worker_index,
+                self._policy_version,
+                episode_batch,
+            )
+        submission = self._episode_feeder.submit(
+            packet,
+            self._queue_put_timeout,
+        )
         with self._state_lock:
             self._state.queue_put_attempts += 1
-            if queue_was_full:
+            self._state.total_queue_put_wait_ns += submission.waiting_ns
+            if submission.waiting_ns > 0:
                 self._state.full_queue_put_attempts += 1
+            if not submission:
+                self._state.discarded_episodes += 1
+        if submission.waiting_ns > 0:
+            self._profiler.record(
+                "waiting",
+                submission.waiting_ns,
+            )
+        if not submission and not self._stop.is_set():
+            self._logger.info("Dropped episode after transport timeout")
 
-        while time.perf_counter_ns() < deadline_ns:
-            if self._stop.is_set():
-                record_push_wait()
-                self._profiler.record("transport", time.perf_counter_ns() - start_ns)
-                return
-
-            try:
-                remaining_timeout = min(
-                    0.1,
-                    max(0.0, (deadline_ns - time.perf_counter_ns()) / 1_000_000_000),
-                )
-                self._episode_queue.put(
-                    episode,
-                    block=True,
-                    timeout=remaining_timeout,
-                )
-                record_push_wait()
-                self._profiler.record("transport", time.perf_counter_ns() - start_ns)
-                return
-            except queue.Full:
-                pass
-
-        try:
-            self._episode_queue.get(block=False)
-            self._episode_queue.put(episode, block=False)
-        except (queue.Full, queue.Empty):
-            pass
-
+    def _record_episode_send_result(self, result: EpisodeSendResult) -> None:
+        self._profiler.record("transport", result.transport_ns)
+        if result or self._stop.is_set():
+            return
         with self._state_lock:
             self._state.discarded_episodes += 1
-        record_push_wait()
-        self._profiler.record("transport", time.perf_counter_ns() - start_ns)
-        self._logger.info("Dropped episode due to buffer full")
 
     def _flush_profiler(self, force: bool = False):
         now = time.time()
@@ -629,7 +816,7 @@ class InjectorWorkerBase:
 
     def run(self):
         try:
-            self.copy_policy_from_queue(block=True)
+            self.copy_policy_from_store()
 
             for episode in self.generate():
                 with self._state_lock:
@@ -650,9 +837,12 @@ class InjectorWorkerBase:
                 if self._stop.is_set():
                     break
         finally:
-            self._flush_profiler(force=True)
-            self.env.close()
-            self._logger.info("Generator cycle is completed")
+            try:
+                self._episode_feeder.shutdown()
+            finally:
+                self._flush_profiler(force=True)
+                self.env.close()
+                self._logger.info("Generator cycle is completed")
 
     def generate(self) -> Generator[list[Transition], None, None]:
         raise NotImplementedError()

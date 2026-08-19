@@ -1,6 +1,9 @@
+import threading
 from contextlib import contextmanager
 from time import perf_counter_ns, time
-from typing import Any, Dict, Iterator, Mapping, MutableMapping, Optional
+from typing import Any, Dict, Iterator, Mapping, MutableMapping, Optional, Tuple
+
+from async_gym_agents import constants
 
 ProfileStats = Dict[str, Dict[str, int]]
 
@@ -32,6 +35,7 @@ class RuntimeProfiler:
     def __init__(self) -> None:
         self._stats: ProfileStats = {}
         self._pending: ProfileStats = {}
+        self._lock = threading.Lock()
 
     @contextmanager
     def track(self, phase: str) -> Iterator[None]:
@@ -43,16 +47,19 @@ class RuntimeProfiler:
 
     def record(self, phase: str, duration_ns: int, count: int = 1) -> None:
         update = {"total_ns": max(0, int(duration_ns)), "count": int(count)}
-        merge_profile_stats(self._stats, {phase: update})
-        merge_profile_stats(self._pending, {phase: update})
+        with self._lock:
+            merge_profile_stats(self._stats, {phase: update})
+            merge_profile_stats(self._pending, {phase: update})
 
     def snapshot(self) -> ProfileStats:
-        return _copy_stats(self._stats)
+        with self._lock:
+            return _copy_stats(self._stats)
 
     def drain_pending(self) -> ProfileStats:
-        pending = self._pending
-        self._pending = {}
-        return _copy_stats(pending)
+        with self._lock:
+            pending = self._pending
+            self._pending = {}
+            return _copy_stats(pending)
 
 
 def build_profiler_report(
@@ -60,21 +67,24 @@ def build_profiler_report(
     worker_stats: Mapping[str, Mapping[str, int]],
     *,
     worker_last_sync_time: Optional[float],
-    buffer_utilization: float,
-    buffer_emptiness: float,
     buffer_full_push_fraction: float,
-    buffer_avg_push_time: float,
+    buffer_avg_push_wait_time: float,
     discarded_episodes_fraction: float,
+    avg_policy_lag: float,
+    max_policy_lag: int,
+    transport_stats: Optional[Mapping[str, Any]] = None,
+    assembly_stats: Optional[Mapping[str, float | int]] = None,
+    policy_stats: Optional[Mapping[str, int]] = None,
 ) -> Dict[str, object]:
     return {
         "main": _summarize_stats(main_stats),
         "worker": _summarize_stats(worker_stats),
         "buffer": {
-            "utilization": buffer_utilization,
-            "emptiness": buffer_emptiness,
             "full_push_fraction": buffer_full_push_fraction,
-            "avg_push_time_seconds": buffer_avg_push_time,
+            constants.BUFFER_AVG_PUSH_WAIT_SECONDS_KEY: (buffer_avg_push_wait_time),
             "discarded_episodes_fraction": discarded_episodes_fraction,
+            constants.BUFFER_AVG_POLICY_LAG_KEY: avg_policy_lag,
+            constants.BUFFER_MAX_POLICY_LAG_KEY: max_policy_lag,
         },
         "worker_sync": {
             "last_sync_unix_time": worker_last_sync_time,
@@ -82,6 +92,9 @@ def build_profiler_report(
             if worker_last_sync_time is None
             else max(0.0, time() - worker_last_sync_time),
         },
+        "transport": dict(transport_stats or {}),
+        "assembly": dict(assembly_stats or {}),
+        "policy": dict(policy_stats or {}),
     }
 
 
@@ -91,13 +104,17 @@ def render_profiler_report(report: Mapping[str, Any]) -> str:
     lines.extend(_render_profile_section("Worker", report.get("worker", {})))
 
     buffer = report.get("buffer", {})
+    avg_push_wait_seconds = buffer.get(
+        constants.BUFFER_AVG_PUSH_WAIT_SECONDS_KEY,
+        0.0,
+    )
     lines.append(
         "Buffer: "
-        f"util={buffer.get('utilization', 0.0):.2f}, "
-        f"empty={buffer.get('emptiness', 0.0):.2f}, "
         f"full_push={buffer.get('full_push_fraction', 0.0):.2f}, "
-        f"push_ms={buffer.get('avg_push_time_seconds', 0.0) * 1000:.2f}, "
-        f"dropped={buffer.get('discarded_episodes_fraction', 0.0):.2f}"
+        f"push_wait_ms={avg_push_wait_seconds * constants.MILLISECONDS_PER_SECOND:.2f}, "
+        f"dropped={buffer.get('discarded_episodes_fraction', 0.0):.2f}, "
+        f"policy_lag_avg={buffer.get(constants.BUFFER_AVG_POLICY_LAG_KEY, 0.0):.2f}, "
+        f"policy_lag_max={int(buffer.get(constants.BUFFER_MAX_POLICY_LAG_KEY, 0))}"
     )
 
     worker_sync = report.get("worker_sync", {})
@@ -109,7 +126,54 @@ def render_profiler_report(report: Mapping[str, Any]) -> str:
     )
     lines.append(f"Worker sync: {sync_age}")
 
+    transport = report.get("transport", {})
+    if transport:
+        lines.append(
+            "Transport: "
+            f"util={transport.get('utilization', 0.0):.2f}, "
+            f"pending={int(transport.get('pending_episodes', 0))}, "
+            f"peak={int(transport.get('max_pending_episodes', 0))}, "
+            f"pending_bytes={int(transport.get('pending_bytes', 0))}, "
+            f"peak_bytes={int(transport.get('max_pending_bytes', 0))}"
+        )
+
+    assembly = report.get("assembly", {})
+    if assembly:
+        lines.append(
+            "Assembly: "
+            f"filling={int(assembly.get('filling_transitions', 0))}, "
+            f"last={int(assembly.get('last_transitions', 0))}, "
+            f"target={int(assembly.get('target_transitions', 0))}, "
+            f"peak_bytes={int(assembly.get('max_payload_bytes', 0))}"
+        )
+
     return "\n".join(lines)
+
+
+def iterate_profiler_metrics(
+    report: Mapping[str, Any],
+    prefix: str = "",
+) -> Iterator[Tuple[str, float | int]]:
+    """Flatten numeric report leaves into stable logger metric names."""
+    for name, value in report.items():
+        metric_name = f"{prefix}/{name}" if prefix else name
+        if isinstance(value, Mapping):
+            yield from iterate_profiler_metrics(value, metric_name)
+        elif isinstance(value, (float, int)) and not isinstance(value, bool):
+            yield metric_name, value
+
+
+def summarize_duration(total_ns: int, count: int) -> Dict[str, float | int]:
+    """Convert cumulative nanoseconds into standard profiler report fields."""
+    return {
+        "total_seconds": total_ns / constants.NANOSECONDS_PER_SECOND,
+        "count": count,
+        "avg_milliseconds": 0.0
+        if count == 0
+        else total_ns
+        / count
+        / (constants.NANOSECONDS_PER_SECOND / constants.MILLISECONDS_PER_SECOND),
+    }
 
 
 def _summarize_stats(
@@ -121,14 +185,9 @@ def _summarize_stats(
     for phase, values in sorted(stats.items()):
         phase_total_ns = int(values.get("total_ns", 0))
         count = int(values.get("count", 0))
-        summarized[phase] = {
-            "total_seconds": phase_total_ns / 1_000_000_000,
-            "count": count,
-            "avg_milliseconds": 0.0
-            if count == 0
-            else phase_total_ns / count / 1_000_000,
-            "share": 0.0 if total_ns == 0 else phase_total_ns / total_ns,
-        }
+        duration = summarize_duration(phase_total_ns, count)
+        duration["share"] = 0.0 if total_ns == 0 else phase_total_ns / total_ns
+        summarized[phase] = duration
 
     return summarized
 
