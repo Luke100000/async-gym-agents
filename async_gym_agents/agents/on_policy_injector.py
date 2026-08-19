@@ -13,7 +13,12 @@ from stable_baselines3.common.vec_env import VecEnv
 
 from async_gym_agents import constants
 from async_gym_agents.agents.injector import AsyncAgentInjector, InjectorWorkerBase
-from async_gym_agents.data_classes import OnPolicyTransition as Transition
+from async_gym_agents.callback_batching import CallbackBatchDispatcher
+from async_gym_agents.data_classes import (
+    EpisodeCallbackContext,
+    OnPolicyTransition,
+)
+from async_gym_agents.enums import EpisodeKind
 from async_gym_agents.episode_codec import (
     get_episode_infos,
     get_episode_reset_infos,
@@ -115,6 +120,10 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
             self.policy.reset_noise(1)
 
         callback.on_rollout_start()
+        callback_dispatcher = CallbackBatchDispatcher(
+            callback,
+            EpisodeKind.ON_POLICY,
+        )
 
         new_obs = None
         dones = None
@@ -122,6 +131,7 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
         with self._profiler_main.track("transition_processing"):
             for assembled_episode in prepared_rollout.episodes:
                 batch = assembled_episode.batch
+                episode_start_timestep = self.num_timesteps
                 for transition_index in range(batch.transition_count):
                     if (
                         self.use_sde
@@ -164,34 +174,29 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
                         transition_index,
                     )
 
-                    # GH issue #633: bootstrap truncated-episode rewards with the
-                    # trainer's own, continuously-updated policy rather than a
-                    # worker's cached snapshot, which may be many episodes stale.
-                    bootstrap_truncated_rewards(
-                        self.policy,
-                        self.gamma,
-                        training_rewards,
-                        dones,
-                        infos,
-                    )
-
                     self.num_timesteps += 1
-                    callback.update_locals(locals())
-                    if not callback.on_step():
+                    if not callback_dispatcher.process_step(locals()):
                         return False
 
                     self._update_info_buffer(infos, dones)
                     n_steps += 1
                     buffer_index += 1
 
+                callback_context = EpisodeCallbackContext(
+                    batch=batch,
+                    start_timestep=episode_start_timestep,
+                    end_timestep=self.num_timesteps,
+                )
+                if not callback_dispatcher.process_episode(callback_context):
+                    return False
+
+        callback.update_locals(locals())
         rollout_buffer.compute_returns_and_advantage(
             last_values=torch.zeros(rollout_buffer.n_envs),
             dones=dones,
         )
         rollout_buffer.pos = buffer_index
         rollout_buffer.full = True
-
-        callback.update_locals(locals())
 
         callback.on_rollout_end()
 
@@ -215,6 +220,7 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
         return dict(
             **super().get_worker_kwargs(),
             action_space=self.action_space,
+            gamma=self.gamma,
         )
 
 
@@ -222,13 +228,15 @@ class InjectorWorker(InjectorWorkerBase):
     def __init__(
         self,
         action_space: gym.Space,
+        gamma: float,
         **kwargs,
     ):
         super().__init__(**kwargs)
 
         self.action_space = action_space
+        self.gamma = gamma
 
-    def generate(self) -> Generator[list[Transition], None, None]:
+    def generate(self) -> Generator[list[OnPolicyTransition], None, None]:
         """
         Continuously plays the game and returns episodes of Transitions
         """
@@ -268,10 +276,14 @@ class InjectorWorker(InjectorWorkerBase):
                 new_obs, rewards, dones, infos = self.env.step(clipped_actions)
 
             environment_rewards = rewards.copy()
-            # The TimeLimit-truncation bootstrap correction (GH issue #633) is
-            # applied by the trainer in collect_rollouts, using its own live
-            # policy instead of this worker's cached, potentially stale copy.
             training_rewards = environment_rewards.copy()
+            bootstrap_truncated_rewards(
+                self.policy,
+                self.gamma,
+                training_rewards,
+                dones,
+                infos,
+            )
 
             if isinstance(self.action_space, spaces.Discrete):
                 # Reshape in case of discrete action
@@ -283,7 +295,7 @@ class InjectorWorker(InjectorWorkerBase):
                     if idx not in episodes:
                         episodes[idx] = []
                     episodes[idx].append(
-                        Transition(
+                        OnPolicyTransition(
                             actions=single_slice(actions, idx),
                             values=single_slice(values, idx),
                             log_probs=single_slice(log_probs, idx),

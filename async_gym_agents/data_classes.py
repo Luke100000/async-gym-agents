@@ -131,6 +131,13 @@ class PreparedOnPolicyRollout:
 
 
 @dataclass(frozen=True)
+class EpisodeCallbackContext:
+    batch: EpisodeBatch
+    start_timestep: int
+    end_timestep: int
+
+
+@dataclass(frozen=True)
 class PreparedOffPolicyEpisode:
     episode: AssembledEpisode
     transitions: List[OffPolicyTransition]
