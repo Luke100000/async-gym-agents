@@ -194,6 +194,13 @@ class SharedPolicyReader:
         if self._closed:
             raise RuntimeError("Cannot read from a closed shared policy reader")
 
+        # Lock-free fast path for the common "nothing new" case: published_version
+        # is a lock=False Value, so this single-field read never contends with
+        # other workers or the writer. Only fall through to the locked, seqlock
+        # path below when there is actually a newer snapshot to copy.
+        if self._descriptor.published_version.value == local_version:
+            return None
+
         while True:
             with self._descriptor.metadata_lock:
                 active_slot = self._descriptor.active_slot.value

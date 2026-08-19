@@ -90,6 +90,46 @@ def _decode_pipe_packet(
     )
 
 
+class _BackgroundFrameRead:
+    """Read one framed payload off a connection on a helper thread.
+
+    `Connection.recv_bytes()` has no timeout and blocks until the whole
+    frame arrives, so a large or slow-arriving payload can silently defeat
+    a caller's deadline once its read has started. Running that blocking
+    read on a dedicated thread lets `poll()` return within budget no matter
+    how long the frame takes; a later call resumes waiting on the same read
+    instead of starting a new one and losing the bytes already in flight.
+    """
+
+    def __init__(self, connection: Connection, worker_index: int) -> None:
+        self._result: "queue.Queue[Tuple[bool, Any]]" = queue.Queue(maxsize=1)
+        self._thread = threading.Thread(
+            target=self._run,
+            args=(connection, worker_index),
+            name=f"episode-transport-payload-read-{worker_index}",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def _run(self, connection: Connection, worker_index: int) -> None:
+        try:
+            frame = EpisodeTransport._receive_worker_bytes(connection, worker_index)
+        except BaseException as error:  # noqa: BLE001 - handed to the waiter below
+            self._result.put((False, error))
+        else:
+            self._result.put((True, frame))
+
+    def poll(self, timeout: Optional[float]) -> Optional[bytes]:
+        """Return the payload once read, or None if it has not arrived yet."""
+        try:
+            succeeded, value = self._result.get(timeout=timeout)
+        except queue.Empty:
+            return None
+        if not succeeded:
+            raise value
+        return value
+
+
 class EpisodeSender:
     def __init__(
         self,
@@ -398,6 +438,7 @@ class EpisodeTransport:
         ]
         self._ready_workers: Set[int] = set()
         self._pending_headers: Dict[int, bytes] = {}
+        self._payload_reads: Dict[int, _BackgroundFrameRead] = {}
         self._next_worker_index = 0
         self._received_episodes = 0
         self._received_bytes = 0
@@ -497,12 +538,34 @@ class EpisodeTransport:
             self._pending_headers[worker_index] = header
             raise
 
-        if remaining is not None and not connection.poll(remaining):
+        payload = self._await_payload(worker_index, connection, remaining)
+        if payload is None:
             self._pending_headers[worker_index] = header
             raise queue.Empty
 
-        payload = self._receive_worker_bytes(connection, worker_index)
         return _decode_pipe_packet(worker_index, header, payload)
+
+    def _await_payload(
+        self,
+        worker_index: int,
+        connection: Connection,
+        remaining: Optional[float],
+    ) -> Optional[bytes]:
+        """Wait for the payload frame without blocking past `remaining`.
+
+        The read itself keeps running on a background thread if it does not
+        finish in time, so the next call resumes waiting on it instead of
+        starting a new read once more time is available.
+        """
+        background_read = self._payload_reads.get(worker_index)
+        if background_read is None:
+            background_read = _BackgroundFrameRead(connection, worker_index)
+            self._payload_reads[worker_index] = background_read
+
+        payload = background_read.poll(remaining)
+        if payload is not None:
+            del self._payload_reads[worker_index]
+        return payload
 
     @staticmethod
     def _receive_worker_bytes(

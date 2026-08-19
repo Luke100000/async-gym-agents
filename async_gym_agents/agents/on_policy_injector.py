@@ -191,6 +191,12 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
                     return False
 
         callback.update_locals(locals())
+        rollout_buffer.compute_returns_and_advantage(
+            last_values=torch.zeros(rollout_buffer.n_envs),
+            dones=dones,
+        )
+        rollout_buffer.pos = buffer_index
+        rollout_buffer.full = True
 
         callback.on_rollout_end()
 

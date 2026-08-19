@@ -1,10 +1,26 @@
 import multiprocessing
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 
 import pytest
 from conftest import POLICY_TEST_TIMEOUT_SECONDS, read_policy_snapshot_in_process
 
 from async_gym_agents.policy_transport import SharedPolicyReader
+
+
+class _CountingLock:
+    """Wrap a lock while counting how many times it is actually entered."""
+
+    def __init__(self, lock):
+        self._lock = lock
+        self.enter_count = 0
+
+    def __enter__(self):
+        self.enter_count += 1
+        return self._lock.__enter__()
+
+    def __exit__(self, *args):
+        return self._lock.__exit__(*args)
 
 
 class TestSharedPolicySnapshots:
@@ -32,6 +48,37 @@ class TestSharedPolicySnapshots:
     ):
         """A worker avoids copying bytes when its local policy is current."""
         assert shared_policy_reader.read_if_new(7) is None
+
+    def test_returns_none_for_current_version_without_taking_the_lock(
+        self,
+        shared_policy_reader,
+    ):
+        """The common no-op case never contends on the shared metadata lock."""
+        counting_lock = _CountingLock(shared_policy_reader._descriptor.metadata_lock)
+        shared_policy_reader._descriptor = replace(
+            shared_policy_reader._descriptor, metadata_lock=counting_lock
+        )
+
+        assert shared_policy_reader.read_if_new(7) is None
+        assert counting_lock.enter_count == 0
+
+    def test_takes_the_lock_only_when_a_copy_is_needed(
+        self,
+        shared_policy_store,
+        shared_policy_reader,
+    ):
+        """A genuinely newer snapshot still goes through the locked, seqlock path."""
+        shared_policy_store.publish(8, b"updated-policy")
+        counting_lock = _CountingLock(shared_policy_reader._descriptor.metadata_lock)
+        shared_policy_reader._descriptor = replace(
+            shared_policy_reader._descriptor, metadata_lock=counting_lock
+        )
+
+        snapshot = shared_policy_reader.read_if_new(7)
+
+        assert snapshot.version == 8
+        assert snapshot.payload == b"updated-policy"
+        assert counting_lock.enter_count >= 1
 
     def test_concurrent_readers_receive_identical_publication(
         self,

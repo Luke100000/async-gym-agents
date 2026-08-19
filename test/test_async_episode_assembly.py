@@ -59,8 +59,8 @@ class TestAsyncOnPolicyRolloutAssembler:
             prepared_rollout.episodes,
         )
 
-        assert prepared_rollout.rollout_buffer.full is True
-        assert prepared_rollout.rollout_buffer.pos == 2
+        # Returns, advantages, and buffer state are finalized by the trainer.
+        assert prepared_rollout.rollout_buffer.full is False
         for field_name in (
             "observations",
             "actions",
@@ -68,8 +68,6 @@ class TestAsyncOnPolicyRolloutAssembler:
             "episode_starts",
             "values",
             "log_probs",
-            "returns",
-            "advantages",
         ):
             np.testing.assert_array_equal(
                 getattr(prepared_rollout.rollout_buffer, field_name),
@@ -78,14 +76,6 @@ class TestAsyncOnPolicyRolloutAssembler:
         assert prepared_rollout.episodes[0].batch.fields[
             constants.ON_POLICY_ENVIRONMENT_REWARDS_FIELD
         ].tolist() == [1.0, 2.0]
-        np.testing.assert_allclose(
-            prepared_rollout.rollout_buffer.returns[:, 0],
-            np.array([3.84625, 3.0], dtype=np.float32),
-        )
-        np.testing.assert_allclose(
-            prepared_rollout.rollout_buffer.advantages[:, 0],
-            np.array([3.59625, 2.5], dtype=np.float32),
-        )
         assembler.shutdown()
         transport.shutdown()
 

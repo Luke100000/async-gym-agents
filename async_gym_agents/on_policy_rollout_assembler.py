@@ -2,7 +2,6 @@ import copy
 from typing import Any
 
 import numpy as np
-import torch
 from stable_baselines3.common.buffers import RolloutBuffer
 
 from async_gym_agents import constants
@@ -89,15 +88,10 @@ class AsyncOnPolicyRolloutAssembler(AsyncEpisodeAssembler[PreparedOnPolicyRollou
             rollout_buffer.log_probs,
         )
 
-        final_dones = np.asarray(episodes[-1].batch.fields["dones"][-1:]).reshape(
-            rollout_buffer.n_envs
-        )
-        rollout_buffer.compute_returns_and_advantage(
-            last_values=torch.zeros(rollout_buffer.n_envs),
-            dones=final_dones,
-        )
-        rollout_buffer.pos = transition_count
-        rollout_buffer.full = True
+        # Rewards here are the raw environment rewards; the trainer applies the
+        # TimeLimit-truncation bootstrap with its own live policy and computes
+        # returns/advantages afterwards, since only it can access that policy
+        # without racing its concurrent training thread.
         return rollout_buffer
 
     def _fill_episode_field(
