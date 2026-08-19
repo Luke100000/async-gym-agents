@@ -2,6 +2,10 @@
 
 Drop-in asynchronous data collection for Stable Baselines 3 agents.
 
+Known framework callbacks are processed from complete episode batches when their
+timing permits. Off-policy checkpointing and unrecognized Stable Baselines
+callbacks retain their normal per-step behavior.
+
 ## Usage
 
 ```python
@@ -35,6 +39,12 @@ episode drops instead of waiting for buffer capacity.
 Episodes are decoded in a background assembler. On-policy agents prepare the
 next rollout buffer, while off-policy agents prepare one episode ahead and keep
 replay-buffer insertion on the trainer thread.
+
+On-policy episode packets retain both the environment reward and the
+time-limit-bootstrapped training reward. Stable Baselines callbacks, batched
+logging, and pruning receive the environment reward; rollout-buffer returns and
+advantages use the training reward. Off-policy episodes retain their existing
+single reward view.
 
 Use `get_profiler_report()` to inspect trainer, worker, buffer, transport, and
 policy statistics. `transport.utilization` is the current fraction of bounded

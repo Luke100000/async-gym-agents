@@ -12,6 +12,20 @@ import gymnasium as gym
 import numpy as np
 import pytest
 import torch
+from callback_doubles import (  # noqa: F401 - re-exported as global fixtures
+    create_logging_callback_pair,
+    create_pruning_callback_pair,
+    external_legacy_logging_callback,
+    external_logging_callback,
+    external_pruning_callback,
+    external_reset_info_callback,
+    external_saving_callback,
+    external_utilization_callback,
+    process_callback_by_episode,
+    replay_callback_by_step,
+    snapshot_logging_callback,
+    unrecognized_step_callback,
+)
 from stable_baselines3 import PPO, SAC
 from stable_baselines3.common.buffers import DictRolloutBuffer, RolloutBuffer
 from stable_baselines3.common.callbacks import BaseCallback
@@ -243,13 +257,14 @@ def short_episode_on_policy_agent(short_cartpole_multi_env):
 
 @pytest.fixture
 def short_episode_off_policy_agent(short_pendulum_multi_env):
-    """Create an off-policy agent that consumes one transition per rollout."""
+    """Create an agent that consumes one row per rollout from two-step episodes."""
     agent = get_injected_agent(SAC)(
         "MlpPolicy",
         short_pendulum_multi_env,
         batch_size=2,
-        buffer_size=16,
+        buffer_size=32,
         device="cpu",
+        gradient_steps=1,
         learning_starts=100,
         train_freq=1,
     )
@@ -282,22 +297,22 @@ def fixed_terminal_value_policy():
     return policy
 
 
-@pytest.fixture
-def reward_recording_callback():
+@pytest.fixture(name="reward_recording_callback")
+def create_reward_recording_callback():
     """Create a callback that retains its exact callback-local rewards."""
     return RewardRecordingCallback()
 
 
-@pytest.fixture
-def thread_failure_agent():
+@pytest.fixture(name="thread_failure_agent")
+def create_thread_failure_agent():
     """Create an agent whose real thread worker fails during reset."""
     agent = make_worker_test_agent([make_failing_worker_env])
     yield agent, WorkerTestError
     agent.shutdown()
 
 
-@pytest.fixture
-def process_blocked_agent():
+@pytest.fixture(name="process_blocked_agent")
+def create_process_blocked_agent():
     """Create an agent with one spawn worker held at a readiness barrier."""
     context = multiprocessing.get_context("spawn")
     ready = context.Event()
@@ -308,8 +323,8 @@ def process_blocked_agent():
     agent.shutdown()
 
 
-@pytest.fixture
-def multi_worker_failure_agent():
+@pytest.fixture(name="multi_worker_failure_agent")
+def create_multi_worker_failure_agent():
     """Create one failing and one blocked thread worker for root attribution."""
     ready = threading.Event()
     release = threading.Event()
@@ -320,8 +335,8 @@ def multi_worker_failure_agent():
     agent.shutdown()
 
 
-@pytest.fixture
-def shutdown_worker_agent():
+@pytest.fixture(name="shutdown_worker_agent")
+def create_shutdown_worker_agent():
     """Create a healthy one-step worker for intentional-shutdown coverage."""
     agent = make_worker_test_agent([TwoFeatureDiscreteEnv])
     yield agent
@@ -348,9 +363,16 @@ def initialized_on_policy_agent():
     agent.shutdown()
 
 
-@pytest.fixture
-def initialized_reward_test_agent():
+@pytest.fixture(name="initialized_reward_test_agent")
+def provide_initialized_reward_test_agent():
     """Create an initialized agent whose buffer matches the reward-test packet."""
+    agent = make_initialized_reward_test_agent()
+    yield agent
+    agent.shutdown()
+
+
+def make_initialized_reward_test_agent():
+    """Create one initialized agent matching deterministic reward-test packets."""
     env = IndexableMultiEnv([TwoFeatureDiscreteEnv])
     agent = get_injected_agent(PPO)(
         "MlpPolicy",
@@ -364,8 +386,62 @@ def initialized_reward_test_agent():
     agent._last_episode_starts = np.ones((agent.env.num_envs,), dtype=bool)
     agent.ep_info_buffer = deque(maxlen=agent._stats_window_size)
     agent.ep_success_buffer = deque(maxlen=agent._stats_window_size)
-    yield agent
-    agent.shutdown()
+    return agent
+
+
+@pytest.fixture(name="reward_test_agent_pair")
+def create_reward_test_agent_pair():
+    """Create two agents for optimized-versus-per-step state comparison."""
+    agents = [
+        make_initialized_reward_test_agent(),
+        make_initialized_reward_test_agent(),
+    ]
+    yield agents
+    for agent in agents:
+        agent.shutdown()
+
+
+@pytest.fixture
+def record_policy_noise_resets():
+    """Return a recorder for parent-policy exploration-noise resets."""
+
+    def attach(agent):
+        reset_timesteps = []
+
+        def record_reset(batch_size=1):
+            reset_timesteps.append((agent.num_timesteps, batch_size))
+
+        agent.policy.reset_noise = record_reset
+        return reset_timesteps
+
+    return attach
+
+
+@pytest.fixture
+def collect_deterministic_reward_rollout(enqueue_episode_packet):
+    """Collect two preloaded episodes before live workers can affect the rollout."""
+
+    def collect(
+        agent,
+        packet,
+        callback,
+        *,
+        use_sde,
+        sde_sample_freq,
+    ):
+        enqueue_episode_packet(agent, packet)
+        enqueue_episode_packet(agent, packet)
+        agent.use_sde = use_sde
+        agent.sde_sample_freq = sde_sample_freq
+        callback.init_callback(agent)
+        return agent.collect_rollouts(
+            agent.env,
+            callback,
+            agent.rollout_buffer,
+            n_rollout_steps=3,
+        )
+
+    return collect
 
 
 @pytest.fixture
@@ -421,6 +497,50 @@ def on_policy_episode():
 
 
 @pytest.fixture
+def on_policy_episode_with_metrics(on_policy_episode):
+    """Add step metrics, metadata, and an end reason to a complete episode."""
+    episode = list(on_policy_episode)
+    episode[0] = replace(
+        episode[0],
+        infos=[
+            {
+                "meta_settings": {"map": "test"},
+                "step_metric_speed": 2.0,
+            }
+        ],
+    )
+    terminal_info = dict(episode[1].infos[0])
+    terminal_info.update(
+        {
+            "episode_end_reason": "TIMEOUT",
+            "step_metric_speed": 4.0,
+        }
+    )
+    episode[1] = replace(episode[1], infos=[terminal_info])
+    return episode
+
+
+@pytest.fixture
+def on_policy_episode_with_changed_metadata(on_policy_episode_with_metrics):
+    """Change one metadata value while preserving the metric-bearing episode."""
+    episode = list(on_policy_episode_with_metrics)
+    initial_info = dict(episode[0].infos[0])
+    initial_info["meta_settings"] = {"map": "changed"}
+    episode[0] = replace(episode[0], infos=[initial_info])
+    return episode
+
+
+@pytest.fixture(name="discarded_on_policy_episode")
+def create_discarded_on_policy_episode(on_policy_episode_with_metrics):
+    """Mark a metric-bearing episode as discarded at its terminal row."""
+    episode = list(on_policy_episode_with_metrics)
+    terminal_info = dict(episode[-1].infos[0])
+    terminal_info[constants.DISCARD_INFO_KEY] = True
+    episode[-1] = replace(episode[-1], infos=[terminal_info])
+    return episode
+
+
+@pytest.fixture
 def off_policy_episode():
     """Create a complete two-step off-policy episode."""
     return [
@@ -443,6 +563,31 @@ def off_policy_episode():
             reset_infos=[{}],
         ),
     ]
+
+
+@pytest.fixture
+def off_policy_episode_with_metrics(off_policy_episode):
+    """Add logging metadata and metrics to a complete off-policy episode."""
+    episode = list(off_policy_episode)
+    episode[0] = replace(
+        episode[0],
+        infos=[
+            {
+                "meta_settings": {"map": "test"},
+                "step_metric_speed": 2.0,
+            }
+        ],
+    )
+    episode[1] = replace(
+        episode[1],
+        infos=[
+            {
+                "episode_end_reason": "TIMEOUT",
+                "step_metric_speed": 4.0,
+            }
+        ],
+    )
+    return episode
 
 
 @pytest.fixture
@@ -544,8 +689,8 @@ def on_policy_rollout_buffer():
     )
 
 
-@pytest.fixture
-def dict_on_policy_episode(on_policy_episode):
+@pytest.fixture(name="dict_on_policy_episode")
+def create_dict_on_policy_episode(on_policy_episode):
     """Create a two-step episode with dictionary observations."""
     observation_rows = (
         {
@@ -575,14 +720,14 @@ def dict_on_policy_episode(on_policy_episode):
     ]
 
 
-@pytest.fixture
-def dict_on_policy_packet(dict_on_policy_episode):
+@pytest.fixture(name="dict_on_policy_packet")
+def pack_dict_on_policy_packet(dict_on_policy_episode):
     """Encode the dictionary-observation episode for assembly tests."""
     return encode_episode_batch(0, 1, pack_episode(dict_on_policy_episode))
 
 
-@pytest.fixture
-def dict_on_policy_rollout_buffer():
+@pytest.fixture(name="dict_on_policy_rollout_buffer")
+def create_dict_on_policy_rollout_buffer():
     """Create a rollout buffer with dictionary observation destinations."""
     return DictRolloutBuffer(
         buffer_size=2,

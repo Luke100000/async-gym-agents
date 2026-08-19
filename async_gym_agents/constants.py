@@ -19,11 +19,19 @@ EPISODE_KIND_OFF_POLICY_CODE = 1
 
 BUFFER_AVG_POLICY_LAG_KEY = "avg_policy_lag"
 BUFFER_MAX_POLICY_LAG_KEY = "max_policy_lag"
+
+DISCARD_INFO_KEY = "discard"
+EPISODE_END_REASON_INFO_KEY = "episode_end_reason"
+META_INFO_PREFIX = "meta_"
+STEP_METRIC_INFO_PREFIX = "step_metric_"
+EPISODE_END_REASON_WINDOW_SIZE = 100
 BUFFER_AVG_PUSH_WAIT_SECONDS_KEY = "avg_push_wait_seconds"
 
 ON_POLICY_ENVIRONMENT_REWARDS_FIELD = "environment_rewards"
 ON_POLICY_TRAINING_REWARDS_FIELD = "training_rewards"
 OFF_POLICY_REWARDS_FIELD = "rewards"
+ON_POLICY_ACTIONS_FIELD = "actions"
+OFF_POLICY_ACTIONS_FIELD = "buffer_actions"
 
 ASYNC_WORKER_FAILURE_MESSAGE = "Async workers failed: {failures}"
 WORKER_FAILURE_MESSAGE = "worker {worker_index}: {reason}"
