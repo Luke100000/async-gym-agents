@@ -164,6 +164,17 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
                         transition_index,
                     )
 
+                    # GH issue #633: bootstrap truncated-episode rewards with the
+                    # trainer's own, continuously-updated policy rather than a
+                    # worker's cached snapshot, which may be many episodes stale.
+                    bootstrap_truncated_rewards(
+                        self.policy,
+                        self.gamma,
+                        training_rewards,
+                        dones,
+                        infos,
+                    )
+
                     self.num_timesteps += 1
                     callback.update_locals(locals())
                     if not callback.on_step():
@@ -172,6 +183,13 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
                     self._update_info_buffer(infos, dones)
                     n_steps += 1
                     buffer_index += 1
+
+        rollout_buffer.compute_returns_and_advantage(
+            last_values=torch.zeros(rollout_buffer.n_envs),
+            dones=dones,
+        )
+        rollout_buffer.pos = buffer_index
+        rollout_buffer.full = True
 
         callback.update_locals(locals())
 
@@ -197,7 +215,6 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
         return dict(
             **super().get_worker_kwargs(),
             action_space=self.action_space,
-            gamma=self.gamma,
         )
 
 
@@ -205,13 +222,11 @@ class InjectorWorker(InjectorWorkerBase):
     def __init__(
         self,
         action_space: gym.Space,
-        gamma: float,
         **kwargs,
     ):
         super().__init__(**kwargs)
 
         self.action_space = action_space
-        self.gamma = gamma
 
     def generate(self) -> Generator[list[Transition], None, None]:
         """
@@ -253,14 +268,10 @@ class InjectorWorker(InjectorWorkerBase):
                 new_obs, rewards, dones, infos = self.env.step(clipped_actions)
 
             environment_rewards = rewards.copy()
+            # The TimeLimit-truncation bootstrap correction (GH issue #633) is
+            # applied by the trainer in collect_rollouts, using its own live
+            # policy instead of this worker's cached, potentially stale copy.
             training_rewards = environment_rewards.copy()
-            bootstrap_truncated_rewards(
-                self.policy,
-                self.gamma,
-                training_rewards,
-                dones,
-                infos,
-            )
 
             if isinstance(self.action_space, spaces.Discrete):
                 # Reshape in case of discrete action

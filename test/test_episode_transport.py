@@ -1,4 +1,6 @@
+import queue
 import threading
+import time
 from dataclasses import replace
 
 import pytest
@@ -6,12 +8,33 @@ import pytest
 from async_gym_agents.episode_transport import (
     EpisodeTransport,
     WorkerTransportClosedError,
+    _encode_episode_packet_header,
 )
 
 TRANSPORT_TEST_TIMEOUT_SECONDS = 0.02
 TRANSPORT_THREAD_JOIN_TIMEOUT_SECONDS = 1.0
 TRANSPORT_PROCESS_WAIT_SECONDS = 0.5
 TRANSPORT_PROCESS_COMPLETION_TIMEOUT_SECONDS = 5.0
+
+
+class _SlowPayloadConnection:
+    """Return a header immediately, then block a released event before the payload."""
+
+    def __init__(self, header: bytes, payload: bytes, release: threading.Event):
+        self._header = header
+        self._payload = payload
+        self._release = release
+        self.recv_calls = 0
+
+    def recv_bytes(self) -> bytes:
+        self.recv_calls += 1
+        if self.recv_calls == 1:
+            return self._header
+        self._release.wait()
+        return self._payload
+
+    def close(self) -> None:
+        pass
 
 
 class TestEpisodeTransport:
@@ -156,6 +179,43 @@ class TestEpisodeTransport:
         assert send_completed.wait(TRANSPORT_PROCESS_COMPLETION_TIMEOUT_SECONDS)
         process.join(TRANSPORT_PROCESS_COMPLETION_TIMEOUT_SECONDS)
         assert process.exitcode == 0
+
+    def test_honors_the_deadline_while_a_payload_is_still_arriving(
+        self,
+        on_policy_packet,
+    ):
+        """A slow-arriving payload no longer blocks receive() past its timeout."""
+        transport = EpisodeTransport(
+            worker_count=1,
+            max_pending_episodes=1,
+            use_mp=False,
+        )
+        release = threading.Event()
+        transport._receive_connections[0] = _SlowPayloadConnection(
+            _encode_episode_packet_header(on_policy_packet),
+            on_policy_packet.payload,
+            release,
+        )
+
+        started = time.monotonic()
+        with pytest.raises(queue.Empty):
+            transport._receive_packet(
+                0, time.monotonic() + TRANSPORT_TEST_TIMEOUT_SECONDS
+            )
+        elapsed = time.monotonic() - started
+
+        assert elapsed < TRANSPORT_PROCESS_WAIT_SECONDS
+
+        release.set()
+        packet = transport._receive_packet(
+            0, time.monotonic() + TRANSPORT_PROCESS_COMPLETION_TIMEOUT_SECONDS
+        )
+
+        assert packet.payload == on_policy_packet.payload
+        # The resumed read reused the in-flight background read instead of
+        # starting the payload over from scratch.
+        assert transport._receive_connections[0].recv_calls == 2
+        transport.shutdown()
 
     def test_preserves_off_policy_packet_metadata(self, off_policy_packet):
         """Pipe framing preserves the episode kind and absent policy version."""
