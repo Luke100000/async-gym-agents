@@ -1,14 +1,17 @@
 import threading
 import time
 from dataclasses import replace
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
 import pytest
-from stable_baselines3.common.callbacks import CallbackList
+from stable_baselines3.common.callbacks import BaseCallback, CallbackList
 
 from async_gym_agents import constants
+from async_gym_agents.agents.injector import InjectorWorkerBase
 from async_gym_agents.agents.on_policy_injector import (
+    InjectorWorker,
     bootstrap_truncated_rewards,
 )
 from async_gym_agents.episode_transport import EpisodeTransport
@@ -582,3 +585,54 @@ class TestTruncatedRewardBootstrap:
 
         assert training_rewards.tolist() == [1.0]
         fixed_terminal_value_policy.predict_values.assert_not_called()
+
+    def test_publishes_gamma_set_at_rollout_start_to_workers(
+        self,
+        initialized_reward_test_agent,
+        on_policy_packet,
+        enqueue_episode_packet,
+    ):
+        """A gamma changed in on_rollout_start is shared with the workers."""
+
+        class SetGammaAtRolloutStart(BaseCallback):
+            def _on_rollout_start(self) -> None:
+                self.model.gamma = 0.25
+
+            def _on_step(self) -> bool:
+                return True
+
+        enqueue_episode_packet(initialized_reward_test_agent, on_policy_packet)
+        callback = SetGammaAtRolloutStart()
+        callback.init_callback(initialized_reward_test_agent)
+
+        initialized_reward_test_agent.collect_rollouts(
+            initialized_reward_test_agent.env,
+            callback,
+            initialized_reward_test_agent.rollout_buffer,
+            n_rollout_steps=2,
+        )
+
+        assert initialized_reward_test_agent._shared_gamma.value == 0.25
+
+    def test_worker_follows_shared_gamma_when_refreshing_policy(self):
+        """Workers bootstrap with the trainer's latest gamma, like SB3."""
+        worker = InjectorWorker.__new__(InjectorWorker)
+        worker.gamma = 0.99
+        worker._shared_gamma = SimpleNamespace(value=0.5)
+
+        with patch.object(InjectorWorkerBase, "copy_policy_from_store"):
+            worker.copy_policy_from_store()
+
+        assert worker.gamma == 0.5
+
+    def test_saves_agent_with_shared_gamma(
+        self,
+        short_episode_on_policy_mp_agent,
+        tmp_path,
+    ):
+        """The shared gamma is runtime state and is not pickled on save."""
+        short_episode_on_policy_mp_agent.learn(total_timesteps=3)
+
+        short_episode_on_policy_mp_agent.save(tmp_path / "model.zip")
+
+        assert (tmp_path / "model.zip").exists()

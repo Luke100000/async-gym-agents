@@ -1,4 +1,5 @@
-from typing import Generator, Optional, Type
+from types import SimpleNamespace
+from typing import Any, Generator, List, Optional, Type
 
 import gymnasium as gym
 import numpy as np
@@ -120,6 +121,9 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
             self.policy.reset_noise(1)
 
         callback.on_rollout_start()
+        # Publish gamma after on_rollout_start, so that callbacks changing it
+        # (e.g. schedules) reach the workers' truncation bootstrap.
+        self._shared_gamma.value = self.gamma
         callback_dispatcher = CallbackBatchDispatcher(
             callback,
             EpisodeKind.ON_POLICY,
@@ -213,6 +217,19 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
         )
         self._episode_assembler.start()
 
+    def _init_collect_state(self):
+        initialized = self._initialized
+        super()._init_collect_state()
+        if not initialized:
+            self._shared_gamma = (
+                self.mp_ctx.Value(constants.SHARED_GAMMA_TYPE_CODE, self.gamma)
+                if self.use_mp
+                else SimpleNamespace(value=self.gamma)
+            )
+
+    def _excluded_save_params(self) -> List[str]:
+        return super()._excluded_save_params() + ["_shared_gamma"]
+
     def get_worker_class(self) -> Type[InjectorWorkerBase]:
         return InjectorWorker
 
@@ -221,6 +238,7 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
             **super().get_worker_kwargs(),
             action_space=self.action_space,
             gamma=self.gamma,
+            shared_gamma=self._shared_gamma,
         )
 
 
@@ -229,12 +247,20 @@ class InjectorWorker(InjectorWorkerBase):
         self,
         action_space: gym.Space,
         gamma: float,
+        shared_gamma: Optional[Any] = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
 
         self.action_space = action_space
         self.gamma = gamma
+        self._shared_gamma = shared_gamma
+
+    def copy_policy_from_store(self) -> None:
+        super().copy_policy_from_store()
+        # Follow the trainer's gamma, like SB3 bootstraps with its current gamma.
+        if self._shared_gamma is not None:
+            self.gamma = self._shared_gamma.value
 
     def generate(self) -> Generator[list[OnPolicyTransition], None, None]:
         """
