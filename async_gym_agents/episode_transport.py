@@ -50,6 +50,7 @@ def _encode_episode_packet_header(packet: EpisodePacket) -> bytes:
         policy_version,
         episode_kind_code,
         packet.transition_count,
+        packet.env_index,
     )
 
 
@@ -65,6 +66,7 @@ def _decode_pipe_packet(
             policy_version,
             episode_kind_code,
             transition_count,
+            env_index,
         ) = constants.EPISODE_PACKET_HEADER.unpack(header)
     except struct.error as error:
         raise ValueError("Received an invalid episode packet header") from error
@@ -87,6 +89,7 @@ def _decode_pipe_packet(
         episode_kind=episode_kind,
         transition_count=transition_count,
         payload=payload,
+        env_index=env_index,
     )
 
 

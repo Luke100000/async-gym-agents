@@ -17,6 +17,7 @@ from stable_baselines3.common.vec_env.base_vec_env import VecEnvObs
 from async_gym_agents.agents.injector import AsyncAgentInjector, InjectorWorkerBase
 from async_gym_agents.callback_batching import CallbackBatchDispatcher
 from async_gym_agents.data_classes import (
+    AssembledEpisode,
     EpisodeBatch,
     EpisodeCallbackContext,
     OffPolicyTransition,
@@ -54,7 +55,9 @@ class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithm):
         )
         super(AsyncAgentInjector, self).__init__(*args, **kwargs)
         self._active_transitions: Deque[OffPolicyTransition] = deque()
-        self._active_episode_batch: EpisodeBatch | None = None
+        self._active_episode: AssembledEpisode | None = None
+        # Last episode whose final transition was fetched (its origin is passed to the episode callbacks)
+        self._completed_episode: AssembledEpisode | None = None
 
     def _store_transition(*args):
         raise NotImplementedError()
@@ -207,6 +210,8 @@ class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithm):
                             self.num_timesteps - completed_episode.transition_count
                         ),
                         end_timestep=self.num_timesteps,
+                        worker_index=self._completed_episode.worker_index,
+                        env_index=self._completed_episode.env_index,
                     )
                     if not callback_dispatcher.process_episode(callback_context):
                         return RolloutReturn(
@@ -281,15 +286,15 @@ class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithm):
                 prepared_episode.episode.batch.transition_count,
             )
             self._active_transitions.extend(prepared_episode.transitions)
-            self._active_episode_batch = prepared_episode.episode.batch
+            self._active_episode = prepared_episode.episode
 
         transition = self._active_transitions.popleft()
         if self._active_transitions:
             return transition, None
 
-        completed_episode_batch = self._active_episode_batch
-        self._active_episode_batch = None
-        return transition, completed_episode_batch
+        self._completed_episode = self._active_episode
+        self._active_episode = None
+        return transition, self._completed_episode.batch
 
     def _initialize_episode_assembler(self) -> None:
         if self._episode_assembler is not None:
@@ -305,12 +310,14 @@ class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithm):
     def _excluded_save_params(self):
         return super()._excluded_save_params() + [
             "_active_transitions",
-            "_active_episode_batch",
+            "_active_episode",
+            "_completed_episode",
         ]
 
     def shutdown(self):
         self._active_transitions.clear()
-        self._active_episode_batch = None
+        self._active_episode = None
+        self._completed_episode = None
         return super().shutdown()
 
     def get_worker_class(self) -> Type[InjectorWorkerBase]:
@@ -387,7 +394,7 @@ class InjectorWorker(InjectorWorkerBase):
             action = buffer_action
         return action, buffer_action
 
-    def generate(self) -> Generator[list[OffPolicyTransition], None, None]:
+    def generate(self) -> Generator[tuple[int, list[OffPolicyTransition]], None, None]:
         """
         Continuously plays the game and returns episodes of Transitions
         """
@@ -432,7 +439,7 @@ class InjectorWorker(InjectorWorkerBase):
             # Start a new episode
             for idx, done in enumerate(dones):
                 if done:
-                    yield episodes[idx]
+                    yield idx, episodes[idx]
                     del episodes[idx]
 
                     self.copy_policy_from_store()

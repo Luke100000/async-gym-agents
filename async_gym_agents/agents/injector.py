@@ -763,7 +763,7 @@ class InjectorWorkerBase:
                 f"policy loaded from shared store: version={self._policy_version}"
             )
 
-    def _put_episode_with_timeout(self, episode):
+    def _put_episode_with_timeout(self, episode, env_index: int = 0):
         with self._profiler.track("episode_packing"):
             episode_batch = pack_episode(episode)
         with self._profiler.track("episode_serialization"):
@@ -771,6 +771,7 @@ class InjectorWorkerBase:
                 self.worker_index,
                 self._policy_version,
                 episode_batch,
+                env_index=env_index,
             )
         submission = self._episode_feeder.submit(
             packet,
@@ -818,7 +819,7 @@ class InjectorWorkerBase:
         try:
             self.copy_policy_from_store()
 
-            for episode in self.generate():
+            for env_index, episode in self.generate():
                 with self._state_lock:
                     self._state.total_episodes += 1
 
@@ -831,7 +832,7 @@ class InjectorWorkerBase:
                     self._flush_profiler()
                     continue
 
-                self._put_episode_with_timeout(episode)
+                self._put_episode_with_timeout(episode, env_index)
                 self._flush_profiler()
 
                 if self._stop.is_set():
@@ -844,5 +845,6 @@ class InjectorWorkerBase:
                 self.env.close()
                 self._logger.info("Generator cycle is completed")
 
-    def generate(self) -> Generator[list[Transition], None, None]:
+    def generate(self) -> Generator[tuple[int, list[Transition]], None, None]:
+        """Yield complete episodes with the index of the sub-environment which played them."""
         raise NotImplementedError()
