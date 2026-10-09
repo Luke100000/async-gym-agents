@@ -190,6 +190,8 @@ class OnPolicyAlgorithmInjector(AsyncAgentInjector, OnPolicyAlgorithm):
                     batch=batch,
                     start_timestep=episode_start_timestep,
                     end_timestep=self.num_timesteps,
+                    worker_index=assembled_episode.worker_index,
+                    env_index=assembled_episode.env_index,
                 )
                 if not callback_dispatcher.process_episode(callback_context):
                     return False
@@ -262,7 +264,7 @@ class InjectorWorker(InjectorWorkerBase):
         if self._shared_gamma is not None:
             self.gamma = self._shared_gamma.value
 
-    def generate(self) -> Generator[list[OnPolicyTransition], None, None]:
+    def generate(self) -> Generator[tuple[int, list[OnPolicyTransition]], None, None]:
         """
         Continuously plays the game and returns episodes of Transitions
         """
@@ -345,6 +347,6 @@ class InjectorWorker(InjectorWorkerBase):
             # Start a new episode
             for idx, done in enumerate(dones):
                 if done:
-                    yield episodes.pop(idx)
+                    yield idx, episodes.pop(idx)
 
                     self.copy_policy_from_store()

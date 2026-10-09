@@ -43,14 +43,19 @@ def encode_episode_batch(
     worker_index: int,
     policy_version: Optional[int],
     batch: EpisodeBatch,
+    env_index: int = 0,
 ) -> EpisodePacket:
-    """Serialize one packed episode into a transport-ready byte payload."""
+    """Serialize one packed episode into a transport-ready byte payload.
+
+    ``env_index`` is the sub-environment of the worker's (vectorized) environment which played the episode.
+    """
     return EpisodePacket(
         worker_index=worker_index,
         policy_version=policy_version,
         episode_kind=batch.episode_kind,
         transition_count=batch.transition_count,
         payload=pickle.dumps(batch, protocol=pickle.HIGHEST_PROTOCOL),
+        env_index=env_index,
     )
 
 
