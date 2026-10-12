@@ -43,7 +43,7 @@ def encode_episode_batch(
     worker_index: int,
     policy_version: Optional[int],
     batch: EpisodeBatch,
-    env_index: int = 0,
+    env_index: int,
 ) -> EpisodePacket:
     """Serialize one packed episode into a transport-ready byte payload.
 

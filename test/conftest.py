@@ -593,13 +593,13 @@ def off_policy_episode_with_metrics(off_policy_episode):
 @pytest.fixture
 def on_policy_packet(on_policy_episode):
     """Encode a representative on-policy episode for transport tests."""
-    return encode_episode_batch(0, 1, pack_episode(on_policy_episode))
+    return encode_episode_batch(0, 1, pack_episode(on_policy_episode), 0)
 
 
 @pytest.fixture
 def off_policy_packet(off_policy_episode):
     """Encode an off-policy episode without a policy version."""
-    return encode_episode_batch(0, None, pack_episode(off_policy_episode))
+    return encode_episode_batch(0, None, pack_episode(off_policy_episode), 0)
 
 
 @pytest.fixture
@@ -723,7 +723,7 @@ def create_dict_on_policy_episode(on_policy_episode):
 @pytest.fixture(name="dict_on_policy_packet")
 def pack_dict_on_policy_packet(dict_on_policy_episode):
     """Encode the dictionary-observation episode for assembly tests."""
-    return encode_episode_batch(0, 1, pack_episode(dict_on_policy_episode))
+    return encode_episode_batch(0, 1, pack_episode(dict_on_policy_episode), 0)
 
 
 @pytest.fixture(name="dict_on_policy_rollout_buffer")

@@ -43,7 +43,6 @@ class TestEpisodeOrigin:
     def test_packet_keeps_the_sub_environment_index(self, on_policy_episode):
         batch = pack_episode(on_policy_episode)
 
-        assert encode_episode_batch(7, 3, batch).env_index == 0
         assert encode_episode_batch(7, 3, batch, env_index=2).env_index == 2
 
     @pytest.mark.parametrize(
