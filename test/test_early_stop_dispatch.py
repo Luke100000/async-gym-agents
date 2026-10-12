@@ -71,7 +71,9 @@ def train_until_stopped(algorithm):
     )
     recorder = RecordEpisodes()
     try:
-        agent.learn(total_timesteps=16, callback=CallbackList([StopOnFirstDone(), recorder]))
+        agent.learn(
+            total_timesteps=16, callback=CallbackList([StopOnFirstDone(), recorder])
+        )
     finally:
         agent.shutdown()
     return agent, recorder
@@ -84,14 +86,14 @@ def train_until_stopped(algorithm):
             PPO,
             marks=pytest.mark.xfail(
                 strict=True,
-                reason="on_policy_injector.py:182-183 returns on the step veto before process_episode at :194",
+                reason="collect_rollouts returns on the step veto before process_episode",
             ),
         ),
         pytest.param(
             DQN,
             marks=pytest.mark.xfail(
                 strict=True,
-                reason="off_policy_injector.py:196-201 returns on the step veto before process_episode at :211",
+                reason="collect_rollouts returns on the step veto before process_episode",
             ),
         ),
     ],

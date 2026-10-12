@@ -763,7 +763,7 @@ class InjectorWorkerBase:
                 f"policy loaded from shared store: version={self._policy_version}"
             )
 
-    def _put_episode_with_timeout(self, episode, env_index: int = 0):
+    def _put_episode_with_timeout(self, episode, env_index: int):
         with self._profiler.track("episode_packing"):
             episode_batch = pack_episode(episode)
         with self._profiler.track("episode_serialization"):

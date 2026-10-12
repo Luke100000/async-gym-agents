@@ -1,6 +1,7 @@
 from functools import partial
 
 import gymnasium as gym
+import pytest
 from stable_baselines3 import PPO, SAC
 from stable_baselines3.common.callbacks import BaseCallback
 
@@ -45,47 +46,30 @@ class TestEpisodeOrigin:
         assert encode_episode_batch(7, 3, batch).env_index == 0
         assert encode_episode_batch(7, 3, batch, env_index=2).env_index == 2
 
-    def test_on_policy_callbacks_receive_worker_and_sub_environment(self):
-        agent = get_injected_agent(PPO)(
+    @pytest.mark.parametrize(
+        ("algorithm", "env_id", "kwargs"),
+        [
+            (PPO, "CartPole-v1", dict(batch_size=8, n_epochs=1, n_steps=8)),
+            (
+                SAC,
+                "Pendulum-v1",
+                dict(batch_size=2, buffer_size=128, learning_starts=1000, train_freq=1),
+            ),
+        ],
+    )
+    def test_callbacks_receive_worker_and_sub_environment(
+        self, algorithm, env_id, kwargs
+    ):
+        agent = get_injected_agent(algorithm)(
             "MlpPolicy",
             IndexableMultiEnv(
                 [
-                    partial(make_vectorized_short_episodes, "CartPole-v1")
+                    partial(make_vectorized_short_episodes, env_id)
                     for _ in range(WORKERS)
                 ]
             ),
-            batch_size=8,
             device="cpu",
-            n_epochs=1,
-            n_steps=8,
-        )
-        recorder = EpisodeOriginRecorder()
-        try:
-            agent.learn(total_timesteps=64, callback=recorder)
-        finally:
-            agent.shutdown()
-
-        expected = {
-            (worker, env)
-            for worker in range(WORKERS)
-            for env in range(SUB_ENVIRONMENTS)
-        }
-        assert set(recorder.origins) == expected
-
-    def test_off_policy_callbacks_receive_worker_and_sub_environment(self):
-        agent = get_injected_agent(SAC)(
-            "MlpPolicy",
-            IndexableMultiEnv(
-                [
-                    partial(make_vectorized_short_episodes, "Pendulum-v1")
-                    for _ in range(WORKERS)
-                ]
-            ),
-            batch_size=2,
-            buffer_size=128,
-            device="cpu",
-            learning_starts=1000,
-            train_freq=1,
+            **kwargs,
         )
         recorder = EpisodeOriginRecorder()
         try:

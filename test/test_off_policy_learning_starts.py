@@ -56,12 +56,17 @@ def count_worker_policy_actions(monkeypatch, learning_starts):
 
 
 def test_workers_use_policy_without_warm_up(monkeypatch):
-    assert count_worker_policy_actions(monkeypatch, learning_starts=0) >= TOTAL_TIMESTEPS
+    assert (
+        count_worker_policy_actions(monkeypatch, learning_starts=0) >= TOTAL_TIMESTEPS
+    )
 
 
 @pytest.mark.xfail(
     strict=True,
-    reason="off_policy_injector.py:323,345 copy num_timesteps once at worker creation; :362 never sees it grow",
+    reason="workers copy num_timesteps once at creation and never see it grow",
 )
 def test_workers_switch_to_policy_after_learning_starts(monkeypatch):
-    assert count_worker_policy_actions(monkeypatch, learning_starts=16) >= TOTAL_TIMESTEPS - 16
+    assert (
+        count_worker_policy_actions(monkeypatch, learning_starts=16)
+        >= TOTAL_TIMESTEPS - 16
+    )

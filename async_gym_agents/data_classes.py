@@ -59,7 +59,7 @@ class EpisodePacket:
     transition_count: int
     payload: bytes
     # Index of the sub-environment of the worker's (vectorized) environment which played the episode
-    env_index: int = 0
+    env_index: int
 
 
 @dataclass(frozen=True)
@@ -124,8 +124,8 @@ class AssembledEpisode:
     payload_bytes: int
     batch: EpisodeBatch
     # Origin of the episode: worker and sub-environment of its (vectorized) environment
-    worker_index: int = 0
-    env_index: int = 0
+    worker_index: int
+    env_index: int
 
 
 @dataclass(frozen=True)
@@ -142,8 +142,8 @@ class EpisodeCallbackContext:
     end_timestep: int
     # Origin of the episode (each batch holds a single environment's episode, so its env axis is always 0):
     #   worker and sub-environment of the worker's (vectorized) environment
-    worker_index: int = 0
-    env_index: int = 0
+    worker_index: int
+    env_index: int
 
 
 @dataclass(frozen=True)

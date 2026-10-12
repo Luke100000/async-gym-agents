@@ -18,7 +18,6 @@ from async_gym_agents.agents.injector import AsyncAgentInjector, InjectorWorkerB
 from async_gym_agents.callback_batching import CallbackBatchDispatcher
 from async_gym_agents.data_classes import (
     AssembledEpisode,
-    EpisodeBatch,
     EpisodeCallbackContext,
     OffPolicyTransition,
 )
@@ -56,8 +55,6 @@ class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithm):
         super(AsyncAgentInjector, self).__init__(*args, **kwargs)
         self._active_transitions: Deque[OffPolicyTransition] = deque()
         self._active_episode: AssembledEpisode | None = None
-        # Last episode whose final transition was fetched (its origin is passed to the episode callbacks)
-        self._completed_episode: AssembledEpisode | None = None
 
     def _store_transition(*args):
         raise NotImplementedError()
@@ -205,13 +202,14 @@ class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithm):
 
                 if completed_episode is not None:
                     callback_context = EpisodeCallbackContext(
-                        batch=completed_episode,
+                        batch=completed_episode.batch,
                         start_timestep=(
-                            self.num_timesteps - completed_episode.transition_count
+                            self.num_timesteps
+                            - completed_episode.batch.transition_count
                         ),
                         end_timestep=self.num_timesteps,
-                        worker_index=self._completed_episode.worker_index,
-                        env_index=self._completed_episode.env_index,
+                        worker_index=completed_episode.worker_index,
+                        env_index=completed_episode.env_index,
                     )
                     if not callback_dispatcher.process_episode(callback_context):
                         return RolloutReturn(
@@ -275,8 +273,8 @@ class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithm):
 
     def fetch_transition_with_episode(
         self,
-    ) -> tuple[OffPolicyTransition, EpisodeBatch | None]:
-        """Return one transition and its batch after consuming the episode's last row."""
+    ) -> tuple[OffPolicyTransition, AssembledEpisode | None]:
+        """Return one transition and its episode after consuming the episode's last row."""
         if not self._active_transitions:
             self._initialize_episode_assembler()
             with self._profiler_main.track("assembler_acquire"):
@@ -292,9 +290,9 @@ class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithm):
         if self._active_transitions:
             return transition, None
 
-        self._completed_episode = self._active_episode
+        completed_episode = self._active_episode
         self._active_episode = None
-        return transition, self._completed_episode.batch
+        return transition, completed_episode
 
     def _initialize_episode_assembler(self) -> None:
         if self._episode_assembler is not None:
@@ -311,13 +309,11 @@ class OffPolicyAlgorithmInjector(AsyncAgentInjector, OffPolicyAlgorithm):
         return super()._excluded_save_params() + [
             "_active_transitions",
             "_active_episode",
-            "_completed_episode",
         ]
 
     def shutdown(self):
         self._active_transitions.clear()
         self._active_episode = None
-        self._completed_episode = None
         return super().shutdown()
 
     def get_worker_class(self) -> Type[InjectorWorkerBase]:
