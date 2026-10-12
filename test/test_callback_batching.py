@@ -38,7 +38,7 @@ class TestBatchedLoggingCallback:
         batch = pack_episode(on_policy_episode_with_metrics)
 
         assert CallbackBatchDispatcher(callback).process_episode(
-            EpisodeCallbackContext(batch, 0, 2)
+            EpisodeCallbackContext(batch, 0, 2, 0, 0)
         )
 
         aggregator = callback.metric_aggregator
@@ -60,10 +60,10 @@ class TestBatchedLoggingCallback:
         batch = pack_episode(on_policy_episode_with_metrics)
 
         assert CallbackBatchDispatcher(external_logging_callback).process_episode(
-            EpisodeCallbackContext(batch, 0, 2)
+            EpisodeCallbackContext(batch, 0, 2, 0, 0)
         )
         assert CallbackBatchDispatcher(external_logging_callback).process_episode(
-            EpisodeCallbackContext(batch, 2, 4)
+            EpisodeCallbackContext(batch, 2, 4, 0, 0)
         )
 
         assert external_logging_callback.connector.logged_dicts == [
@@ -81,10 +81,10 @@ class TestBatchedLoggingCallback:
         changed_batch = pack_episode(on_policy_episode_with_changed_metadata)
 
         assert CallbackBatchDispatcher(external_logging_callback).process_episode(
-            EpisodeCallbackContext(initial_batch, 0, 2)
+            EpisodeCallbackContext(initial_batch, 0, 2, 0, 0)
         )
         assert CallbackBatchDispatcher(external_logging_callback).process_episode(
-            EpisodeCallbackContext(changed_batch, 2, 4)
+            EpisodeCallbackContext(changed_batch, 2, 4, 0, 0)
         )
 
         assert external_logging_callback.connector.logged_dicts == [
@@ -149,8 +149,8 @@ class TestBatchedTerminalCallbacks:
         batch = pack_episode(on_policy_episode)
         dispatcher = CallbackBatchDispatcher(external_reset_info_callback)
 
-        assert dispatcher.process_episode(EpisodeCallbackContext(batch, 0, 2))
-        assert dispatcher.process_episode(EpisodeCallbackContext(batch, 2, 4))
+        assert dispatcher.process_episode(EpisodeCallbackContext(batch, 0, 2, 0, 0))
+        assert dispatcher.process_episode(EpisodeCallbackContext(batch, 2, 4, 0, 0))
 
         assert external_reset_info_callback.connector.logged_dicts == [
             ({"seed": 7}, "Reset Info - Agent 0 - Episode 1"),
@@ -200,8 +200,8 @@ class TestOffPolicyCallbackBatching:
 
         assert first_completed_episode is None
         assert terminal_completed_episode is not None
-        assert terminal_completed_episode.episode_kind is EpisodeKind.OFF_POLICY
-        assert terminal_completed_episode.transition_count == 2
+        assert terminal_completed_episode.batch.episode_kind is EpisodeKind.OFF_POLICY
+        assert terminal_completed_episode.batch.transition_count == 2
 
     def test_batches_logging_while_preserving_third_party_step_callbacks(
         self,
@@ -235,7 +235,7 @@ class TestOffPolicyCallbackBatching:
         batch = pack_episode(off_policy_episode_with_metrics)
         dispatcher = CallbackBatchDispatcher(callback, EpisodeKind.OFF_POLICY)
 
-        assert dispatcher.process_episode(EpisodeCallbackContext(batch, 0, 2))
+        assert dispatcher.process_episode(EpisodeCallbackContext(batch, 0, 2, 0, 0))
 
         aggregator = callback.metric_aggregator
         assert aggregator.episode_rewards[0] == [3.0]

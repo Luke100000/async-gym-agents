@@ -14,7 +14,8 @@ SHARED_GAMMA_TYPE_CODE = "d"
 POLICY_SNAPSHOT_SLOT_COUNT = 2
 POLICY_INITIAL_SLOT_INDEX = 0
 POLICY_UNPUBLISHED_VERSION = -1
-EPISODE_PACKET_HEADER = struct.Struct("!BqBQ")
+# has policy version, policy version, episode kind code, transition count, sub-environment index
+EPISODE_PACKET_HEADER = struct.Struct("!BqBQI")
 EPISODE_KIND_ON_POLICY_CODE = 0
 EPISODE_KIND_OFF_POLICY_CODE = 1
 

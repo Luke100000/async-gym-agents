@@ -23,6 +23,7 @@ class TestPolicyLagReporting:
                 worker_index=0,
                 policy_version=1,
                 batch=pack_episode(off_policy_episode),
+                env_index=0,
             ),
         )
 
@@ -47,6 +48,7 @@ class TestTransportReporting:
             worker_index=0,
             policy_version=0,
             batch=pack_episode(off_policy_episode),
+            env_index=0,
         )
         enqueue_episode_packet(initialized_off_policy_agent, packet)
 
@@ -111,6 +113,7 @@ class TestProfilerMetricIteration:
             worker_index=0,
             policy_version=0,
             batch=pack_episode(off_policy_episode),
+            env_index=0,
         )
         enqueue_episode_packet(initialized_off_policy_agent, packet)
         initialized_off_policy_agent.fetch_transition()

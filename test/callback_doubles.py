@@ -497,13 +497,8 @@ class ExperimentPruningCallback(EpisodeBatchableCallbackMixin, BaseCallback):
                 self.episode_rewards.append(episode_rewards[done_index])
 
         self.episode_reward = np.zeros_like(episode_rewards)
-        reward_window_is_full = (
-            len(self.episode_rewards) == self.episode_rewards.maxlen
-        )
-        if (
-            context.end_timestep <= self.pruning_start_at
-            or not reward_window_is_full
-        ):
+        reward_window_is_full = len(self.episode_rewards) == self.episode_rewards.maxlen
+        if context.end_timestep <= self.pruning_start_at or not reward_window_is_full:
             return True
         return bool(np.mean(self.episode_rewards) >= self.episode_reward_threshold)
 
@@ -744,6 +739,8 @@ def process_callback_by_episode():
                 batch=batch,
                 start_timestep=start_timestep,
                 end_timestep=start_timestep + batch.transition_count,
+                worker_index=0,
+                env_index=0,
             )
         )
 

@@ -180,6 +180,8 @@ class AsyncEpisodeAssembler(ABC, Generic[PreparedAssembly]):
             policy_version=packet.policy_version,
             payload_bytes=len(packet.payload),
             batch=batch,
+            worker_index=packet.worker_index,
+            env_index=packet.env_index,
         )
 
     @abstractmethod

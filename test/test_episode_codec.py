@@ -19,7 +19,7 @@ class TestEpisodeCodec:
     def test_round_trips_on_policy_episode(self, on_policy_episode):
         """On-policy arrays and sparse terminal metadata retain their values."""
         batch = pack_episode(on_policy_episode)
-        packet = encode_episode_batch(7, 3, batch)
+        packet = encode_episode_batch(7, 3, batch, 0)
 
         decoded_batch = decode_episode_packet(packet)
         decoded_episode = unpack_episode(decoded_batch)
@@ -73,7 +73,7 @@ class TestEpisodeCodec:
     def test_round_trips_off_policy_episode(self, off_policy_episode):
         """Off-policy observations, actions, rewards, and done flags retain shape."""
         batch = pack_episode(off_policy_episode)
-        packet = encode_episode_batch(2, 5, batch)
+        packet = encode_episode_batch(2, 5, batch, 0)
 
         decoded_episode = unpack_episode(decode_episode_packet(packet))
 
@@ -95,6 +95,6 @@ class TestEpisodeCodec:
         ]
         raw_payload = pickle.dumps(long_episode, protocol=pickle.HIGHEST_PROTOCOL)
 
-        packet = encode_episode_batch(0, 1, pack_episode(long_episode))
+        packet = encode_episode_batch(0, 1, pack_episode(long_episode), 0)
 
         assert len(packet.payload) < len(raw_payload)
